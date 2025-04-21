@@ -3,7 +3,7 @@
 <title>OpAMP Python Server - System Overview</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 
-<link rel="stylesheet" href="css/w3.css">
+<link rel="stylesheet" href="/static/css/w3.css">
 
 <div class="w3-container">
     <h1>System Overview</h1>
@@ -11,7 +11,10 @@
 
 <div class="w3-container">
     <h2>Status: {{ status | capitalize }} ✅</h2>
-    <p>Agents Connected: {{ connected_agents }}</p>
+    <p><a role="button" class="w3-btn w3-black" href="/agents">Agents Connected
+        <span class="w3-badge w3-margin-left w3-green">1</span>
+        </a>
+    </p>
 </div>
 
 <div class="w3-container">

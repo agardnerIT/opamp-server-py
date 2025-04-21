@@ -1,9 +1,9 @@
 <!DOCTYPE html>
 <html>
-<title>OpAMP Python Server - System Overview</title>
+<title>OpAMP Python Server - Agents Overview</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 
-<link rel="stylesheet" href="static/css/w3.css">
+<link rel="stylesheet" href="/static/css/w3.css">
 
 <div class="w3-container">
     <h1>Agents Overview</h1>
@@ -11,24 +11,21 @@
 </div>
 
 <div class="w3-container">
-    <table class="w3-table w3-striped w3-bordered">
+    <table class="w3-table-all">
     <tr>
         <th>Agent ID</th>
         <th>Healthy</th>
         <th>Tags</th>
-        <th>Agent Description</th>
     </tr>
     {% for agent in agent_list %}
     <tr>
-        <td><a href="{{ url_for('get_agent_details', agent_id=agent.id) }}">Agent ID: {{ agent.id }}</a></td>
-        {% set agent_status_glyph = "✅" if agent.latest_message['health']['healthy'] == True else "❌" %}
-        <td>{{ agent_status_glyph }}</td>
+        <td><a href="{{ url_for('get_agent_details', agent_id=agent.id) }}">{{ agent.id }}</a></td>
+        <td>{{ agent.health_glyph }}</td>
         <td>
-        {% for item in agent.description.identifying_attributes %}
-          {{ item.key ~ ": " ~ item.value }}
+        {% for item in agent.tags %}
+          <span class="w3-tag w3-black w3-tiny">{{ item.key }}</span><span class="w3-tag w3-blue w3-tiny">{{ item.value }}</span>
         {% endfor%}
         </td>
-        <td>{{ agent.description }}</td>
     </tr>
     {% endfor %}
     </table>

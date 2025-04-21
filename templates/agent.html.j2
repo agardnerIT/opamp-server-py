@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html>
+<title>Agent Overview</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<link rel="stylesheet" href="/static/css/w3.css">
+
+<div class="w3-container">
+    <h1>Agent Overview</h1>
+
+    <ul class="w3-ul w3-border">
+        <li>Agent ID: {{ agent.id }}</li>
+        <li>Start Time: {{ agent.latest_message.health.startTimeUnixNano | format_unix_time }}</li>
+        <li>Latest Update Time: {{ agent.latest_message.health.statusTimeUnixNano | format_unix_time }}</li>
+        <li>Health Status: {{ agent.health_glyph }}</li>
+        <li>Tags: {% for item in agent.tags %}
+          <span class="w3-tag w3-black w3-tiny">{{ item.key }}</span><span class="w3-tag w3-blue w3-tiny">{{ item.value }}</span>
+        {% endfor%}</li>
+    </ul>
+
+    <div class="w3-container">
+    <h2>Pipelines</h2>
+
+    {% for key in agent.latest_message.health.componentHealthMap %}
+     {% if key.startswith("pipeline:") %}
+       <h3>{{ key }}</h3>
+       <h4>Components</h4>
+       <div class="w3-row">
+            <div class="w3-third w3-container w3-green">
+                <h5>Receivers</h5>
+                {% for subkey in agent.latest_message.health.componentHealthMap[key].componentHealthMap %}
+                  {% if subkey.startswith("receiver:")%}
+                    {{ subkey }}
+                  {% endif %}
+                {% endfor %}
+            </div>
+            <div class="w3-third w3-container w3-blue">
+                <h5>Processors</h5>
+                {% for subkey in agent.latest_message.health.componentHealthMap[key].componentHealthMap %}
+                  {% if subkey.startswith("processor:")%}
+                    {{ subkey }}
+                  {% endif %}
+                {% endfor %}
+            </div>
+            <div class="w3-third w3-container w3-black">
+                <h5>Exporters</h5>
+                {% for subkey in agent.latest_message.health.componentHealthMap[key].componentHealthMap %}
+                  {% if subkey.startswith("exporter:")%}
+                    {{ subkey }}
+                  {% endif %}
+                {% endfor %}
+            </div>
+        </div>
+     {% endif %}
+    {% endfor %}
+    
+</div>
+</div>

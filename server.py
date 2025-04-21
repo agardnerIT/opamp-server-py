@@ -7,6 +7,9 @@ import binascii
 from google.protobuf.json_format import MessageToDict
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 AGENT_STATES: Dict[str, object] = {}
 
 app = FastAPI()
@@ -31,9 +34,8 @@ async def opamp_endpoint(request: Request):
         # Build a generic response
         # Process message and generate response
         response = opamp_pb2.ServerToAgent()
-        # logger.info("GOT HERE 4")
+
         response.instance_uid = agent_msg.instance_uid
-        # logger.info("GOT HERE 5")
         response.capabilities = (
                 opamp_pb2.ServerCapabilities.ServerCapabilities_AcceptsStatus &
                 opamp_pb2.ServerCapabilities.ServerCapabilities_AcceptsEffectiveConfig &
@@ -75,34 +77,6 @@ async def opamp_endpoint(request: Request):
     # Return binary protobuf response with correct content type
     return Response(content=response.SerializeToString(), media_type="application/x-protobuf")
 
-# def create_handshake_response(agent_msg: opamp_pb2.AgentToServer) -> opamp_pb2.ServerToAgent:
-#     """Create initial handshake response"""
-
-#     logger.info("Handing handshake response")
-
-#     response = opamp_pb2.ServerToAgent()
-#     response.instance_uid = agent_msg.instance_uid
-    
-#     # Set server capabilities
-#     response.capabilities = (opamp_pb2.ServerCapabilities.ServerCapabilities_AcceptsStatus)
-#     logger.info("Request a full state from agent...")
-#     response.flags = (opamp_pb2.ServerToAgentFlags.ServerToAgentFlags_ReportFullState)
-
-#     logger.info("Sending handshake response")
-    
-#     return response
-
-# def handle_config_status(agent_msg: opamp_pb2.AgentToServer) -> opamp_pb2.ServerToAgent:
-#     """Handle configuration status updates"""
-
-#     logger.info("Handing config status")
-
-#     response = opamp_pb2.ServerToAgent()
-#     response.instance_uid = agent_msg.instance_uid
-    
-#     # Here you would compare config hashes and send updates if needed
-#     return response
-
 ##############################################
 # ENDPOINTS
 ##############################################
@@ -115,28 +89,118 @@ def health_check(request: Request):
 
 @app.get("/agents")
 def show_all_agents(request: Request):
-    agent_list = []
-    for agent_id in AGENT_STATES.keys():
-
-        #logger.info(type(AGENT_STATES[agent_id]['latest_message']))
-
-        agent = {
-            "id": agent_id,
-            "description": AGENT_STATES[agent_id]['agent_description'],
-            "latest_message": AGENT_STATES[agent_id]['latest_message']
-        }
-        agent_list.append(agent)
+    agent_list = get_agent_or_agents(filter="ALL")
 
     return templates.TemplateResponse(request=request, name="agents.html.j2", context={"agent_list": agent_list})
 
 @app.get("/agent/{agent_id}")
-def get_agent_details(agent_id: str):
-    agent = {}
-    try:
-        agent = AGENT_STATES[agent_id]
-    except:
-        agent = {}
+def get_agent_details(request: Request, agent_id: str):
+    agent = get_agent_or_agents(filter=agent_id)
+    logger.info(f"Agent == {agent}")
 
-    logger.info(f"Agent is: {agent}")
+    # for agent_id in AGENT_STATES.keys():
+    #     agent = {
+    #         "id": agent_id,
+    #         "health_glyph": agent_health_status_glyph,
+    #         "tags": tags,
+    #         "description": AGENT_STATES[agent_id]['agent_description'],
+    #         "latest_message": AGENT_STATES[agent_id]['latest_message']
+    #     }
+    #     agent_list.append(agent)
+
+    # logger.info("GOT HERE 1")
+    # try:
+    #     agent_obj = AGENT_STATES[agent_id]
+    #     logger.info(f"Agent ID: {agent_obj['id']}")
+    # except:
+    #     logger.info("GOT EXCEPTION")
+    #     agent = {}
+
+    #agent_latest_message = agent['latest_message']
+    # Agent first seen
+    #agent_health_details = agent['latest_message']['health']['startTimeUnixNano']
+
+    return templates.TemplateResponse(request=request, name="agent.html.j2", context={"agent": agent})
+
+def get_agent_or_agents(filter="ALL"):
+
+    agent_list = []
+
+    for agent_id in AGENT_STATES.keys():
+
+        # Skip this agent unless building ALL agents list
+        # and the agent_id doesn't match
+        if filter != "ALL" and agent_id != filter: continue
+
+        # Determine agent health and set appropriate glyph
+        agent_health_status_glyph = "❌"
+        agent_health_status_bool = AGENT_STATES[agent_id]['latest_message']['health']['healthy']
+        if agent_health_status_bool: agent_health_status_glyph = "✅"
+
+        agent_identifying_attributes = AGENT_STATES[agent_id]['agent_description']['identifyingAttributes']
+        agent_non_identifying_attributes = AGENT_STATES[agent_id]['agent_description']['nonIdentifyingAttributes']
+        tags = []
+
+        for item in agent_identifying_attributes:
+            attr_key = item['key']
+            # attr_value_type = next(iter(item['value'].keys()))
+            attr_value = next(iter(item['value'].values()))
+
+            # Special treatment for service.instance.id
+            # Ignore it because it's already used int he first column
+            if attr_key == "service.instance.id": continue
+
+            tags.append({
+                "key": attr_key,
+                "value": attr_value,
+                "identifying": True
+            })
         
-    return agent
+        for item in agent_non_identifying_attributes:
+            attr_key = item['key']
+            attr_value_type = next(iter(item['value'].keys()))
+            attr_value = next(iter(item['value'].values()))
+
+            # Special treatment for service.instance.id
+            # Ignore it because it's already used int he first column
+            if attr_key == "service.instance.id": continue
+
+            tags.append({
+                "key": attr_key,
+                "value": attr_value,
+                "identifying": False
+            })
+
+        agent = {
+            "id": agent_id,
+            "health_glyph": agent_health_status_glyph,
+            "tags": tags,
+            "description": AGENT_STATES[agent_id]['agent_description'],
+            "latest_message": AGENT_STATES[agent_id]['latest_message']
+        }
+
+        agent_list.append(agent)
+
+    # Returning only one agent?
+    # Send the single record back
+    # Otherwise send a list
+    if filter != "ALL" and len(agent_list) == 1: return agent_list[0]
+    else:
+        return agent_list
+
+
+###################################
+# Custom jinja2 filters
+def format_unix_time(input: str):
+
+    # Convert to UTC first
+    dt_utc = datetime.fromtimestamp(int(input) / 1e9, tz=ZoneInfo("UTC"))
+
+    # Convert to AEST (UTC+10)
+    dt_aest = dt_utc.astimezone(ZoneInfo("Australia/Sydney"))  # Sydney uses AEST/AEDT
+
+    print(dt_aest.strftime("%Y-%m-%d %H:%M:%S.%f %Z"))
+    return dt_aest
+
+# Add filter to jinja app / template
+templates.env.filters["format_unix_time"] = format_unix_time

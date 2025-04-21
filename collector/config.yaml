@@ -9,7 +9,7 @@ extensions:
       #     insecure: true
       http:
         endpoint: http://127.0.0.1:4320/v1/opamp
-        polling_interval: 10s
+        polling_interval: 5s
     #instance_uid: "1234abcd-8909-4fe9-aff9-b16893516467" # optional
     agent_description:
       non_identifying_attributes:
@@ -26,7 +26,7 @@ exporters:
 service:
   extensions: [opamp]  # Enable the OpAMP extension
   pipelines:
-    logs:
+    logs/blah:
       receivers: [filelog]
       processors: []
       exporters: [debug]

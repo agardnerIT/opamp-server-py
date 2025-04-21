@@ -15,6 +15,7 @@ app = FastAPI()
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
 
+# Data comes in from agents to this endpoint
 @app.post("/v1/opamp")
 async def opamp_endpoint(request: Request):
     # Read the binary protobuf data from the request
@@ -40,54 +41,67 @@ async def opamp_endpoint(request: Request):
                 opamp_pb2.ServerCapabilities.ServerCapabilities_AcceptsPackagesStatus
         )
 
-        # Handle initial handshake
+        # An agent is self-reporting its description
+        # Store it
         if agent_msg.HasField("agent_description"):
             logger.info("Got a new agent_description. Will update it.")
             # START WORKS
             AGENT_STATES[agent_id] = {
-                "agent_description": agent_msg.agent_description,
-                "latest_message": agent_msg
+                "agent_description": MessageToDict(agent_msg.agent_description),
+                "latest_message": MessageToDict(agent_msg)
             }
             #logger.info("handshake_response required")
+        # An agent is self-reporting its current live "effective" config
+        # Store it
         elif agent_msg.HasField("effective_config"):
             logger.info("Got a new effective config...")
-            # TODO: Only request full config if we don't have it. More checks required here.
-            response.flags = (opamp_pb2.ServerToAgentFlags.ServerToAgentFlags_ReportFullState)
-            #logger.info(type(agent_msg.effective_config))
-        
+
+            # An agent is reporting config, but we aren't yet tracking the agent
+            # Request that it resends the full state
+            if agent_id not in AGENT_STATES.keys():
+                response.flags = (opamp_pb2.ServerToAgentFlags.ServerToAgentFlags_ReportFullState)
+        # Agents can send "keep alive" messages that only contain the agent_id
+        # If such a message is received AND we aren't already aware of this agent_id
+        # As the agent to send a fresh, full state
+        # So then we can properly track it.
+        # This can happen if an agent is already running when the server is restarted.
+        else:
+            if not agent_id in AGENT_STATES.keys():
+                logger.info(f"{agent_id} is not yet tracked. Requesting Agent to report full state")
+                response.flags = (opamp_pb2.ServerToAgentFlags.ServerToAgentFlags_ReportFullState)
     except Exception as e:
         logger.error(f"Error processing OpAMP message: {e}")
     
     # Return binary protobuf response with correct content type
     return Response(content=response.SerializeToString(), media_type="application/x-protobuf")
 
-def create_handshake_response(agent_msg: opamp_pb2.AgentToServer) -> opamp_pb2.ServerToAgent:
-    """Create initial handshake response"""
+# def create_handshake_response(agent_msg: opamp_pb2.AgentToServer) -> opamp_pb2.ServerToAgent:
+#     """Create initial handshake response"""
 
-    logger.info("Handing handshake response")
+#     logger.info("Handing handshake response")
 
-    response = opamp_pb2.ServerToAgent()
-    response.instance_uid = agent_msg.instance_uid
+#     response = opamp_pb2.ServerToAgent()
+#     response.instance_uid = agent_msg.instance_uid
     
-    # Set server capabilities
-    response.capabilities = (opamp_pb2.ServerCapabilities.ServerCapabilities_AcceptsStatus)
-    logger.info("Request a full state from agent...")
-    response.flags = (opamp_pb2.ServerToAgentFlags.ServerToAgentFlags_ReportFullState)
+#     # Set server capabilities
+#     response.capabilities = (opamp_pb2.ServerCapabilities.ServerCapabilities_AcceptsStatus)
+#     logger.info("Request a full state from agent...")
+#     response.flags = (opamp_pb2.ServerToAgentFlags.ServerToAgentFlags_ReportFullState)
 
-    logger.info("Sending handshake response")
+#     logger.info("Sending handshake response")
     
-    return response
+#     return response
 
-def handle_config_status(agent_msg: opamp_pb2.AgentToServer) -> opamp_pb2.ServerToAgent:
-    """Handle configuration status updates"""
+# def handle_config_status(agent_msg: opamp_pb2.AgentToServer) -> opamp_pb2.ServerToAgent:
+#     """Handle configuration status updates"""
 
-    logger.info("Handing config status")
+#     logger.info("Handing config status")
 
-    response = opamp_pb2.ServerToAgent()
-    response.instance_uid = agent_msg.instance_uid
+#     response = opamp_pb2.ServerToAgent()
+#     response.instance_uid = agent_msg.instance_uid
     
-    # Here you would compare config hashes and send updates if needed
-    return response
+#     # Here you would compare config hashes and send updates if needed
+#     return response
 
 ##############################################
 # ENDPOINTS
@@ -103,10 +117,13 @@ def health_check(request: Request):
 def show_all_agents(request: Request):
     agent_list = []
     for agent_id in AGENT_STATES.keys():
+
+        #logger.info(type(AGENT_STATES[agent_id]['latest_message']))
+
         agent = {
             "id": agent_id,
             "description": AGENT_STATES[agent_id]['agent_description'],
-            "latest_message": MessageToDict(AGENT_STATES[agent_id]['latest_message'])
+            "latest_message": AGENT_STATES[agent_id]['latest_message']
         }
         agent_list.append(agent)
 
@@ -114,16 +131,12 @@ def show_all_agents(request: Request):
 
 @app.get("/agent/{agent_id}")
 def get_agent_details(agent_id: str):
-    resp_obj = {}
+    agent = {}
+    try:
+        agent = AGENT_STATES[agent_id]
+    except:
+        agent = {}
 
-    for agent_id_key in AGENT_STATES.keys():
-        if agent_id_key != agent_id:
-            logger.info("Agent key does not match incoming agent")
-            continue
-        else:
-            logger.info("Found a match. Returning config")
-            logger.info(AGENT_STATES)
-            # logger.info(type(AGENT_STATES[agent_id_key]))
-            # resp_obj = AGENT_STATES[agent_id_key]
+    logger.info(f"Agent is: {agent}")
         
-    return resp_obj
+    return agent

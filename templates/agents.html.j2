@@ -15,6 +15,7 @@
     <tr>
         <th>Agent ID</th>
         <th>Healthy</th>
+        <th>Tags</th>
         <th>Agent Description</th>
     </tr>
     {% for agent in agent_list %}
@@ -22,6 +23,11 @@
         <td><a href="{{ url_for('get_agent_details', agent_id=agent.id) }}">Agent ID: {{ agent.id }}</a></td>
         {% set agent_status_glyph = "✅" if agent.latest_message['health']['healthy'] == True else "❌" %}
         <td>{{ agent_status_glyph }}</td>
+        <td>
+        {% for item in agent.description.identifying_attributes %}
+          {{ item.key ~ ": " ~ item.value }}
+        {% endfor%}
+        </td>
         <td>{{ agent.description }}</td>
     </tr>
     {% endfor %}

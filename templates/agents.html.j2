@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<title>OpAMP Python Server - System Overview</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<link rel="stylesheet" href="static/css/w3.css">
+
+<div class="w3-container">
+    <h1>Agents Overview</h1>
+    <h2>Agent Count: {{ agent_list | length }}</h2>
+</div>
+
+<div class="w3-container">
+    <table class="w3-table w3-striped w3-bordered">
+    <tr>
+        <th>Agent ID</th>
+        <th>Healthy</th>
+        <th>Agent Description</th>
+    </tr>
+    {% for agent in agent_list %}
+    <tr>
+        <td>{{ agent.id }}</td>
+        {% set agent_status_glyph = "✅" if agent.latest_message['health']['healthy'] == True else "❌" %}
+        <td>{{ agent_status_glyph }}</td>
+        <td>{{ agent.description }}</td>
+    </tr>
+    {% endfor %}
+    </table>
+</div>

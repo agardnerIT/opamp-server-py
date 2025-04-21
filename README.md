@@ -36,6 +36,12 @@ fastapi run server.py --host 127.0.0.1 --port 4320
 ## Sample Collector Config
 An agent (eg. collector) needs to be configured to connect to the server. [A sample configuration file is provided](https://github.com/agardnerIT/opamp-server-py/blob/main/collector/config.yaml).
 
+Download the contrib distribution binary (it has the [opamp extension](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/extension/opampextension) )into the root of this folder. 
+
 ```
-./otelcol-contrib --config=config.yaml
+./otelcol-contrib --config=collector/config.yaml
 ```
+
+Go to `http://localhost:4320` and see the agent overview.
+
+Go to `http://localhost:4320/agents` to see deeper info about each agent.

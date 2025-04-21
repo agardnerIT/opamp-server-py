@@ -7,7 +7,13 @@ The server offers the following endpoints:
 
 * `/v1/opamp` = Agents (eg. OpenTelemetry collectors) are configured to send data to this endpoint
 * `/` = The root path (eg. `http://127.0.0.1:4320/` offers an overview of the server and connected agents)
+  
+![image](https://github.com/user-attachments/assets/3b953c61-2b76-4173-b9ea-1e846f856a6c)
+
 * `/agents` = Offers a deeper overview of all connected agents
+
+![image](https://github.com/user-attachments/assets/2ee44967-deff-46d7-8247-b05db4a5226a)
+
 * `/agent/<agent-id>` = Offers a full overview of a single connected agent
 
 It is important to note that OpAMP is an open protocol for agents to connect to, and be managed by, servers. Any software can thus act as an agent and be managed at scale using OpAMP.

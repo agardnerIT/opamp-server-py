@@ -5,10 +5,15 @@ from typing import Dict
 from loguru import logger
 import binascii
 from google.protobuf.json_format import MessageToDict
-
+from fastapi.templating import Jinja2Templates
+from fastapi.staticfiles import StaticFiles
 AGENT_STATES: Dict[str, object] = {}
 
 app = FastAPI()
+
+# Mount static files and templates
+app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
 
 @app.post("/v1/opamp")
 async def opamp_endpoint(request: Request):
@@ -89,28 +94,23 @@ def handle_config_status(agent_msg: opamp_pb2.AgentToServer) -> opamp_pb2.Server
 ##############################################
 
 @app.get("/")
-def health_check():
-    return {"status": "running", "connected_agents": len(AGENT_STATES)}
+def health_check(request: Request):
+    return templates.TemplateResponse(
+        request=request, name="root.html.j2", context={"status": "running", "connected_agents": len(AGENT_STATES)}
+    )
 
 @app.get("/agents")
-def show_all_agents():
-    logger.info(f"Agent states type: {AGENT_STATES}")
-    resp_obj = {}
+def show_all_agents(request: Request):
+    agent_list = []
+    for agent_id in AGENT_STATES.keys():
+        agent = {
+            "id": agent_id,
+            "description": AGENT_STATES[agent_id]['agent_description'],
+            "latest_message": MessageToDict(AGENT_STATES[agent_id]['latest_message'])
+        }
+        agent_list.append(agent)
 
-    for item in AGENT_STATES.keys():
-        resp_obj[item] = {}
-        agent_description = AGENT_STATES[item]['agent_description']
-        logger.info(f"Agent Description: {type(agent_description)}")
-        logger.info(agent_description.identifying_attributes)
-
-        # Bugs here! Assumes string values
-        # TODO: Better checks
-        for identifying_attribute in agent_description.identifying_attributes:
-            resp_obj[item][identifying_attribute.key] = identifying_attribute.value.string_value
-        for non_identifying_attribute in agent_description.non_identifying_attributes:
-            resp_obj[item][non_identifying_attribute.key] = non_identifying_attribute.value.string_value
-
-    return resp_obj
+    return templates.TemplateResponse(request=request, name="agents.html.j2", context={"agent_list": agent_list})
 
 @app.get("/agent/{agent_id}")
 def get_agent_details(agent_id: str):

@@ -50,20 +50,17 @@ async def opamp_endpoint(request: Request):
             logger.info(f"{agent_id} is not yet tracked. Requesting Agent to report full state")
             response.flags = (opamp_pb2.ServerToAgentFlags.ServerToAgentFlags_ReportFullState)
             AGENT_STATES[agent_id] = {}
-        elif "agentDescription" in agent_msg_dict:
-            logger.info("Got a new agent_description. Will update it.")
+        # health is there, but it's empty. This is most likely the agent disconnecting...
+        if 'health' in agent_msg_dict and not agent_msg_dict['health']:
+            AGENT_STATES.pop(agent_id)
+        elif 'agentDescription' in agent_msg_dict or 'health' in agent_msg_dict or 'effectiveConfig' in agent_msg_dict:
+            logger.info(f"Updating details for {agent_id}")
             AGENT_STATES[agent_id] = {
-                "agent_description": MessageToDict(agent_msg.agent_description),
-                "latest_message": MessageToDict(agent_msg)
+                "details": agent_msg_dict
             }
-        elif "agentDescription" not in agent_msg_dict:
-            logger.info("Heartbeat update received (an OpAMP message with a UID but no description). Do nothing.")
         else: # Already aware of the agent. Update config
-            AGENT_STATES[agent_id] = {
-                "agent_description": MessageToDict(agent_msg.agent_description),
-                "latest_message": MessageToDict(agent_msg)
-            }
-
+            logger.info(f"Got empty heartbeart message for {agent_id}")
+            
         # OLD LOGIC BELOW
 
         # # An agent is self-reporting its description
@@ -144,17 +141,17 @@ def get_agent_or_agents(filter="ALL"):
         # Determine agent health and set appropriate glyph
         agent_health_status_glyph = "❌"
         try:
-            logger.info(AGENT_STATES[agent_id]['latest_message']['health'])
-            logger.info(AGENT_STATES[agent_id]['latest_message']['health']['healthy'])
-            agent_health_status_bool = AGENT_STATES[agent_id]['latest_message']['health']['healthy']
+            logger.info(AGENT_STATES[agent_id]['details']['health'])
+            logger.info(AGENT_STATES[agent_id]['details']['health']['healthy'])
+            agent_health_status_bool = AGENT_STATES[agent_id]['details']['health']['healthy']
         except:
             agent_health_status_bool = False
             logger.warning("Agent had no healhy field. TODO: Investigate why")
         if agent_health_status_bool: agent_health_status_glyph = "✅"
 
         try:
-            agent_identifying_attributes = AGENT_STATES[agent_id]['agent_description']['identifyingAttributes']
-            agent_non_identifying_attributes = AGENT_STATES[agent_id]['agent_description']['nonIdentifyingAttributes']
+            agent_identifying_attributes = AGENT_STATES[agent_id]['details']['agentDescription']['identifyingAttributes']
+            agent_non_identifying_attributes = AGENT_STATES[agent_id]['details']['agentDescription']['nonIdentifyingAttributes']
         except:
             logger.warning("Caught an exception")
         tags = []
@@ -193,8 +190,7 @@ def get_agent_or_agents(filter="ALL"):
             "id": agent_id,
             "health_glyph": agent_health_status_glyph,
             "tags": tags,
-            "description": AGENT_STATES[agent_id]['agent_description'],
-            "latest_message": AGENT_STATES[agent_id]['latest_message']
+            "details": AGENT_STATES[agent_id]['details']
         }
 
         agent_list.append(agent)

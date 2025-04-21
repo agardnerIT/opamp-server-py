@@ -8,11 +8,13 @@ The server offers the following endpoints:
 * `/v1/opamp` = Agents (eg. OpenTelemetry collectors) are configured to send data to this endpoint
 * `/` = The root path (eg. `http://127.0.0.1:4320/` offers an overview of the server and connected agents)
   
-![image](https://github.com/user-attachments/assets/3b953c61-2b76-4173-b9ea-1e846f856a6c)
+![image](https://github.com/user-attachments/assets/d76d1d89-1632-41be-90df-c99a2120f4aa)
+
 
 * `/agents` = Offers a deeper overview of all connected agents
 
-![image](https://github.com/user-attachments/assets/2ee44967-deff-46d7-8247-b05db4a5226a)
+![image](https://github.com/user-attachments/assets/49ae48c4-eb97-45bd-b6e9-95cc4c413488)
+
 
 * `/agent/<agent-id>` = Offers a full overview of a single connected agent
 

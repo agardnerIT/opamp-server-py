@@ -28,6 +28,8 @@ async def opamp_endpoint(request: Request):
         # Parse the incoming message
         agent_msg = opamp_pb2.AgentToServer()
         agent_msg.ParseFromString(data)
+        agent_msg_dict = MessageToDict(agent_msg)
+        logger.info(agent_msg_dict)
 
         agent_id = binascii.hexlify(agent_msg.instance_uid).decode('utf-8')
 
@@ -43,34 +45,60 @@ async def opamp_endpoint(request: Request):
                 opamp_pb2.ServerCapabilities.ServerCapabilities_AcceptsPackagesStatus
         )
 
-        # An agent is self-reporting its description
-        # Store it
-        if agent_msg.HasField("agent_description"):
+        # NEW LOGIC
+        if not agent_id in AGENT_STATES.keys():
+            logger.info(f"{agent_id} is not yet tracked. Requesting Agent to report full state")
+            response.flags = (opamp_pb2.ServerToAgentFlags.ServerToAgentFlags_ReportFullState)
+            AGENT_STATES[agent_id] = {}
+        elif "agentDescription" in agent_msg_dict:
             logger.info("Got a new agent_description. Will update it.")
-            # START WORKS
             AGENT_STATES[agent_id] = {
                 "agent_description": MessageToDict(agent_msg.agent_description),
                 "latest_message": MessageToDict(agent_msg)
             }
-            #logger.info("handshake_response required")
-        # An agent is self-reporting its current live "effective" config
-        # Store it
-        elif agent_msg.HasField("effective_config"):
-            logger.info("Got a new effective config...")
+        elif "agentDescription" not in agent_msg_dict:
+            logger.info("Heartbeat update received (an OpAMP message with a UID but no description). Do nothing.")
+        else: # Already aware of the agent. Update config
+            AGENT_STATES[agent_id] = {
+                "agent_description": MessageToDict(agent_msg.agent_description),
+                "latest_message": MessageToDict(agent_msg)
+            }
 
-            # An agent is reporting config, but we aren't yet tracking the agent
-            # Request that it resends the full state
-            if agent_id not in AGENT_STATES.keys():
-                response.flags = (opamp_pb2.ServerToAgentFlags.ServerToAgentFlags_ReportFullState)
-        # Agents can send "keep alive" messages that only contain the agent_id
-        # If such a message is received AND we aren't already aware of this agent_id
-        # As the agent to send a fresh, full state
-        # So then we can properly track it.
-        # This can happen if an agent is already running when the server is restarted.
-        else:
-            if not agent_id in AGENT_STATES.keys():
-                logger.info(f"{agent_id} is not yet tracked. Requesting Agent to report full state")
-                response.flags = (opamp_pb2.ServerToAgentFlags.ServerToAgentFlags_ReportFullState)
+        # OLD LOGIC BELOW
+
+        # # An agent is self-reporting its description
+        # # Store it
+        # if agent_msg.HasField("agent_description"):
+        #     logger.info("Got a new agent_description. Will update it.")
+        #     # START WORKS
+        #     AGENT_STATES[agent_id] = {
+        #         "agent_description": MessageToDict(agent_msg.agent_description),
+        #         "latest_message": MessageToDict(agent_msg)
+        #     }
+        #     #logger.info("handshake_response required")
+        # # An agent is self-reporting its current live "effective" config
+        # # Store it
+        # elif agent_msg.HasField("effective_config"):
+        #     logger.info("Got a new effective config...")
+
+        #     # An agent is reporting config, but we aren't yet tracking the agent
+        #     # Request that it resends the full state
+        #     if agent_id not in AGENT_STATES.keys():
+        #         response.flags = (opamp_pb2.ServerToAgentFlags.ServerToAgentFlags_ReportFullState)
+        # # Agent is still starting
+        # # Request a full health config
+        # elif agent_msg_dict['health']['status'] is not None and agent_msg_dict['health']['status'] == "StatusStarting":
+        #     logger.info("Agent is still starting. Request full report")
+        #     response.flags = (opamp_pb2.ServerToAgentFlags.ServerToAgentFlags_ReportFullState)
+        # # Agents can send "keep alive" messages that only contain the agent_id
+        # # If such a message is received AND we aren't already aware of this agent_id
+        # # As the agent to send a fresh, full state
+        # # So then we can properly track it.
+        # # This can happen if an agent is already running when the server is restarted.
+        # else:
+        #     if not agent_id in AGENT_STATES.keys():
+        #         logger.info(f"{agent_id} is not yet tracked. Requesting Agent to report full state")
+        #         response.flags = (opamp_pb2.ServerToAgentFlags.ServerToAgentFlags_ReportFullState)
     except Exception as e:
         logger.error(f"Error processing OpAMP message: {e}")
     
@@ -96,31 +124,12 @@ def show_all_agents(request: Request):
 @app.get("/agent/{agent_id}")
 def get_agent_details(request: Request, agent_id: str):
     agent = get_agent_or_agents(filter=agent_id)
-    logger.info(f"Agent == {agent}")
-
-    # for agent_id in AGENT_STATES.keys():
-    #     agent = {
-    #         "id": agent_id,
-    #         "health_glyph": agent_health_status_glyph,
-    #         "tags": tags,
-    #         "description": AGENT_STATES[agent_id]['agent_description'],
-    #         "latest_message": AGENT_STATES[agent_id]['latest_message']
-    #     }
-    #     agent_list.append(agent)
-
-    # logger.info("GOT HERE 1")
-    # try:
-    #     agent_obj = AGENT_STATES[agent_id]
-    #     logger.info(f"Agent ID: {agent_obj['id']}")
-    # except:
-    #     logger.info("GOT EXCEPTION")
-    #     agent = {}
-
-    #agent_latest_message = agent['latest_message']
-    # Agent first seen
-    #agent_health_details = agent['latest_message']['health']['startTimeUnixNano']
 
     return templates.TemplateResponse(request=request, name="agent.html.j2", context={"agent": agent})
+
+@app.get("/debug")
+def debug():
+    return AGENT_STATES
 
 def get_agent_or_agents(filter="ALL"):
 
@@ -134,11 +143,20 @@ def get_agent_or_agents(filter="ALL"):
 
         # Determine agent health and set appropriate glyph
         agent_health_status_glyph = "❌"
-        agent_health_status_bool = AGENT_STATES[agent_id]['latest_message']['health']['healthy']
+        try:
+            logger.info(AGENT_STATES[agent_id]['latest_message']['health'])
+            logger.info(AGENT_STATES[agent_id]['latest_message']['health']['healthy'])
+            agent_health_status_bool = AGENT_STATES[agent_id]['latest_message']['health']['healthy']
+        except:
+            agent_health_status_bool = False
+            logger.warning("Agent had no healhy field. TODO: Investigate why")
         if agent_health_status_bool: agent_health_status_glyph = "✅"
 
-        agent_identifying_attributes = AGENT_STATES[agent_id]['agent_description']['identifyingAttributes']
-        agent_non_identifying_attributes = AGENT_STATES[agent_id]['agent_description']['nonIdentifyingAttributes']
+        try:
+            agent_identifying_attributes = AGENT_STATES[agent_id]['agent_description']['identifyingAttributes']
+            agent_non_identifying_attributes = AGENT_STATES[agent_id]['agent_description']['nonIdentifyingAttributes']
+        except:
+            logger.warning("Caught an exception")
         tags = []
 
         for item in agent_identifying_attributes:

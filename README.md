@@ -2,4 +2,19 @@
 
 This in an OpenTelemetry OpAMP server and UI written in Python.
 
+The server listens on the standard port of 4320.
+The server offers the following endpoints:
+
+* `/v1/opamp` = Agents (eg. OpenTelemetry collectors) are configured to send data to this endpoint
+* `/` = The root path (eg. `http://127.0.0.1:4320/` offers an overview of the server and connected agents)
+* `/agents` = Offers a deeper overview of all connected agents
+* `/agent/<agent-id> = Offers a full overview of a single connected agent
+
 I encourage ideas, pull requests and documentation fixes - let's build together.
+
+## Run it
+
+```py
+pip install -r requirements.txt
+fastapi run server.py --host 127.0.0.1 --port 4320
+```

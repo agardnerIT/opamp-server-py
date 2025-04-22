@@ -9,6 +9,7 @@ from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from datetime import datetime
 from zoneinfo import ZoneInfo
+import base64
 
 AGENT_STATES: Dict[str, object] = {}
 
@@ -216,5 +217,9 @@ def format_unix_time(input: str):
     print(dt_aest.strftime("%Y-%m-%d %H:%M:%S.%f %Z"))
     return dt_aest
 
+def b64decode(input: str):
+    return base64.b64decode(input).decode('utf-8')
+
 # Add filter to jinja app / template
 templates.env.filters["format_unix_time"] = format_unix_time
+templates.env.filters["b64decode"] = b64decode

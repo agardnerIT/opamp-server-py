@@ -10,11 +10,34 @@ extensions:
       http:
         endpoint: http://127.0.0.1:4320/v1/opamp
         polling_interval: 5s
-    #instance_uid: "1234abcd-8909-4fe9-aff9-b16893516467" # optional
+    instance_uid: "1234abcd-8909-4fe9-aff9-b16893516467" # optional
     agent_description:
       non_identifying_attributes:
         "description": "A description here..."
         "foo": "bar"
+      # Feels like this should work, but doesn't
+      # https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/154ba2bb62b69490d765e560d5e2534497275d21/extension/opampextension/config.go#L57C48-L57C75
+      # include_resource_attributes: true
+    # https://opentelemetry.io/docs/specs/opamp/#agenttoservercapabilities
+    capabilities: #https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/154ba2bb62b69490d765e560d5e2534497275d21/extension/opampextension/config.go#L60
+      #reports_status: true
+      #accepts_remote_config: true
+      #accepts_packages: true
+      #reports_package_statuses: true
+      #reports_own_traces: true
+      #reports_own_metrics: true
+      #reports_own_logs: true
+      #accepts_op_amp_connection_settings: true
+      #accepts_other_connection_settings: true
+      reports_effective_config: true
+      #accepts_restart_command: true
+      reports_health: true # If agent doesn't report health, server will never learn about it
+      #reports_remote_config: false
+      #reports_heartbeat: true
+      reports_available_components: true
+      
+      
+
 receivers:
   filelog:
     include: [ file.log ]

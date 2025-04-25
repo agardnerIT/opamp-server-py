@@ -9,13 +9,12 @@
 function toggleAccordian(id) {
   var x = document.getElementById(id);
   if (x.className.indexOf("w3-show") == -1) {
+    console.log("Showing: " + id);
     x.className += " w3-show";
-  } else { 
+  } else {
+    console.log("Hiding: " + id);
     x.className = x.className.replace(" w3-show", "");
   }
-}
-function foobar() {
-  console.log("Clicked...");
 }
 </script>
 
@@ -23,7 +22,7 @@ function foobar() {
     <h1>Agent Overview</h1>
 
     <div class="w3-panel w3-pale-blue w3-leftbar w3-rightbar w3-border-green">
-      <ul class="w3-ul w3-border">
+      <ul class="w3-ul w3-border-all" style="flex-grow: 4">
           <li>Agent ID: {{ agent.id }}</li>
           <li>Health Status: {{ agent.health_glyph }}</li>
           <li>Start Time: {{ agent.details.health.startTimeUnixNano | format_unix_time }}</li>
@@ -32,7 +31,42 @@ function foobar() {
             <span class="w3-tag w3-black w3-tiny">{{ item.key }}</span><span class="w3-tag w3-blue w3-tiny">{{ item.value }}</span>
           {% endfor%}</li>
       </ul>
+
+      <h3>Agent Capabilities</h3>
+      <h4>Reporting</h4>
+      <p>These are the things the agent reports <strong>to</strong> the server</p>
+
+      <button onclick="toggleAccordian('agent_capabilities_reporting')" class="w3-btn w3-block w3-black">Reporting Capabilities (click to expand)</button>
+      <table id="agent_capabilities_reporting" class="w3-table-all w3-hide">
+        <th>Capability</th>
+        <th>Status</th>
+
+        {% for item in agent | get_reports_capabilities %}
+        <tr>
+          <td>{{ item["capability"] }}</td><td>{{ item["status"] }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+      <br />
+
+      <h4>Acceptance</h4>
+      <p>These are the things the agent accepts <strong>from</strong> the server</p>
+
+      <button onclick="toggleAccordian('agent_capabilities_acceptance')" class="w3-btn w3-block w3-black">Acceptance Capabilities (click to expand)</button>
+      <table id="agent_capabilities_acceptance" class="w3-table-all w3-hide">
+        <th>Capability</th>
+        <th>Status</th>
+
+        {% for item in agent | get_accepts_capabilities %}
+        <tr>
+          <td>{{ item["capability"] }}</td><td>{{ item["status"] }}</td>
+        </tr>
+        {% endfor %}
+      </table>
+      <br />
     </div>
+
+        
 
     <div class="w3-container">
     <h2>Pipelines</h2>
@@ -120,11 +154,77 @@ function foobar() {
 
     <button onclick="toggleAccordian('effectiveConfig')" class="w3-btn w3-block w3-black w3-left-align">Current Agent Configuration (click to expand)</button>
 
+    {% if agent.details.effectiveConfig %}
+
     <form id="effectiveConfig" action="#" method="POST" class="w3-container w3-hide">
       <textarea class="w3-input w3-block" rows="80">
       {{ agent.details.effectiveConfig.configMap.configMap[""].body | b64decode }}
       </textarea>
       <input class="w3-btn w3-black w3-block" type="button" value="Send Config (not working yet)">
     </form>
+
+    {% else %}
+
+    <div id="effectiveConfig" class="w3-panel w3-yellow w3-hide">
+        <h3>Agent does not report current configuration.</h3>
+        <p>To make use of this section, set <code>reports_effective_config</code> to <code>true</code> in your collector config.yaml like this:</p>
+        <pre>
+        <code>
+        extensions:
+          opamp:
+            ...
+            capabilities:
+              reports_effective_config: true
+        </code>
+        </pre>
+      </div>
+
+    {% endif %}
+  </div>
+
+  <div class="w3-container">
+    <h2>Agent Components</h2>
+
+    <button onclick="toggleAccordian('agentComponents')" class="w3-btn w3-block w3-black w3-left-align">Current Available Components (click to expand)</button>
+
+    <div id="agentComponents" class="w3-container w3-hide">
+      {% if agent.details.availableComponents %}
+      <p>This is a full list of available components reported to be built inside this agent. This does not mean that all of these components are active / used, only that they <i>could</i> be used.</p>
+      
+      {% for componentType in agent.details.availableComponents.components %}
+        <button onclick="toggleAccordian('{{ componentType }}')" class="w3-btn w3-block w3-black w3-left-align">{{ componentType }} (click to expand)</button>
+        
+        <div id="{{ componentType }}" class="w3-container w3-hide">
+          <h3>{{ componentType }}</h3>
+          <table class="w3-table-all">
+            <th>Component</th>
+            <th>Version</th>
+            {% for subComponent in agent.details.availableComponents.components[componentType].subComponentMap %}
+            <tr>
+              <td>{{ subComponent }}</td>
+              <td>{{ agent.details.availableComponents.components[componentType].subComponentMap[subComponent] | get_component_version }}</td>
+            </tr>
+            {% endfor %}
+          </table>
+        </div>
+      {% endfor %}
+      {% else %}
+      <div class="w3-panel w3-yellow">
+        <h3>Agent does not report components.</h3>
+        <p>To make use of this section, set <code>reports_available_components</code> to <code>true</code> in your collector config.yaml like this:</p>
+        <pre>
+        <code>
+        extensions:
+          opamp:
+            ...
+            capabilities:
+              reports_available_components: true
+        </code>
+        </pre>
+      </div>
+      {% endif %}
+
+    </div>
+
   </div>
 </div>

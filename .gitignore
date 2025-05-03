@@ -175,3 +175,8 @@ cython_debug/
 
 # Ignore OTEL Collector Binary
 otelcol-contrib
+
+# Ignore notes and temporary files
+notes.txt
+notes.md
+*temp*

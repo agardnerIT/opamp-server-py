@@ -31,7 +31,7 @@ async def opamp_endpoint(request: Request):
         agent_msg = opamp_pb2.AgentToServer()
         agent_msg.ParseFromString(data)
         agent_msg_dict = MessageToDict(agent_msg)
-        logger.info(agent_msg_dict)
+        #logger.info(agent_msg_dict)
 
         agent_id = binascii.hexlify(agent_msg.instance_uid).decode('utf-8')
 
@@ -53,19 +53,25 @@ async def opamp_endpoint(request: Request):
             response.flags = (opamp_pb2.ServerToAgentFlags.ServerToAgentFlags_ReportFullState)
             AGENT_STATES[agent_id] = {}
 
-            # Temp...
-            if agent_id == "1234abcd89094fe9aff9b16893516467":
-                logger.info(f"A target agent has just connected. Let's send new config!")
+            # # Temp...
+            # if agent_id == "1234abcd89094fe9aff9b16893516467":
+            #     logger.info(f"A target agent has just connected. Let's send new config!")
                 
-                with open("collector/remoteConfig.yaml") as f:
-                    file_content = yaml.load(f, Loader=yaml.SafeLoader)
-                    opamp_pb2.AgentRemoteConfig()
-                    agent_remote_config = opamp_pb2.AgentRemoteConfig(config=file_content)
-                    response.command( opamp_pb2.CommandType_Restart )
-                    response.remote_config = agent_remote_config
-
+            #     with open("collector/remoteConfig.yaml") as f:
+            #         file_content = yaml.load(f, Loader=yaml.SafeLoader)
+            #         opamp_pb2.AgentRemoteConfig()
+            #         agent_remote_config = opamp_pb2.AgentRemoteConfig(config=file_content)
+            #         response.command( opamp_pb2.CommandType_Restart )
+            #         response.remote_config = agent_remote_config
+        # According to the spec, the collector MUST send an agent disconnect message
+        if 'agent_disconnect' in agent_msg_dict:
+            logger.warning("-"*20)
+            logger.warn("Collector disconnecting now!")
+            logger.warning("-"*20)
         # health is there, but it's empty. This is most likely the agent disconnecting...
         if 'health' in agent_msg_dict and not agent_msg_dict['health']:
+            logger.info("health is in agent_msg_dict but is empty. Most likely agent is disconnecting.")
+            logger.info(agent_msg_dict)
             AGENT_STATES.pop(agent_id)
         elif 'agentDescription' in agent_msg_dict or 'health' in agent_msg_dict or 'effectiveConfig' in agent_msg_dict:
             #logger.info(f"Updating details for {agent_id}")
@@ -142,10 +148,6 @@ def get_agent_details(request: Request, agent_id: str):
 
     return templates.TemplateResponse(request=request, name="agent.html.j2", context={"agent": agent})
 
-@app.get("/debug")
-def debug():
-    return AGENT_STATES
-
 def get_agent_or_agents(filter="ALL"):
 
     agent_list = []
@@ -159,12 +161,12 @@ def get_agent_or_agents(filter="ALL"):
         # Determine agent health and set appropriate glyph
         agent_health_status_glyph = "NONE"
         try:
-            logger.info(AGENT_STATES[agent_id]['details']['health'])
-            logger.info(AGENT_STATES[agent_id]['details']['health']['healthy'])
+            #info(AGENT_STATES[agent_id]['details']['health'])
+            #logger.info(AGENT_STATES[agent_id]['details']['health']['healthy'])
             agent_health_status_bool = AGENT_STATES[agent_id]['details']['health']['healthy']
         except:
             agent_health_status_bool = False
-            logger.warning("Agent had no healhy field. TODO: Investigate why")
+            #logger.warning("Agent had no healhy field. TODO: Investigate why")
         agent_health_status_glyph = _glyphifize(agent_health_status_bool)
 
         tags = []

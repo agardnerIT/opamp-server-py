@@ -1,12 +1,6 @@
 extensions:
   opamp:
     server:
-      # ws:
-      #   endpoint: "wss://127.0.0.1:4320/v1/opamp"
-      #   # Disable verification to test locally.
-      #   # Don't do this in production.
-      #   tls:
-      #     insecure: true
       http:
         endpoint: http://127.0.0.1:4320/v1/opamp
         polling_interval: 5s

@@ -10,7 +10,10 @@ from fastapi.staticfiles import StaticFiles
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import base64
-import yaml
+
+# Usage
+# fastapi run server.py --host 127.0.0.1 --port 4320
+# Access UI at http://127.0.0.1/
 
 AGENT_STATES: Dict[str, object] = {}
 

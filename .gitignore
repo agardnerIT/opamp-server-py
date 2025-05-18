@@ -180,3 +180,6 @@ otelcol-contrib
 notes.txt
 notes.md
 *temp*
+
+# Ignore streamlit config files
+.streamlit

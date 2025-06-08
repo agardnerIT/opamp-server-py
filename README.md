@@ -35,15 +35,11 @@ There are currently 3 pages:
 
 ![single agent page](assets/agent.png)
 
-## Background Information on OpAMP
+Start the server with:
 
-It is important to note that OpAMP is an open protocol for agents to connect to, and be managed by, servers. Any software can thus act as an agent and be managed at scale using OpAMP.
-Hopefully, OpAMP offers a new vendor-neutral way to perform software upgrades, maintenance and patching.
-
-- Antivirus / security agents
-- Observability agents
-- Operating systems
-- Any other software that runs and requires periodic updates or configuration changes
+```
+streamlit run home.py --server.address 127.0.0.1 --server.port 8501
+```
 
 ## Sample Collector Config
 An agent (eg. collector) needs to be configured to connect to the server. [A sample configuration file is provided](https://github.com/agardnerIT/opamp-server-py/blob/main/collector/config.yaml).
@@ -57,3 +53,13 @@ Download the contrib distribution binary (it has the [opamp extension](https://g
 Go to `http://localhost:8501` and see the agent overview.
 
 Go to `http://localhost:8501/agents` to see deeper info about each agent.
+
+## Background Information on OpAMP
+
+It is important to note that OpAMP is an open protocol for agents to connect to, and be managed by, servers. Any software can thus act as an agent and be managed at scale using OpAMP.
+Hopefully, OpAMP offers a new vendor-neutral way to perform software upgrades, maintenance and patching.
+
+- Antivirus / security agents
+- Observability agents
+- Operating systems
+- Any other software that runs and requires periodic updates or configuration changes

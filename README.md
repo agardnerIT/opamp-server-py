@@ -1,5 +1,10 @@
 # OpAMP Server Python
 
+> [!IMPORTANT]
+> We're working on a brand new User Interface.
+> This work also seperates the backend server from the UI making the project more modular.
+> Check out the [new_ui](https://github.com/agardnerIT/opamp-server-py/tree/new_ui) branch.
+
 This in an [OpenTelemetry OpAMP](https://opentelemetry.io/docs/specs/opamp/) server and UI written in Python.
 
 The server listens on the standard port of 4320.

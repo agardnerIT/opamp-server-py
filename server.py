@@ -91,43 +91,6 @@ async def opamp_endpoint(request: Request):
             response.flags = (opamp_pb2.ServerToAgentFlags.ServerToAgentFlags_ReportFullState |
                               opamp_pb2.ServerCapabilities.ServerCapabilities_OffersRemoteConfig)
             
-            
-            
-        # OLD LOGIC BELOW
-
-        # # An agent is self-reporting its description
-        # # Store it
-        # if agent_msg.HasField("agent_description"):
-        #     logger.info("Got a new agent_description. Will update it.")
-        #     # START WORKS
-        #     AGENT_STATES[agent_id] = {
-        #         "agent_description": MessageToDict(agent_msg.agent_description),
-        #         "latest_message": MessageToDict(agent_msg)
-        #     }
-        #     #logger.info("handshake_response required")
-        # # An agent is self-reporting its current live "effective" config
-        # # Store it
-        # elif agent_msg.HasField("effective_config"):
-        #     logger.info("Got a new effective config...")
-
-        #     # An agent is reporting config, but we aren't yet tracking the agent
-        #     # Request that it resends the full state
-        #     if agent_id not in AGENT_STATES.keys():
-        #         response.flags = (opamp_pb2.ServerToAgentFlags.ServerToAgentFlags_ReportFullState)
-        # # Agent is still starting
-        # # Request a full health config
-        # elif agent_msg_dict['health']['status'] is not None and agent_msg_dict['health']['status'] == "StatusStarting":
-        #     logger.info("Agent is still starting. Request full report")
-        #     response.flags = (opamp_pb2.ServerToAgentFlags.ServerToAgentFlags_ReportFullState)
-        # # Agents can send "keep alive" messages that only contain the agent_id
-        # # If such a message is received AND we aren't already aware of this agent_id
-        # # As the agent to send a fresh, full state
-        # # So then we can properly track it.
-        # # This can happen if an agent is already running when the server is restarted.
-        # else:
-        #     if not agent_id in AGENT_STATES.keys():
-        #         logger.info(f"{agent_id} is not yet tracked. Requesting Agent to report full state")
-        #         response.flags = (opamp_pb2.ServerToAgentFlags.ServerToAgentFlags_ReportFullState)
     except Exception as e:
         logger.error(f"Error processing OpAMP message: {e}")
     
@@ -259,6 +222,7 @@ def get_capabilities(capability_request: CapabilityRequest):
 
     return capabilities
 
+
 def get_agent_or_agents(filter="ALL", include_details: bool=False):
 
     agent_list = []
@@ -343,7 +307,6 @@ def get_agent_or_agents(filter="ALL", include_details: bool=False):
         return agent_list[0]
     else:
         return agent_list
-
 
 ###################################
 # Custom jinja2 filters

@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 import pandas as pd
 from loguru import logger
+import base64
 
 USE_DIVIDERS = True
 
@@ -11,6 +12,7 @@ def get_agent(agent_id: str):
         return resp.json()
     else:
         return {}
+
 def get_capabilities(agent: object, type: str):
 
     body = {
@@ -24,6 +26,46 @@ def get_capabilities(agent: object, type: str):
         return resp.json()
     else:
         return {}
+
+def get_agent_component_types(agent: object):
+    component_types = []
+
+    if agent['details']['availableComponents']:
+        for ct in agent['details']['availableComponents']['components']:
+
+            type_name = ct
+
+            # Now get each item for each type
+            # Eg. For `extensions` look in the `subComponentMap` and get
+            # `zipkinencoding`, `asapclient` etc.
+
+            for subComponent in agent['details']['availableComponents']['components'][ct]['subComponentMap']:
+                #logger.info(f"Got [{type_name}] - {subComponent}")
+
+                # Extract version
+                dirty_value = agent['details']['availableComponents']['components'][ct]['subComponentMap'][subComponent]['metadata'][0]['value']['stringValue']
+                #logger.info(f"Dirty Value for {subComponent}: {dirty_value}")
+                dirty_value_parts = dirty_value.split(maxsplit=1)
+                version = dirty_value_parts[1]
+
+                component_types.append({
+                    "type": ct,
+                    "value": subComponent,
+                    "version": version
+                })
+    
+    return component_types
+
+def get_currently_effective_configuration(agent: object):
+    effective_config = "TODO"
+
+    if agent['details']['effectiveConfig']:
+        # The duplicate ref to configMap and an empty string
+        # is deliberate. Weird, I know, but that's how it currently comes from the collector
+        effective_config_dirty = agent['details']['effectiveConfig']['configMap']['configMap']['']['body']
+        effective_config = base64.b64decode(effective_config_dirty).decode("utf-8")
+    
+    return effective_config
 
 def count_pipelines(agent: object, filter: str):
     pipeline_count = 0
@@ -45,6 +87,10 @@ def count_pipelines(agent: object, filter: str):
                 elif filter.lower() == "traces" and pipeline_type == "traces":
                     pipeline_count += 1
     return pipeline_count
+
+###########################################################################################
+# START MAIN PAGE OUTPUT
+###########################################################################################
 
 st.title(f"Agent Details")
 
@@ -117,27 +163,21 @@ else:
 
                 with st.expander(label=f"{pipeline_name} (type={pipeline_type})", expanded=False, icon=pipeline_health_glyph):
                     st.text("This section is a work in progess.")
-        # with st.expander(label="Pipelines", expanded=False, icon=":material/route:"):
-        #     st.text("todo")
-        #     with st.expander(label="gfbkdsl", expanded=False):
-        #         st.text("inner")
         
-        with st.expander(label="Currently Active Configuration", expanded=False, icon=":material/tune:"):
-            st.text("This section is a work in progess.")
+        with st.expander(label="Currently Effective Configuration", expanded=False, icon=":material/tune:"):
+            effective_config = get_currently_effective_configuration(agent)
+            logger.info(type(effective_config))
+
+            st.text_area(label="Currently Effective Configuration", label_visibility="hidden", height=500, value=effective_config, disabled=True)
         
         st.subheader(body="Components", anchor="components", divider=USE_DIVIDERS)
 
-        logger.info(">>> Agent Details >>>")
-        logger.info(agent['details'])
-
         if agent['details']['availableComponents']:
-            st.text("This section is a work in progess.")
+            agent_component_types = get_agent_component_types(agent=agent)
+
+            df = pd.DataFrame(agent_component_types)
+            st.dataframe(data=df)
             
-            df = pd.DataFrame(agent['details']['availableComponents'])
-            st.dataframe(df, column_config={
-                "id": st.column_config.LinkColumn(label="Agent ID", display_text="agent/\?id=(\S+)"),
-                "tags": st.column_config.ListColumn(label="Tags", width="large", help="Double click values to expand")
-            }, hide_index=True)
         else:
             st.subheader(body="Agent does not report components")
             st.text("To make use of this section, set `reports_available_components` to `true`")
@@ -147,18 +187,3 @@ else:
                    capabilities:
                      reports_available_components: true
 """)
-        #     st.text("""<h3>Agent does not report components.</h3>
-        # <p>To make use of this section, set <code>reports_available_components</code> to <code>true</code> in your collector config.yaml like this:</p>
-        # <pre>
-        # <code>
-        # extensions:
-        #   opamp:
-        #     ...
-        #     capabilities:
-        #       reports_available_components: true
-        # </code>
-        # </pre>""")
-
-        with st.expander(label="Components List", expanded=False, icon=":material/tune:"):
-            number_of_components = len(agent)
-            st.text("This section is a work in progess.")

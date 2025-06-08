@@ -67,7 +67,6 @@ logger.info(agents)
 table_rows = []
 for entry in agents:
     # Step 1: Flatten tags into a dataframe
-    foo_tags = ["env: prod"]
     base = {
         'id': f"agent/?id={entry['id']}",
         'status': entry['health_glyph'],

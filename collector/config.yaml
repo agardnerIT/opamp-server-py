@@ -9,6 +9,7 @@ extensions:
       non_identifying_attributes:
         "description": "A description here..."
         "foo": "bar"
+        "agent.name": "Sample Collector"
       # Feels like this should work, but doesn't
       # https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/154ba2bb62b69490d765e560d5e2534497275d21/extension/opampextension/config.go#L57C48-L57C75
       # include_resource_attributes: true

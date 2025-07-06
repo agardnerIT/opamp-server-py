@@ -3,8 +3,17 @@ import requests
 import pandas as pd
 from loguru import logger
 import base64
+from streamlit_utils import *
 
 USE_DIVIDERS = True
+
+# This MUST be called first
+st.set_page_config(page_title=PAGE_TITLE_AGENTS)
+
+# just build the menu and run
+# Streamlit magic handles the rest of the logic
+# Sidebar navigation
+build_menu()
 
 def get_agent(agent_id: str):
     resp = requests.get(f"http://localhost:4320/agent/{agent_id}")
@@ -92,7 +101,7 @@ def count_pipelines(agent: object, filter: str):
 # START MAIN PAGE OUTPUT
 ###########################################################################################
 
-st.title(f"Agent Details")
+st.title(PAGE_TITLE_AGENT)
 
 if 'id' not in st.query_params:
     st.subheader("No Agent Found", divider=USE_DIVIDERS)

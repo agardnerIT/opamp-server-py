@@ -2,6 +2,15 @@ import streamlit as st
 import requests
 import pandas as pd
 from loguru import logger
+from streamlit_utils import *
+
+# This MUST be called first
+st.set_page_config(page_title=PAGE_TITLE_AGENTS)
+
+# just build the menu and run
+# Streamlit magic handles the rest of the logic
+# Sidebar navigation
+build_menu()
 
 def get_agents():
     resp = requests.get("http://localhost:4320/agents")
@@ -11,7 +20,7 @@ def get_agents():
         return list()
 
 agents = get_agents()
-st.title("Agents Overview")
+st.title(PAGE_TITLE_AGENTS)
 st.subheader(f"Agent Count: {len(agents)}")
 
 table_rows = []

@@ -9,6 +9,7 @@ The server listens on the standard port of 4320.
 The server offers the following endpoints:
 
 * `/v1/opamp` = Agents (eg. OpenTelemetry collectors) are configured to send data to this endpoint
+* `/metrics` = Prometheus endpoint for server metrics
 
 Start the server with:
 

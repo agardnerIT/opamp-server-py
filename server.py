@@ -11,6 +11,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 import base64
 from pydantic import BaseModel
+import prometheus_client as prom_client
 
 # Usage
 # fastapi run server.py --host 127.0.0.1 --port 4320
@@ -22,7 +23,21 @@ class CapabilityRequest(BaseModel):
 
 AGENT_STATES: Dict[str, object] = {}
 
+# Comment these out to show the relevant metrics on /metrics
+prom_client.REGISTRY.unregister(prom_client.PROCESS_COLLECTOR)
+prom_client.REGISTRY.unregister(prom_client.PLATFORM_COLLECTOR)
+prom_client.REGISTRY.unregister(prom_client.GC_COLLECTOR)
+
+PROM_METRIC_CONNECTED_AGENTS = prom_client.Gauge(name="connected_agents", documentation="The number of currently connected agents")
+
 app = FastAPI()
+# Tell Prometheus to create a sub-application and attach it at /metrics
+# It is this sub-application magic that
+# translates the Python into a readable Prometheus formatted metrics page
+# As mentioned above, you could also hardcode this as a static HTML page
+# The collector won't care :)
+metrics_app = prom_client.make_asgi_app()
+app.mount("/metrics", metrics_app)
 
 # Mount static files and templates
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -55,11 +70,15 @@ async def opamp_endpoint(request: Request):
                 opamp_pb2.ServerCapabilities.ServerCapabilities_AcceptsPackagesStatus
         )
 
-        # NEW LOGIC
         if not agent_id in AGENT_STATES.keys():
+            
+            
             logger.info(f"{agent_id} is not yet tracked. Requesting Agent to report full state")
             response.flags = (opamp_pb2.ServerToAgentFlags.ServerToAgentFlags_ReportFullState)
             AGENT_STATES[agent_id] = {}
+            metrics_set_connected_agent_value()
+            
+            # Set the prometheus value to the number of currently connected agents
 
             # # Temp...
             # if agent_id == "1234abcd89094fe9aff9b16893516467":
@@ -72,6 +91,7 @@ async def opamp_endpoint(request: Request):
             #         response.command( opamp_pb2.CommandType_Restart )
             #         response.remote_config = agent_remote_config
         # According to the spec, the collector MUST send an agent disconnect message
+        # But this is not yet implemented
         if 'agent_disconnect' in agent_msg_dict:
             logger.warning("-"*20)
             logger.warn("Collector disconnecting now!")
@@ -81,12 +101,17 @@ async def opamp_endpoint(request: Request):
             logger.info("health is in agent_msg_dict but is empty. Most likely agent is disconnecting.")
             logger.info(agent_msg_dict)
             AGENT_STATES.pop(agent_id)
+            # Set the prometheus value to the number of currently connected agents
+            metrics_set_connected_agent_value()
+        # Refresh the config for an existing agent
         elif 'agentDescription' in agent_msg_dict or 'health' in agent_msg_dict or 'effectiveConfig' in agent_msg_dict:
             #logger.info(f"Updating details for {agent_id}")
             AGENT_STATES[agent_id] = {
                 "details": agent_msg_dict
             }
-        else: # Already aware of the agent. Update config
+        # Already aware of the agent but heartbear was empty
+        # Inform the agent of what the server can offer
+        else:
             logger.info(f"Got empty heartbeart message for {agent_id}")
             response.flags = (opamp_pb2.ServerToAgentFlags.ServerToAgentFlags_ReportFullState |
                               opamp_pb2.ServerCapabilities.ServerCapabilities_OffersRemoteConfig)
@@ -343,6 +368,9 @@ def get_component_version(input: object):
 
 def _glyphifize(input: bool):
     return "✅" if input else "❌"
+
+def metrics_set_connected_agent_value():
+    PROM_METRIC_CONNECTED_AGENTS.set(value=len(AGENT_STATES))
 
 # Add filters to jinja app / template
 templates.env.filters["format_unix_time"] = format_unix_time

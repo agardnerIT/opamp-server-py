@@ -1,7 +1,7 @@
 # OpAMP Server Python
 
 > [!IMPORTANT]
-> We're working on a brand new User Interface.
+> If you're new to this project, we recommend jumping straight to the new UI (which will become the default UI soon)
 > This work also seperates the backend server from the UI making the project more modular.
 > Check out the [new_ui](https://github.com/agardnerIT/opamp-server-py/tree/new_ui) branch.
 

@@ -17,12 +17,18 @@ st.set_page_config(page_title=PAGE_TITLE_HOME)
 build_menu()
 
 st.title(PAGE_TITLE_HOME)
-st.subheader("Status: Running ✅")
 
-resp = requests.get("http://localhost:4320/agents")
+agents_connected = []
+try:
+    resp = requests.get("http://localhost:4320/agents")
+    agents_connected = 0
+    if resp.status_code == 200:
+        agents_connected = len(resp.json())
+        st.subheader("Status: Running ✅")
+        st.link_button(label=f"Agents Connected {agents_connected}", url="agents", type="primary")
+except:
+    st.subheader("Status: Server not available ⚠️")
+    st.text("Please start the server on localhost:4320")
 
-agents_connected = 0
-if resp.status_code == 200:
-    agents_connected = len(resp.json())
+    
 
-st.link_button(label=f"Agents Connected {agents_connected}", url="agents", type="primary")

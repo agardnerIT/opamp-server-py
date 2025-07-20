@@ -13,11 +13,15 @@ st.set_page_config(page_title=PAGE_TITLE_AGENTS)
 build_menu()
 
 def get_agents():
-    resp = requests.get("http://localhost:4320/agents")
-    if resp.status_code == 200:
-        return resp.json()
-    else:
-        return list()
+    try:
+        resp = requests.get("http://localhost:4320/agents")
+        
+        if resp.status_code == 200:
+            return resp.json()
+        else:
+            return list()
+    except:
+        logger.info("Server is not available...")
 
 agents = get_agents()
 st.title(PAGE_TITLE_AGENTS)

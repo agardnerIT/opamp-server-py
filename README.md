@@ -29,7 +29,7 @@ There are currently 3 pages:
 
 * `/` = The root path (eg. `http://127.0.0.1:8501/` offers an overview of the server and connected agents)
   
-![homepage page image](assets/root.png)
+![homepage page image](assets/homepage.png)
 
 * `/agents` = Offers a deeper overview of all connected agents
 
@@ -42,7 +42,7 @@ There are currently 3 pages:
 Start the server with:
 
 ```
-streamlit run home.py --server.address 127.0.0.1 --server.port 8501
+streamlit run streamlit_app.py --server.address 127.0.0.1 --server.port 8501
 ```
 
 ## Sample Collector Config

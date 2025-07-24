@@ -39,10 +39,6 @@ app = FastAPI()
 metrics_app = prom_client.make_asgi_app()
 app.mount("/metrics", metrics_app)
 
-# Mount static files and templates
-app.mount("/static", StaticFiles(directory="static"), name="static")
-templates = Jinja2Templates(directory="templates")
-
 # Data comes in from agents to this endpoint
 @app.post("/v1/opamp")
 async def opamp_endpoint(request: Request):
@@ -125,12 +121,6 @@ async def opamp_endpoint(request: Request):
 ##############################################
 # ENDPOINTS
 ##############################################
-
-@app.get("/")
-def health_check(request: Request):
-    return templates.TemplateResponse(
-        request=request, name="root.html.j2", context={"status": "running", "connected_agents": len(AGENT_STATES)}
-    )
 
 @app.get("/agents")
 def show_all_agents(request: Request):
@@ -371,10 +361,3 @@ def _glyphifize(input: bool):
 
 def metrics_set_connected_agent_value():
     PROM_METRIC_CONNECTED_AGENTS.set(value=len(AGENT_STATES))
-
-# Add filters to jinja app / template
-templates.env.filters["format_unix_time"] = format_unix_time
-templates.env.filters["b64decode"] = b64decode
-templates.env.filters["get_component_version"] = get_component_version
-#templates.env.filters["get_reports_capabilities"] = get_reports_capabilities
-#templates.env.filters["get_accepts_capabilities"] = get_accepts_capabilities

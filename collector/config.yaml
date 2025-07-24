@@ -4,11 +4,12 @@ extensions:
       http:
         endpoint: http://127.0.0.1:4320/v1/opamp
         polling_interval: 5s
-    instance_uid: "1234abcd-8909-4fe9-aff9-b16893516467" # optional
+    #instance_uid: "1234abcd-8909-4fe9-aff9-b16893516467" # optional
     agent_description:
       non_identifying_attributes:
         "description": "A description here..."
         "foo": "bar"
+        "agent.name": "Sample Collector"
       # Feels like this should work, but doesn't
       # https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/154ba2bb62b69490d765e560d5e2534497275d21/extension/opampextension/config.go#L57C48-L57C75
       # include_resource_attributes: true
@@ -33,17 +34,32 @@ extensions:
       
 
 receivers:
-  filelog:
+  filelog/test:
     include: [ file.log ]
+
+processors:
+  batch:
 
 exporters:
   debug:
     verbosity: detailed
 
+connectors:
+  count:
+    spanevents:
+      my.prod.event.count:
+        description: The number of span events from my prod environment.
+        conditions:
+          - 'attributes["env"] == "prod"'
+          - 'name == "prodevent"'
+
 service:
   extensions: [opamp]  # Enable the OpAMP extension
   pipelines:
     logs/blah:
-      receivers: [filelog]
-      processors: []
+      receivers: [filelog/test]
+      processors: [batch]
+      exporters: [debug, count]
+    metrics:
+      receivers: [count]
       exporters: [debug]

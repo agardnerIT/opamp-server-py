@@ -10,14 +10,34 @@ from fastapi.staticfiles import StaticFiles
 from datetime import datetime
 from zoneinfo import ZoneInfo
 import base64
+from pydantic import BaseModel
+import prometheus_client as prom_client
 
 # Usage
 # fastapi run server.py --host 127.0.0.1 --port 4320
 # Access UI at http://127.0.0.1/
 
+class CapabilityRequest(BaseModel):
+    agent_id: str
+    type: str
+
 AGENT_STATES: Dict[str, object] = {}
 
+# Comment these out to show the relevant metrics on /metrics
+prom_client.REGISTRY.unregister(prom_client.PROCESS_COLLECTOR)
+prom_client.REGISTRY.unregister(prom_client.PLATFORM_COLLECTOR)
+prom_client.REGISTRY.unregister(prom_client.GC_COLLECTOR)
+
+PROM_METRIC_CONNECTED_AGENTS = prom_client.Gauge(name="connected_agents", documentation="The number of currently connected agents")
+
 app = FastAPI()
+# Tell Prometheus to create a sub-application and attach it at /metrics
+# It is this sub-application magic that
+# translates the Python into a readable Prometheus formatted metrics page
+# As mentioned above, you could also hardcode this as a static HTML page
+# The collector won't care :)
+metrics_app = prom_client.make_asgi_app()
+app.mount("/metrics", metrics_app)
 
 # Mount static files and templates
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -50,11 +70,15 @@ async def opamp_endpoint(request: Request):
                 opamp_pb2.ServerCapabilities.ServerCapabilities_AcceptsPackagesStatus
         )
 
-        # NEW LOGIC
         if not agent_id in AGENT_STATES.keys():
+            
+            
             logger.info(f"{agent_id} is not yet tracked. Requesting Agent to report full state")
             response.flags = (opamp_pb2.ServerToAgentFlags.ServerToAgentFlags_ReportFullState)
             AGENT_STATES[agent_id] = {}
+            metrics_set_connected_agent_value()
+            
+            # Set the prometheus value to the number of currently connected agents
 
             # # Temp...
             # if agent_id == "1234abcd89094fe9aff9b16893516467":
@@ -67,6 +91,7 @@ async def opamp_endpoint(request: Request):
             #         response.command( opamp_pb2.CommandType_Restart )
             #         response.remote_config = agent_remote_config
         # According to the spec, the collector MUST send an agent disconnect message
+        # But this is not yet implemented
         if 'agent_disconnect' in agent_msg_dict:
             logger.warning("-"*20)
             logger.warn("Collector disconnecting now!")
@@ -76,53 +101,21 @@ async def opamp_endpoint(request: Request):
             logger.info("health is in agent_msg_dict but is empty. Most likely agent is disconnecting.")
             logger.info(agent_msg_dict)
             AGENT_STATES.pop(agent_id)
+            # Set the prometheus value to the number of currently connected agents
+            metrics_set_connected_agent_value()
+        # Refresh the config for an existing agent
         elif 'agentDescription' in agent_msg_dict or 'health' in agent_msg_dict or 'effectiveConfig' in agent_msg_dict:
             #logger.info(f"Updating details for {agent_id}")
             AGENT_STATES[agent_id] = {
                 "details": agent_msg_dict
             }
-        else: # Already aware of the agent. Update config
+        # Already aware of the agent but heartbear was empty
+        # Inform the agent of what the server can offer
+        else:
             logger.info(f"Got empty heartbeart message for {agent_id}")
             response.flags = (opamp_pb2.ServerToAgentFlags.ServerToAgentFlags_ReportFullState |
                               opamp_pb2.ServerCapabilities.ServerCapabilities_OffersRemoteConfig)
             
-            
-            
-        # OLD LOGIC BELOW
-
-        # # An agent is self-reporting its description
-        # # Store it
-        # if agent_msg.HasField("agent_description"):
-        #     logger.info("Got a new agent_description. Will update it.")
-        #     # START WORKS
-        #     AGENT_STATES[agent_id] = {
-        #         "agent_description": MessageToDict(agent_msg.agent_description),
-        #         "latest_message": MessageToDict(agent_msg)
-        #     }
-        #     #logger.info("handshake_response required")
-        # # An agent is self-reporting its current live "effective" config
-        # # Store it
-        # elif agent_msg.HasField("effective_config"):
-        #     logger.info("Got a new effective config...")
-
-        #     # An agent is reporting config, but we aren't yet tracking the agent
-        #     # Request that it resends the full state
-        #     if agent_id not in AGENT_STATES.keys():
-        #         response.flags = (opamp_pb2.ServerToAgentFlags.ServerToAgentFlags_ReportFullState)
-        # # Agent is still starting
-        # # Request a full health config
-        # elif agent_msg_dict['health']['status'] is not None and agent_msg_dict['health']['status'] == "StatusStarting":
-        #     logger.info("Agent is still starting. Request full report")
-        #     response.flags = (opamp_pb2.ServerToAgentFlags.ServerToAgentFlags_ReportFullState)
-        # # Agents can send "keep alive" messages that only contain the agent_id
-        # # If such a message is received AND we aren't already aware of this agent_id
-        # # As the agent to send a fresh, full state
-        # # So then we can properly track it.
-        # # This can happen if an agent is already running when the server is restarted.
-        # else:
-        #     if not agent_id in AGENT_STATES.keys():
-        #         logger.info(f"{agent_id} is not yet tracked. Requesting Agent to report full state")
-        #         response.flags = (opamp_pb2.ServerToAgentFlags.ServerToAgentFlags_ReportFullState)
     except Exception as e:
         logger.error(f"Error processing OpAMP message: {e}")
     
@@ -141,17 +134,121 @@ def health_check(request: Request):
 
 @app.get("/agents")
 def show_all_agents(request: Request):
-    agent_list = get_agent_or_agents(filter="ALL")
+    agent_list = get_agent_or_agents(filter="ALL", include_details=True)
 
-    return templates.TemplateResponse(request=request, name="agents.html.j2", context={"agent_list": agent_list})
+    return agent_list
 
 @app.get("/agent/{agent_id}")
-def get_agent_details(request: Request, agent_id: str):
-    agent = get_agent_or_agents(filter=agent_id)
+def get_agent_details(agent_id: str):
+    agent = get_agent_or_agents(filter=agent_id, include_details=True)
 
-    return templates.TemplateResponse(request=request, name="agent.html.j2", context={"agent": agent})
+    return agent
 
-def get_agent_or_agents(filter="ALL"):
+# TODO: This is horrible code. Re-do
+@app.post("/agent/capabilities")
+def get_capabilities(capability_request: CapabilityRequest):
+
+    agent_id = capability_request.agent_id
+    type = capability_request.type
+
+    agent = get_agent_or_agents(filter=agent_id, include_details=True)
+
+    capabilities = []
+    try:
+        capability_int = int(agent['details']['capabilities'])
+    except: # Agent hasn't reported capabilities yet (or perhaps never will)
+        return capabilities
+    
+    if type == "reports":
+        reports_status = (capability_int & 0x00000001) > 0
+        capabilities.append({
+            "capability": "reports_status",
+            "status": _glyphifize(reports_status)
+        })
+        reports_effective_config = (capability_int & 0x00000004) > 0
+        capabilities.append({
+            "capability": "reports_effective_config",
+            "status": _glyphifize(reports_effective_config)
+        })
+        reports_package_statuses = (capability_int & 0x00000010) > 0
+        capabilities.append({
+            "capability": "reports_package_statuses",
+            "status": _glyphifize(reports_package_statuses)
+        })
+        reports_own_traces = (capability_int & 0x00000020) > 0
+        capabilities.append({
+            "capability": "reports_own_traces",
+            "status": _glyphifize(reports_own_traces)
+        })
+        reports_own_metrics = (capability_int & 0x00000040) > 0
+        capabilities.append({
+            "capability": "reports_own_metrics",
+            "status": _glyphifize(reports_own_metrics)
+        })
+        reports_own_logs = (capability_int & 0x00000080) > 0
+        capabilities.append({
+            "capability": "reports_own_logs",
+            "status": _glyphifize(reports_own_logs)
+        })
+        reports_health = (capability_int & 0x00000800) > 0
+        capabilities.append({
+            "capability": "reports_health",
+            "status": _glyphifize(reports_health)
+        })
+        reports_remote_config = (capability_int & 0x00001000) > 0
+        capabilities.append({
+            "capability": "reports_remote_config",
+            "status": _glyphifize(reports_remote_config)
+        })
+        reports_heartbeat = (capability_int & 0x00002000) > 0
+        capabilities.append({
+            "capability": "reports_heartbeat",
+            "status": _glyphifize(reports_heartbeat)
+        })
+
+        reports_available_components = (capability_int & 0x00004000) > 0
+        capabilities.append({
+            "capability": "reports_available_components",
+            "status": _glyphifize(reports_available_components)
+        })
+    elif type == "accepts":
+        accepts_remote_config = (capability_int & 0x00000002) > 0
+
+        capabilities.append({
+            "capability": "accepts_remote_config",
+            "status": _glyphifize(accepts_remote_config)
+        })
+
+        accepts_packages = (capability_int & 0x00000008) > 0
+        capabilities.append({
+            "capability": "accepts_packages",
+            "status": _glyphifize(accepts_packages)
+        })
+
+        accepts_opamp_connection_settings = (capability_int & 0x00000100) > 0
+        capabilities.append({
+            "capability": "accepts_opamp_connection_settings",
+            "status": _glyphifize(accepts_opamp_connection_settings)
+        })
+
+        accepts_other_connection_settings = (capability_int & 0x00000200) > 0
+        capabilities.append({
+            "capability": "accepts_other_connection_settings",
+            "status": _glyphifize(accepts_other_connection_settings)
+        })
+
+        accepts_restart_command = (capability_int & 0x00000400) > 0
+        capabilities.append({
+            "capability": "accepts_restart_command",
+            "status": _glyphifize(accepts_restart_command)
+        })
+    else:
+        return []
+
+    return capabilities
+
+
+def get_agent_or_agents(filter="ALL", include_details: bool=False):
 
     agent_list = []
 
@@ -209,23 +306,32 @@ def get_agent_or_agents(filter="ALL"):
                 })
         except:
             logger.warning("Caught an exception")
-
-        agent = {
-            "id": agent_id,
-            "health_glyph": agent_health_status_glyph,
-            "tags": tags,
-            "details": AGENT_STATES[agent_id]['details']
-        }
+        
+        if include_details:
+            agent = {
+                "id": agent_id,
+                "health_glyph": agent_health_status_glyph,
+                "tags": tags,
+                "details": AGENT_STATES[agent_id]['details']
+            }
+        else:
+            agent = {
+                "id": agent_id,
+                "health_glyph": agent_health_status_glyph,
+                "tags": tags
+            }
 
         agent_list.append(agent)
 
     # Returning only one agent?
     # Send the single record back
     # Otherwise send a list
-    if filter != "ALL" and len(agent_list) == 1: return agent_list[0]
+    if filter != "ALL" and len(agent_list) == 1:
+        logger.info(f"Returning a single agent: {agent}")
+        
+        return agent_list[0]
     else:
         return agent_list
-
 
 ###################################
 # Custom jinja2 filters
@@ -260,107 +366,15 @@ def get_component_version(input: object):
     
     return component_version
 
-# TODO: This is horrible code. Re-do
-def get_reports_capabilities(agent: str):
-
-    capabilities = []
-    try:
-        capability_int = int(agent['details']['capabilities'])
-    except: # Agent hasn't reported capabilities yet (or perhaps never will)
-        return capabilities
-
-    reports_status = (capability_int & 0x00000001) > 0
-    capabilities.append({
-        "capability": "reports_status",
-        "status": _glyphifize(reports_status)
-    })
-    reports_effective_config = (capability_int & 0x00000004) > 0
-    capabilities.append({
-        "capability": "reports_effective_config",
-        "status": _glyphifize(reports_effective_config)
-    })
-    reports_package_statuses = (capability_int & 0x00000010) > 0
-    capabilities.append({
-        "capability": "reports_package_statuses",
-        "status": _glyphifize(reports_package_statuses)
-    })
-    reports_own_traces = (capability_int & 0x00000020) > 0
-    capabilities.append({
-        "capability": "reports_own_traces",
-        "status": _glyphifize(reports_own_traces)
-    })
-    reports_own_metrics = (capability_int & 0x00000040) > 0
-    capabilities.append({
-        "capability": "reports_own_metrics",
-        "status": _glyphifize(reports_own_metrics)
-    })
-    reports_own_logs = (capability_int & 0x00000080) > 0
-    capabilities.append({
-        "capability": "reports_own_logs",
-        "status": _glyphifize(reports_own_logs)
-    })
-    reports_health = (capability_int & 0x00000800) > 0
-    capabilities.append({
-        "capability": "reports_health",
-        "status": _glyphifize(reports_health)
-    })
-    reports_remote_config = (capability_int & 0x00001000) > 0
-    capabilities.append({
-        "capability": "reports_remote_config",
-        "status": _glyphifize(reports_remote_config)
-    })
-    reports_heartbeat = (capability_int & 0x00002000) > 0
-    capabilities.append({
-        "capability": "reports_heartbeat",
-        "status": _glyphifize(reports_heartbeat)
-    })
-
-    return capabilities
-
-# TODO: This is horrible code. Re-do
-def get_accepts_capabilities(agent: str):
-
-    capabilities = []
-    try:
-        capability_int = int(agent['details']['capabilities'])
-    except: # Agent hasn't reported capabilities yet (or perhaps never will)
-        return capabilities
-
-    accepts_remote_config = (capability_int & 0x00000002) > 0
-    capabilities.append({
-        "capability": "accepts_remote_config",
-        "status": _glyphifize(accepts_remote_config)
-    })
-    accepts_packages = (capability_int & 0x00000008) > 0
-    capabilities.append({
-        "capability": "accepts_packages",
-        "status": _glyphifize(accepts_packages)
-    })
-    accepts_opamp_connection_settings = (capability_int & 0x00000100) > 0
-    capabilities.append({
-        "capability": "accepts_opamp_connection_settings",
-        "status": _glyphifize(accepts_opamp_connection_settings)
-    })
-    accepts_other_connection_settings = (capability_int & 0x00000200) > 0
-    capabilities.append({
-        "capability": "accepts_other_connection_settings",
-        "status": _glyphifize(accepts_other_connection_settings)
-    })
-    accepts_restart_command = (capability_int & 0x00000400) > 0
-    capabilities.append({
-        "capability": "accepts_restart_command",
-        "status": _glyphifize(accepts_restart_command)
-    })
-    
-
-    return capabilities
-
 def _glyphifize(input: bool):
     return "✅" if input else "❌"
+
+def metrics_set_connected_agent_value():
+    PROM_METRIC_CONNECTED_AGENTS.set(value=len(AGENT_STATES))
 
 # Add filters to jinja app / template
 templates.env.filters["format_unix_time"] = format_unix_time
 templates.env.filters["b64decode"] = b64decode
 templates.env.filters["get_component_version"] = get_component_version
-templates.env.filters["get_reports_capabilities"] = get_reports_capabilities
-templates.env.filters["get_accepts_capabilities"] = get_accepts_capabilities
+#templates.env.filters["get_reports_capabilities"] = get_reports_capabilities
+#templates.env.filters["get_accepts_capabilities"] = get_accepts_capabilities

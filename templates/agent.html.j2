@@ -42,7 +42,7 @@ function toggleAccordian(id) {
         <th>Capability</th>
         <th>Status</th>
 
-        {% for item in agent | get_reports_capabilities %}
+        {% for item in agent %}
         <tr>
           <td>{{ item["capability"] }}</td><td>{{ item["status"] }}</td>
         </tr>

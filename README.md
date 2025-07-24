@@ -5,6 +5,15 @@ This in an [OpenTelemetry OpAMP](https://opentelemetry.io/docs/specs/opamp/) ser
 The server and UI are seperate components. The server listens on the standard OpAMP port of `:4320`
 The UI is written in Streamlit and is available on `:8501`
 
+This app will show you:
+
+- How many collectors you have running across your fleet
+- Detailed stats for each collector such as:
+  - Which pipelines are defined and which components make up each pipeline
+  - Which components are _potentially_ available in each collector (ie. which receivers / processors / exporters and extensions etc. does your collector contain)
+  - Which components are **actually** in use (running the contrib collector with lots of unused components and wondering which you can remove to slim down?)
+- Prometheus compatible endpoint at `/metrics`
+
 ## Server
 
 The server listens on the standard port of 4320.

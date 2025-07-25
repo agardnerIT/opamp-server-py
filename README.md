@@ -29,6 +29,11 @@ Start the server with:
 pip install -r requirements.txt
 fastapi run server.py --host 127.0.0.1 --port 4320
 ```
+### More Screenshots
+
+![agent components](assets/agent-components.png)
+![agent pipelines](assets/agent-pipelines.png)
+![agent currently effective configuration](assets/agent-currently-effective-config.png)
 
 ## User Interface
 

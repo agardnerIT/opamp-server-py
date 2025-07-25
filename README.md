@@ -29,11 +29,6 @@ Start the server with:
 pip install -r requirements.txt
 fastapi run server.py --host 127.0.0.1 --port 4320
 ```
-### More Screenshots
-
-![agent components](assets/agent-components.png)
-![agent pipelines](assets/agent-pipelines.png)
-![agent currently effective configuration](assets/agent-currently-effective-config.png)
 
 ## User Interface
 
@@ -58,6 +53,12 @@ Start the server with:
 ```
 streamlit run streamlit_app.py --server.address 127.0.0.1 --server.port 8501
 ```
+
+### More Screenshots
+
+![agent components](assets/agent-components.png)
+![agent pipelines](assets/agent-pipelines.png)
+![agent currently effective configuration](assets/agent-currently-effective-config.png)
 
 ## Sample Collector Config
 An agent (eg. collector) needs to be configured to connect to the server. [A sample configuration file is provided](https://github.com/agardnerIT/opamp-server-py/blob/new_ui/collector/config.yaml).

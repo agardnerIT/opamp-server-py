@@ -1,6 +1,6 @@
 # OpAMP Server Python
 
-This in an [OpenTelemetry OpAMP](https://opentelemetry.io/docs/specs/opamp/) server and UI written in Python.
+This is an [OpenTelemetry OpAMP](https://opentelemetry.io/docs/specs/opamp/) server and UI written in Python.
 
 The server and UI are seperate components. The server listens on the standard OpAMP port of `:4320`
 The UI is written in Streamlit and is available on `:8501`

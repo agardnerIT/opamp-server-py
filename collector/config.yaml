@@ -30,8 +30,6 @@ extensions:
       #reports_remote_config: false
       #reports_heartbeat: true
       reports_available_components: true
-      
-      
 
 receivers:
   filelog/test:
@@ -43,15 +41,6 @@ processors:
 exporters:
   debug:
     verbosity: detailed
-
-connectors:
-  count:
-    spanevents:
-      my.prod.event.count:
-        description: The number of span events from my prod environment.
-        conditions:
-          - 'attributes["env"] == "prod"'
-          - 'name == "prodevent"'
 
 service:
   extensions: [opamp]  # Enable the OpAMP extension

@@ -4,6 +4,7 @@ import pandas as pd
 from loguru import logger
 import base64
 from streamlit_utils import *
+from env_vars import *
 
 USE_DIVIDERS = True
 
@@ -20,7 +21,7 @@ build_menu()
 COMPONENTS_IN_USE = []
 
 def get_agent(agent_id: str):
-    resp = requests.get(f"http://localhost:4320/agent/{agent_id}")
+    resp = requests.get(f"{SERVER_HTTP_SCHEME}://{SERVER_ADDR}:{SERVER_PORT}/agent/{agent_id}")
     if resp.status_code == 200:
         return resp.json()
     else:
@@ -32,7 +33,7 @@ def get_capabilities(agent: object, type: str):
         "agent_id": agent['id'],
         "type": type
     }
-    target = f"http://localhost:4320/agent/capabilities"
+    target = f"{SERVER_HTTP_SCHEME}://{SERVER_ADDR}:{SERVER_PORT}/agent/capabilities"
     resp = requests.post(target, json=body)
     if resp.status_code == 200:
         logger.info(resp.json())

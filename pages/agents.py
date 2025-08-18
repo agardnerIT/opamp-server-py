@@ -3,6 +3,7 @@ import requests
 import pandas as pd
 from loguru import logger
 from streamlit_utils import *
+from env_vars import *
 
 # This MUST be called first
 st.set_page_config(page_title=PAGE_TITLE_AGENTS)
@@ -14,7 +15,7 @@ build_menu()
 
 def get_agents():
     try:
-        resp = requests.get("http://localhost:4320/agents")
+        resp = requests.get(f"{SERVER_HTTP_SCHEME}://{SERVER_ADDR}:{SERVER_PORT}/agents")
         
         if resp.status_code == 200:
             return resp.json()

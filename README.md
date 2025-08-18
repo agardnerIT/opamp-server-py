@@ -48,6 +48,18 @@ There are currently 3 pages:
 
 ![single agent page](assets/agent.png)
 
+### Customising the Server Connection Details
+
+The UI will default to looking for a server at `localhost:4320` using `http` but these can all be adjusted using the following environment variables:
+
+```
+export SERVER_HTTP_SCHEME="http"     # or https
+export SERVER_ADDRESS="localhost"
+export SERVER_PORT=4320
+```
+
+### Start The UI
+
 Start the server with:
 
 ```
@@ -63,7 +75,7 @@ streamlit run streamlit_app.py --server.address 127.0.0.1 --server.port 8501
 ## Sample Collector Config
 An agent (eg. collector) needs to be configured to connect to the server. [A sample configuration file is provided](https://github.com/agardnerIT/opamp-server-py/blob/new_ui/collector/config.yaml).
 
-Download the contrib distribution binary (it has the [opamp extension](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/extension/opampextension) )into the root of this folder. 
+Download the contrib distribution binary (it has the [opamp extension](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/extension/opampextension)) into the root of this folder. 
 
 ```
 ./otelcol-contrib --config=collector/config.yaml

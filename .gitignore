@@ -180,3 +180,8 @@ otelcol-contrib
 notes.txt
 notes.md
 *temp*
+.DS_Store
+bin/*
+etc/*
+pyvenv.cfg
+share/*

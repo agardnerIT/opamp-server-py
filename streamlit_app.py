@@ -2,6 +2,7 @@ import streamlit as st
 import requests
 from loguru import logger
 from streamlit_utils import *
+from env_vars import *
 
 #
 # This is the streamlit entry point
@@ -20,7 +21,7 @@ st.title(PAGE_TITLE_HOME)
 
 agents_connected = []
 try:
-    resp = requests.get("http://localhost:4320/agents")
+    resp = requests.get(f"{SERVER_HTTP_SCHEME}://{SERVER_ADDR}:{SERVER_PORT}/agents")
     agents_connected = 0
     if resp.status_code == 200:
         agents_connected = len(resp.json())
@@ -28,7 +29,15 @@ try:
         st.link_button(label=f"Agents Connected {agents_connected}", url="agents", type="primary")
 except:
     st.subheader("Status: Server not available ⚠️")
-    st.text("Please start the server on localhost:4320")
+    st.markdown(f"""
+                Please start the server on `localhost:4320` using protocol `http`
+                or configure the following environment variables appropriately:
+                
+                * `SERVER_HTTP_SCHEME="http|https"`
+                * `SERVER_ADDR="localhost"`
+                * `SERVER_PORT=4320`
+                ```
+                """)
 
     
 

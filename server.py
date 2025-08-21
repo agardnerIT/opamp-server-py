@@ -68,24 +68,13 @@ async def opamp_endpoint(request: Request):
 
         if not agent_id in AGENT_STATES.keys():
             
-            
             logger.info(f"{agent_id} is not yet tracked. Requesting Agent to report full state")
             response.flags = (opamp_pb2.ServerToAgentFlags.ServerToAgentFlags_ReportFullState)
             AGENT_STATES[agent_id] = {}
+
+            # Set the prometheus value to the number of currently connected agents
             metrics_set_connected_agent_value()
             
-            # Set the prometheus value to the number of currently connected agents
-
-            # # Temp...
-            # if agent_id == "1234abcd89094fe9aff9b16893516467":
-            #     logger.info(f"A target agent has just connected. Let's send new config!")
-                
-            #     with open("collector/remoteConfig.yaml") as f:
-            #         file_content = yaml.load(f, Loader=yaml.SafeLoader)
-            #         opamp_pb2.AgentRemoteConfig()
-            #         agent_remote_config = opamp_pb2.AgentRemoteConfig(config=file_content)
-            #         response.command( opamp_pb2.CommandType_Restart )
-            #         response.remote_config = agent_remote_config
         # According to the spec, the collector MUST send an agent disconnect message
         # But this is not yet implemented
         if 'agent_disconnect' in agent_msg_dict:
@@ -105,7 +94,7 @@ async def opamp_endpoint(request: Request):
             AGENT_STATES[agent_id] = {
                 "details": agent_msg_dict
             }
-        # Already aware of the agent but heartbear was empty
+        # Already aware of the agent but heartbeat was empty
         # Inform the agent of what the server can offer
         else:
             logger.info(f"Got empty heartbeart message for {agent_id}")

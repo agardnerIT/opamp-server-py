@@ -48,7 +48,4 @@ service:
     logs/blah:
       receivers: [filelog/test]
       processors: [batch]
-      exporters: [debug, count]
-    metrics:
-      receivers: [count]
       exporters: [debug]

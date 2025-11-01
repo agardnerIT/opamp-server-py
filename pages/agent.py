@@ -83,11 +83,10 @@ def get_agent_component_types(agent: object):
                     # then match on "filelog"
                     item_to_match = parts[1]
                     if "/" in parts[1]:
-                        parts = item.split("/")
+                        parts = item_to_match.split("/")
                         #logger.info(f"Listing parts {parts}")
                         item_to_match = parts[0]
                     
-                    logger.info(f"item_to_match: {item_to_match}. Subcomponent: {subComponent}")
                     if item_to_match == subComponent:
                         logger.info(f"Found a match for {subComponent} meaning it IS used.")
                         component_used = "✅"
@@ -278,7 +277,6 @@ else:
                                 
         with st.expander(label="Currently Effective Configuration", expanded=False, icon=":material/tune:"):
             effective_config = get_currently_effective_configuration(agent)
-            logger.info(type(effective_config))
 
             st.text_area(label="Currently Effective Configuration", label_visibility="hidden", height=500, value=effective_config, disabled=True)
         

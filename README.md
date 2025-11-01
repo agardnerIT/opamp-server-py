@@ -60,7 +60,7 @@ export SERVER_PORT=4320
 
 ### Start The UI
 
-Start the server with:
+Start the UI with:
 
 ```
 streamlit run streamlit_app.py --server.address 127.0.0.1 --server.port 8501

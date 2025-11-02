@@ -44,6 +44,8 @@ app.mount("/metrics", metrics_app)
 async def opamp_endpoint(request: Request):
     # Read the binary protobuf data from the request
     data = await request.body()
+
+    response = opamp_pb2.ServerToAgent()
     
     try:
         # Parse the incoming message
@@ -56,7 +58,6 @@ async def opamp_endpoint(request: Request):
 
         # Build a generic response
         # Process message and generate response
-        response = opamp_pb2.ServerToAgent()
 
         response.instance_uid = agent_msg.instance_uid
         response.capabilities = (
@@ -314,33 +315,33 @@ def get_agent_or_agents(filter="ALL", include_details: bool=False):
 
 ###################################
 # Custom jinja2 filters
-def format_unix_time(input: str):
+# def format_unix_time(input: str):
 
-    # Convert to UTC first
-    dt_utc = datetime.fromtimestamp(int(input) / 1e9, tz=ZoneInfo("UTC"))
+#     # Convert to UTC first
+#     dt_utc = datetime.fromtimestamp(int(input) / 1e9, tz=ZoneInfo("UTC"))
 
-    # Convert to AEST (UTC+10)
-    dt_aest = dt_utc.astimezone(ZoneInfo("Australia/Sydney"))  # Sydney uses AEST/AEDT
+#     # Convert to AEST (UTC+10)
+#     dt_aest = dt_utc.astimezone(ZoneInfo("Australia/Sydney"))  # Sydney uses AEST/AEDT
 
-    print(dt_aest.strftime("%Y-%m-%d %H:%M:%S.%f %Z"))
-    return dt_aest
+#     print(dt_aest.strftime("%Y-%m-%d %H:%M:%S.%f %Z"))
+#     return dt_aest
 
-def b64decode(input: str):
-    return base64.b64decode(input).decode('utf-8')
+# def b64decode(input: str):
+#     return base64.b64decode(input).decode('utf-8')
 
-def get_component_version(input: object):
-    metadata = input['metadata']
+# def get_component_version(input: object):
+#     metadata = input['metadata']
 
-    component_version = "v0.0.0"
+#     component_version = "v0.0.0"
 
-    for item in metadata:
-        if item['key'] == "code.namespace":
-            value = item['value']
-            if "stringValue" in value:
-                code_namespace_string_value = value['stringValue']
+#     for item in metadata:
+#         if item['key'] == "code.namespace":
+#             value = item['value']
+#             if "stringValue" in value:
+#                 code_namespace_string_value = value['stringValue']
 
-                # Split at the space to get the version
-                component_version = code_namespace_string_value.split()[1]
+#                 # Split at the space to get the version
+#                 component_version = code_namespace_string_value.split()[1]
 
     
     return component_version

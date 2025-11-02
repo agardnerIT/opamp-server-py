@@ -1,4 +1,4 @@
-fastapi[standard]==0.115.12
+fastapi[standard]==0.116.1
 loguru==0.7.3
 pandas==2.2.3
 streamlit==1.45.1

@@ -23,6 +23,7 @@ COMPONENTS_IN_USE = []
 def get_agent(agent_id: str):
     resp = requests.get(f"{SERVER_HTTP_SCHEME}://{SERVER_ADDR}:{SERVER_PORT}/agent/{agent_id}")
     if resp.status_code == 200:
+        logger.info(f"agent123: {resp.json()}")
         return resp.json()
     else:
         return {}
@@ -88,11 +89,9 @@ def get_agent_component_types(agent: object):
                         item_to_match = parts[0]
                     
                     if item_to_match == subComponent:
-                        logger.info(f"Found a match for {subComponent} meaning it IS used.")
                         component_used = "✅"
 
                 if subComponent in COMPONENTS_IN_USE:
-                    logger.info(f"!!! {subComponent} is in use")
                     component_used = "✅"
 
                 component_types.append({
@@ -233,47 +232,59 @@ else:
         logger.info(f"componentHealthMap: {agent['details']['health']['componentHealthMap']}")
 
         for key in agent['details']['health']['componentHealthMap']:
-            if key.startswith("pipeline:"):
-                pipeline_type, pipeline_name = get_pipeline_type_and_name(key)
+            # if key == "extensions":
+            #     component_type = "extensions"
+            #     component_health_glyph = get_health_glyph(agent['details']['health']['componentHealthMap'][key]['healthy'])
+            #     component_health_map = agent['details']['health']['componentHealthMap'][key]['componentHealthMap']
 
-                pipeline_health_glyph = get_health_glyph(agent['details']['health']['componentHealthMap'][key]['healthy'])
+            pipeline_type, pipeline_name = get_pipeline_type_and_name(key)
 
-                with st.expander(label=f"{pipeline_name} (type={pipeline_type})", expanded=True, icon=pipeline_health_glyph):
+            pipeline_health_glyph = get_health_glyph(agent['details']['health']['componentHealthMap'][key]['healthy'])
 
-                    pipeline_component_health_map = agent['details']['health']['componentHealthMap'][key]['componentHealthMap']
+            with st.expander(label=f"{pipeline_name} (type={pipeline_type})", expanded=True, icon=pipeline_health_glyph):
 
-                    print_order = {
-                        "receiver:": "### Receivers",
-                        "processor:": "### Processors",
-                        "exporter:": "### Exporters",
-                        "connector:": "### Connectors"
-                    }
-                    
-                    # Logic below is a bit convuluted
-                    # But we do so to force the ordering (as per above)
-                    # 1. Loop through each key in print_order
-                    # 2. Loop through each pipeline component (eg. "receiver:filelog")
-                    # 3. If the key (eg. "receiver:filelog") starts with "receiver:"
-                    # 4. Then delete the component type type (eg. "receiver:filelog" becomes "filelog")
-                    # 5. Take the status "healthy: True" and transform into a glyph (check mark)
-                    # 6. Finally, print the section header, component name and status:
-                    #         ## Receivers
-                    #         filelog | Status: :check_mark:
-                    for item in print_order:
-                        for key in pipeline_component_health_map:
-                            if key.startswith(item):
-                                # Add this component to the COMPONENTS_IN_USE main list
-                                # For other tiles to use
-                                # Will append (for example) "receiver:filelog/test" or "processor:batch"
-                                # Other components can then match against type and name
-                                COMPONENTS_IN_USE.append(key)
+                pipeline_component_health_map = agent['details']['health']['componentHealthMap'][key]['componentHealthMap']
 
-                                component_name = key.replace(item,"")
-                                health_glyph = get_health_glyph(pipeline_component_health_map[key]['healthy'])
+                # Note that print_order
+                # is used for more than just visual printing
+                # It's also used in the logic below to build the COMPONENTS_TO_USE list
+                # Admittedly, this is messy and should be rewritten
+                print_order = {
+                    "receiver:": "### Receivers",
+                    "processor:": "### Processors",
+                    "exporter:": "### Exporters",
+                    "connector:": "### Connectors",
+                    "extension:": "### Extensions"
+                }
+                
+                # Logic below is a bit convuluted
+                # But we do so to force the ordering (as per above)
+                # 1. Loop through each key in print_order
+                # 2. Loop through each pipeline component (eg. "receiver:filelog")
+                # 3. If the key (eg. "receiver:filelog") starts with "receiver:"
+                # 4. Then delete the component type type (eg. "receiver:filelog" becomes "filelog")
+                # 5. Take the status "healthy: True" and transform into a glyph (check mark)
+                # 6. Finally, print the section header, component name and status:
+                #         ## Receivers
+                #         filelog | Status: :check_mark:
+                for item in print_order:
+                    for key in pipeline_component_health_map:
+                        if key.startswith(item):
+                            # Add this component to the COMPONENTS_IN_USE main list
+                            # For other tiles to use
+                            # Will append (for example) "receiver:filelog/test" or "processor:batch"
+                            # Other components can then match against type and name
+                            COMPONENTS_IN_USE.append(key)
+
+                            component_name = key.replace(item,"")
+                            health_glyph = get_health_glyph(pipeline_component_health_map[key]['healthy'])
+
+                            # Although COMPONENTS_IN_USE will contain extensions
+                            # This view is only supposed to show pipelines
+                            # So ignore any extensions
+                            if print_order[item] != "### Extensions":
                                 st.markdown(print_order[item])
                                 st.markdown(f"**{component_name}** | status: {health_glyph}")
-
-                                
                                 
         with st.expander(label="Currently Effective Configuration", expanded=False, icon=":material/tune:"):
             effective_config = get_currently_effective_configuration(agent)

@@ -1,0 +1,15 @@
+# --- Core Application Dependencies ---
+fastapi
+pydantic
+loguru
+Jinja2
+protobuf
+prometheus-client
+
+# --- Production ASGI Server Stack ---
+# Uvicorn is the high-performance ASGI server for FastAPI.
+# We use the [standard] extra to include dependencies like websockets.
+uvicorn[standard]
+
+# Gunicorn is the HTTP server that manages multiple Uvicorn worker processes (recommended for production).
+gunicorn

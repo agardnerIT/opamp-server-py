@@ -1,0 +1,1 @@
+docker pull rajalwaysdino8rp/opamp-server-py:1.0.0

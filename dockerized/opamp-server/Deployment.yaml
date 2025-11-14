@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: opamp-server-deployment
+  labels:
+    app: opamp-server
+spec:
+  replicas: 2 # Recommended to run more than one replica
+  selector:
+    matchLabels:
+      app: opamp-server
+  template:
+    metadata:
+      labels:
+        app: opamp-server
+    spec:
+      # Security: Use a ServiceAccount if you need to grant K8s permissions
+      # serviceAccountName: opamp-service-account
+      containers:
+      - name: opamp-server
+        # IMPORTANT: Replace <acrLoginServer> with your ACR login server
+        image: docker.io/rajalwaysdino8rp/opamp-server-py:1.0.0
+        ports:
+        - containerPort: 8000 # Matches the EXPOSE and CMD in your Dockerfile
+        resources:
+          # Set resource limits for stability and cost control
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        # Health Checks are crucial for Kubernetes
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 8000
+          initialDelaySeconds: 15
+          timeoutSeconds: 5
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8000
+          initialDelaySeconds: 5
+          timeoutSeconds: 3
+        # Security: Ensure your container runs as the non-root user (uid: 1001 from Dockerfile)
+        securityContext:
+          runAsUser: 1001
+          allowPrivilegeEscalation: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: opamp-server-service
+spec:
+  type: LoadBalancer # Exposes your application publicly via an Azure Load Balancer
+  selector:
+    app: opamp-server
+  ports:
+    - protocol: TCP
+      port: 80 # The port the service listens on
+      targetPort: 8000 # The container port

@@ -14,14 +14,21 @@ This app will show you:
   - Which components are **actually** in use (running the contrib collector with lots of unused components and wondering which you can remove to slim down?)
 - Prometheus compatible endpoint at `/metrics`
 
+## Docker Images
+
+The server and UI are available as Docker images from the GitHub container registry:
+
+- [ghcr.io/agardnerIT/opamp-server-py/streamlit:latest](https://github.com/agardnerIT/opamp-server-py/pkgs/container/opamp-server-py%2Fstreamlit)
+- [ghcr.io/agardnerIT/opamp-server-py/fastapi:latest](https://github.com/agardnerIT/opamp-server-py/pkgs/container/opamp-server-py%2Fstreamlit)
+
 ## Server
 
 The server listens on the standard port of 4320.
 
 The server offers the following endpoints:
 
-* `/v1/opamp` = Agents (eg. OpenTelemetry collectors) are configured to send data to this endpoint
-* `/metrics` = Prometheus endpoint for server metrics
+- `/v1/opamp` = Agents (eg. OpenTelemetry collectors) are configured to send data to this endpoint
+- `/metrics` = Prometheus endpoint for server metrics
 
 Start the server with:
 
@@ -36,15 +43,15 @@ The UI is built using [Streamlit](https://streamlit.io).
 
 There are currently 3 pages:
 
-* `/` = The root path (eg. `http://127.0.0.1:8501/` offers an overview of the server and connected agents)
-  
+- `/` = The root path (eg. `http://127.0.0.1:8501/` offers an overview of the server and connected agents)
+
 ![homepage page image](assets/homepage.png)
 
-* `/agents` = Offers a deeper overview of all connected agents
+- `/agents` = Offers a deeper overview of all connected agents
 
 ![agents page image](assets/agents.png)
 
-* `/agent?id=<agent-id>` = Offers a full overview of a single connected agent
+- `/agent?id=<agent-id>` = Offers a full overview of a single connected agent
 
 ![single agent page](assets/agent.png)
 
@@ -52,7 +59,7 @@ There are currently 3 pages:
 
 The UI will default to looking for a server at `localhost:4320` using `http` but these can all be adjusted using the following environment variables:
 
-```
+```shell
 export SERVER_HTTP_SCHEME="http"     # or https
 export SERVER_ADDRESS="localhost"
 export SERVER_PORT=4320
@@ -62,7 +69,7 @@ export SERVER_PORT=4320
 
 Start the UI with:
 
-```
+```shell
 streamlit run streamlit_app.py --server.address 127.0.0.1 --server.port 8501
 ```
 
@@ -73,11 +80,12 @@ streamlit run streamlit_app.py --server.address 127.0.0.1 --server.port 8501
 ![agent currently effective configuration](assets/agent-currently-effective-config.png)
 
 ## Sample Collector Config
+
 An agent (eg. collector) needs to be configured to connect to the server. [A sample configuration file is provided](https://github.com/agardnerIT/opamp-server-py/blob/new_ui/collector/config.yaml).
 
-Download the contrib distribution binary (it has the [opamp extension](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/extension/opampextension)) into the root of this folder. 
+Download the contrib distribution binary (it has the [opamp extension](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/extension/opampextension)) into the root of this folder.
 
-```
+```shell
 ./otelcol-contrib --config=collector/config.yaml
 ```
 

@@ -48,6 +48,7 @@ jobs:
         with:
           context: .
           file: ./Dockerfile.fastapi
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta_fastapi.outputs.tags }}
           labels: ${{ steps.meta_fastapi.outputs.labels }}
@@ -63,6 +64,7 @@ jobs:
         with:
           context: .
           file: ./Dockerfile.streamlit
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta_streamlit.outputs.tags }}
           labels: ${{ steps.meta_streamlit.outputs.labels }}

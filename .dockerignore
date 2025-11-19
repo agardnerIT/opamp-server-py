@@ -1,0 +1,21 @@
+# Git
+.git
+.github
+.gitignore
+
+# Python
+.venv
+__pycache__
+*.pyc
+
+# Docker
+Dockerfile.*
+docker-compose.yaml
+
+# Documentation
+README.md
+LICENSE
+Makefile
+
+# Streamlit
+.streamlit

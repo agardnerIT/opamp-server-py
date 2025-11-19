@@ -37,7 +37,7 @@ The UI is built using [Streamlit](https://streamlit.io).
 There are currently 3 pages:
 
 * `/` = The root path (eg. `http://127.0.0.1:8501/` offers an overview of the server and connected agents)
-  
+
 ![homepage page image](assets/homepage.png)
 
 * `/agents` = Offers a deeper overview of all connected agents
@@ -75,7 +75,7 @@ streamlit run streamlit_app.py --server.address 127.0.0.1 --server.port 8501
 ## Sample Collector Config
 An agent (eg. collector) needs to be configured to connect to the server. [A sample configuration file is provided](https://github.com/agardnerIT/opamp-server-py/blob/new_ui/collector/config.yaml).
 
-Download the contrib distribution binary (it has the [opamp extension](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/extension/opampextension)) into the root of this folder. 
+Download the contrib distribution binary (it has the [opamp extension](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/extension/opampextension)) into the root of this folder.
 
 ```
 ./otelcol-contrib --config=collector/config.yaml
@@ -84,6 +84,22 @@ Download the contrib distribution binary (it has the [opamp extension](https://g
 Go to `http://localhost:8501` and see the agent overview.
 
 Go to `http://localhost:8501/agents` to see deeper info about each agent.
+
+## Running with Docker
+
+Alternatively, you can run the server and UI using Docker.
+
+```shell
+docker-compose up -d
+```
+
+This will start the server on port 4320 and the UI on port 8501.
+
+Then run the collector as normal.
+
+```shell
+./otelcol-contrib --config=collector/config.yaml
+```
 
 ## Background Information on OpAMP
 

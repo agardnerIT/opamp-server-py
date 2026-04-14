@@ -1,104 +1,207 @@
-# OpAMP Server Python
+# OpAMP Server
 
-This is an [OpenTelemetry OpAMP](https://opentelemetry.io/docs/specs/opamp/) server and UI written in Python.
+[![Vibe Coded with OpenCode](https://img.shields.io/badge/Vibe%20Coded-OpenCode-7C3AED?style=flat-square)](https://opencode.ai)
 
-The server and UI are seperate components. The server listens on the standard OpAMP port of `:4320`
-The UI is written in Streamlit and is available on `:8501`
+> This project was vibe coded with [OpenCode](https://opencode.ai)
 
-This app will show you:
+OpenTelemetry OpAMP server in Python with FastAPI.
 
-- How many collectors you have running across your fleet
-- Detailed stats for each collector such as:
-  - Which pipelines are defined and which components make up each pipeline
-  - Which components are _potentially_ available in each collector (ie. which receivers / processors / exporters and extensions etc. does your collector contain)
-  - Which components are **actually** in use (running the contrib collector with lots of unused components and wondering which you can remove to slim down?)
-- Prometheus compatible endpoint at `/metrics`
+## Architecture
 
-## Docker Images
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    OpenTelemetry Collector                        │
+│  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌──────────────────┐   │
+│  │Receiver │→ │Processor│→ │Exporter │  │   OpAMP Extension│───┼──┐
+│  └─────────┘  └─────────┘  └─────────┘  └──────────────────┘   │  │
+│                                                              │  │
+│                                                              │  │
+│  ┌──────────────────────────────────────────────────────┐     │  │
+│  │              Available Components Report               │     │  │
+│  │  Receivers: otlp, prometheus, jaeger...              │←────┘  │
+│  │  Processors: batch, memory_limiter, filter...       │        │
+│  │  Exporters: otlp, prometheus, debug...               │        │
+│  └──────────────────────────────────────────────────────┘        │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              │ HTTP/POST (OpAMP Protocol)
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      OpAMP Server (:4320)                       │
+│  ┌─────────────┐  ┌─────────────────┐  ┌────────────────────┐  │
+│  │ Agent Reg.  │  │   SQLite DB     │  │  Prometheus Metrics│  │
+│  │             │  │  (persistence)  │  │   (:4321/metrics)  │  │
+│  └─────────────┘  └─────────────────┘  └────────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              │ REST API
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    Streamlit UI (:8501)                          │
+│  ┌─────────────┐  ┌─────────────────┐  ┌────────────────────┐  │
+│  │ Agent Fleet │  │ Agent Details    │  │  Slim Distro Builder│  │
+│  │   Table     │  │ Components/Caps  │  │   OCB Manifest Gen │  │
+│  └─────────────┘  └─────────────────┘  └────────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
+```
 
-The server and UI are available as Docker images from the GitHub container registry:
+## Quick Start
 
-- [ghcr.io/agardnerIT/opamp-server-py/streamlit:latest](https://github.com/agardnerIT/opamp-server-py/pkgs/container/opamp-server-py%2Fstreamlit)
-- [ghcr.io/agardnerIT/opamp-server-py/fastapi:latest](https://github.com/agardnerIT/opamp-server-py/pkgs/container/opamp-server-py%2Fstreamlit)
+### 1. Start the server
+```bash
+source venv/bin/activate
+uvicorn server.main:app --host 127.0.0.1 --port 4320 --timeout-keep-alive 300
+```
+Note: The `--timeout-keep-alive` flag controls how long idle HTTP connections are kept alive. A value of 300 seconds (5 minutes) is recommended to prevent premature disconnects when the collector adapts its heartbeat cadence. You can increase this for debugging if needed.
 
-## Server
+### 2. Start the UI (optional)
+```bash
+streamlit run ui/app.py --server.port 8501
+```
 
-The server listens on the standard port of 4320.
+### 3. Connect an agent
+Use the OpenTelemetry Collector with the OpAMP extension:
 
-The server offers the following endpoints:
+```yaml
+extensions:
+  opamp:
+    server:
+      http:
+        endpoint: http://127.0.0.1:4320/v1/opamp
+```
 
-- `/v1/opamp` = Agents (eg. OpenTelemetry collectors) are configured to send data to this endpoint
-- `/metrics` = Prometheus endpoint for server metrics
+## Docker Compose
 
-Start the server with:
+A full stack with server, UI, and OpenTelemetry Collector:
 
-```py
+```bash
+docker compose up
+```
+
+Access:
+- UI: http://localhost:8501
+- Server: http://localhost:4320
+- Collector OTLP: localhost:4317 (gRPC), localhost:4318 (HTTP)
+
+### Custom Collector Config
+
+```bash
+cp collector/config.yaml collector/custom_config.yaml
+# Edit custom_config.yaml
+docker compose up
+```
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AGENT_NAME` | `otelcol-contrib` | Agent identifier |
+| `AGENT_ENVIRONMENT` | `development` | Deployment environment |
+| `OPAMP_SERVER_URL` | `http://server:4320/v1/opamp` | Server endpoint |
+| `DATA_DIR` | `data` | Directory for SQLite database (persists agent state) |
+| `OPA_ENABLED` | `false` | Enable OPA compliance checking |
+| `OPA_URL` | `http://localhost:8181` | OPA server URL |
+
+## Compliance Policies (OPA)
+
+The server supports OPA (Open Policy Agent) for compliance checking. Run OPA with the `--watch` flag to automatically reload policies when rego files change:
+
+```bash
+docker run --rm -it \
+  -p 8181:8181 \
+  -v $(pwd)/policies:/policies \
+  openpolicyagent/opa:latest \
+  run --server --addr=0.0.0.0:8181 --bundle /policies --watch
+```
+
+### Adding a New Policy
+
+1. Create a new file in `policies/tags/require_MYPOLICY.rego`
+2. Use the package name: `package opamp.agent.compliance.MYPOLICY`
+3. Add violation checks:
+
+```rego
+package opamp.agent.compliance.my_policy
+
+violations contains msg if {
+    not some_condition
+    msg := "Violation message here"
+}
+```
+
+4. The policy is automatically picked up (no restart needed with `--watch`)
+
+### Policy Input Format
+
+Policies receive this input structure:
+
+```json
+{
+  "agent_id": "...",
+  "description": {
+    "identifyingAttributes": [
+      {"key": "service.version", "value": {"stringValue": "0.149.0"}}
+    ],
+    "nonIdentifyingAttributes": [
+      {"key": "agent.name", "value": {"stringValue": "collector2"}},
+      {"key": "environment", "value": {"stringValue": "production"}}
+    ]
+  }
+}
+```
+
+## Server Endpoints
+
+Base URL: `http://127.0.0.1:4320`
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/v1/opamp` | POST | OpAMP agent connection |
+| `/metrics` | GET | Prometheus metrics |
+| `/agents` | GET | List all agents |
+| `/agent/{id}` | GET | Get agent details |
+| `/health` | GET | Health check |
+
+## Agent Fields
+
+Each agent in `/agents` and `/agent/{id}` includes:
+
+- `capability_tags`: A list of supported capabilities derived from the agent's `capabilities` bitmask. Each tag includes `label` (human-readable name) and `icon` (emoji).
+- `components`: A dict of components grouped by type (Receiver, Processor, Exporter, Extension, Connector). Each component has `id`, `version`, and `used` (true if in an active pipeline).
+
+## UI Filters
+
+The dashboard provides filters for the agent fleet:
+
+- **Show in-use agents only**: Filters to agents that have at least one component in an active pipeline.
+
+In agent details, the **Hide unused** toggle collapses components that are available but not in use.
+
+## Development
+
+```bash
+# Install dependencies
 pip install -r requirements.txt
-fastapi run server.py --host 127.0.0.1 --port 4320
+
+# Install UI dependencies
+pip install -r requirements-ui.txt
+
+# Run tests
+pytest tests/ -v
 ```
 
-## User Interface
+## Project Structure
 
-The UI is built using [Streamlit](https://streamlit.io).
-
-There are currently 3 pages:
-
-- `/` = The root path (eg. `http://127.0.0.1:8501/` offers an overview of the server and connected agents)
-
-![homepage page image](assets/homepage.png)
-
-- `/agents` = Offers a deeper overview of all connected agents
-
-![agents page image](assets/agents.png)
-
-- `/agent?id=<agent-id>` = Offers a full overview of a single connected agent
-
-![single agent page](assets/agent.png)
-
-### Customising the Server Connection Details
-
-The UI will default to looking for a server at `localhost:4320` using `http` but these can all be adjusted using the following environment variables:
-
-```shell
-export SERVER_HTTP_SCHEME="http"     # or https
-export SERVER_ADDRESS="localhost"
-export SERVER_PORT=4320
 ```
-
-### Start The UI
-
-Start the UI with:
-
-```shell
-streamlit run streamlit_app.py --server.address 127.0.0.1 --server.port 8501
+opampserver/
+├── server/          # FastAPI server
+│   ├── main.py     # Main app with OpAMP endpoint
+│   └── state.py    # Agent registry
+├── ui/             # Streamlit dashboard
+├── proto/          # Protobuf definitions
+├── tests/          # Unit tests
+├── collector/      # Sample collector config
+├── docker-compose.yml
+├── Dockerfile.server
+└── Dockerfile.ui
 ```
-
-### More Screenshots
-
-![agent components](assets/agent-components.png)
-![agent pipelines](assets/agent-pipelines.png)
-![agent currently effective configuration](assets/agent-currently-effective-config.png)
-
-## Sample Collector Config
-
-An agent (eg. collector) needs to be configured to connect to the server. [A sample configuration file is provided](https://github.com/agardnerIT/opamp-server-py/blob/new_ui/collector/config.yaml).
-
-Download the contrib distribution binary (it has the [opamp extension](https://github.com/open-telemetry/opentelemetry-collector-contrib/tree/main/extension/opampextension)) into the root of this folder.
-
-```shell
-./otelcol-contrib --config=collector/config.yaml
-```
-
-Go to `http://localhost:8501` and see the agent overview.
-
-Go to `http://localhost:8501/agents` to see deeper info about each agent.
-
-## Background Information on OpAMP
-
-It is important to note that OpAMP is an open protocol for agents to connect to, and be managed by, servers. Any software can thus act as an agent and be managed at scale using OpAMP.
-Hopefully, OpAMP offers a new vendor-neutral way to perform software upgrades, maintenance and patching.
-
-- Antivirus / security agents
-- Observability agents
-- Operating systems
-- Any other software that runs and requires periodic updates or configuration changes

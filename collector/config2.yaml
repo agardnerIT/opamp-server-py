@@ -6,8 +6,9 @@ extensions:
         polling_interval: 5s
     agent_description:
       non_identifying_attributes:
-        "agent.name": "collector1"
-        "environment": "development"
+        "agent.name": "collector2"
+        "environment": "production"
+        "description": "foobar"
     capabilities:
       reports_health: true
       reports_effective_config: true
@@ -17,7 +18,9 @@ receivers:
   otlp:
     protocols:
       grpc:
+        endpoint: 127.0.0.1:4327
       http:
+        endpoint: 127.0.0.1:4328
 
 processors:
   batch:
@@ -25,11 +28,18 @@ processors:
 exporters:
   debug:
     verbosity: detailed
+  otlphttp:
+    endpoint: http://127.0.0.1:9999
 
 service:
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      level: none
   extensions: [opamp]
   pipelines:
     traces:
       receivers: [otlp]
       processors: [batch]
-      exporters: [debug]
+      exporters: [otlphttp]

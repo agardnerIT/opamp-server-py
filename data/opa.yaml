@@ -1,0 +1,10 @@
+services:
+  local:
+    url: http://localhost:8181
+
+bundles:
+  opamp:
+    service: local
+    path: /policies/policies/tags
+    watch: true
+    persist: true

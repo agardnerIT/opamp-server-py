@@ -68,7 +68,8 @@ def _send_webhook(message: str, config: dict):
         return False, "webhook_url not configured"
     
     headers = json.loads(config.get("headers", "{}"))
-    body = config.get("body_template", '{"text": "{message}"}').format(message=message)
+    template = config.get("body_template", '{"text": "{message}"}')
+    body = template.replace("{message}", message)
     
     try:
         resp = requests.post(url, data=body.encode(), headers={**headers, "Content-Type": "application/json"}, timeout=10)
@@ -151,6 +152,7 @@ DISPATCHERS = {
 
 
 def send_alert(message: str, event_type: str = ALERT_EVENT_NEW_AGENT) -> tuple[bool, str]:
+    logger.warning(f"send_alert called: event_type={event_type}, config={ALERT_CONFIG.get('events', {}).get(event_type, {})}")
     event_config = ALERT_CONFIG.get("events", {}).get(event_type, {})
     
     if not event_config.get("enabled", False):

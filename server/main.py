@@ -337,7 +337,9 @@ def put_alerts(request: dict):
 
 
 @app.post("/alerts/test")
-def test_alerts(request: dict = {}):
+def test_alerts(request: dict = None):
+    if request is None:
+        request = {}
     event_type = request.get("event_type", "new_agent")
     event_config = request.get("event_config")
     

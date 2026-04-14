@@ -25,3 +25,7 @@
 
 - ALWAYS ask for clarification if needed
 - ALWAYS prompt user with ideas they may not have thought of
+
+## Commits
+
+- NEVER commit to git until user confirms issue is resolved

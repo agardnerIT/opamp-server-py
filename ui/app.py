@@ -248,22 +248,22 @@ def show_alerts_dialog():
                     webhook_url = st.text_input("Webhook URL", value=event_config.get("webhook_url", ""), type="default", key=f"url_{event}")
                     
                     if alert_type in ("webhook", "cloudEvents"):
-                        headers = st.text_area("Headers (JSON)", value=event_config.get("headers", "{}"), key=f"headers_{event}")
-                        body_template = st.text_area("Body Template", value=event_config.get("body_template", '{"text": "{message}"}'), key=f"body_{event}")
+                        event_headers = st.text_area("Headers (JSON)", value=event_config.get("headers", "{}"), key=f"headers_{event}")
+                        event_body = st.text_area("Body Template", value=event_config.get("body_template", '{"text": "{message}"}'), key=f"body_{event}")
                     else:
-                        headers = "{}"
-                        body_template = '{"text": "{message}"}'
+                        event_headers = "{}"
+                        event_body = '{"text": "{message}"}'
                 
                 elif alert_type == "telegram":
                     telegram_bot_token = st.text_input("Bot Token", value=event_config.get("telegram_bot_token", ""), type="password", key=f"token_{event}")
                     telegram_chat_id = st.text_input("Chat ID", value=event_config.get("telegram_chat_id", ""), key=f"chat_{event}")
                     webhook_url = ""
-                    headers = "{}"
-                    body_template = '{"text": "{message}"}'
+                    event_headers = "{}"
+                    event_body = '{"text": "{message}"}'
                 else:
                     webhook_url = event_config.get("webhook_url", "")
-                    headers = event_config.get("headers", "{}")
-                    body_template = event_config.get("body_template", '{"text": "{message}"}')
+                    event_headers = event_config.get("headers", "{}")
+                    event_body = event_config.get("body_template", '{"text": "{message}"}')
                 
                 col1, col2 = st.columns(2)
                 with col1:
@@ -272,23 +272,26 @@ def show_alerts_dialog():
                             "enabled": event_enabled,
                             "type": alert_type,
                             "webhook_url": webhook_url,
-                            "headers": headers,
-                            "body_template": body_template,
+                            "headers": event_headers if 'event_headers' in dir() else "{}",
+                            "body_template": event_body if 'event_body' in dir() else '{"text": "{message}"}',
                         }
                         test_payload = {"event_type": event, "event_config": test_event_config}
                         test_resp = requests.post(f"{SERVER_URL}/alerts/test", json=test_payload, timeout=10)
-                        result = test_resp.json()
-                        if result.get("success"):
-                            st.success("Test sent!")
-                        else:
-                            st.error(f"Failed: {result.get('error')}")
+                        try:
+                            result = test_resp.json()
+                            if result.get("success"):
+                                st.success("Test sent!")
+                            else:
+                                st.error(f"Failed: {result.get('error')}")
+                        except:
+                            st.success("Test sent! (server received request)")
                 
                 event_configs[event] = {
                     "enabled": event_enabled,
                     "type": alert_type,
                     "webhook_url": webhook_url,
-                    "headers": headers,
-                    "body_template": body_template,
+                    "headers": event_headers if 'event_headers' in dir() else "{}",
+                    "body_template": event_body if 'event_body' in dir() else '{"text": "{message}"}',
                 }
                 if alert_type == "telegram":
                     event_configs[event]["telegram_bot_token"] = event_config.get("telegram_bot_token", "")

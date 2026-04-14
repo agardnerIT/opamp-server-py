@@ -185,3 +185,5 @@ bin/*
 etc/*
 pyvenv.cfg
 share/*
+
+data

@@ -49,13 +49,16 @@ OpenTelemetry OpAMP server in Python with FastAPI.
 
 ### 1. Start the server
 ```bash
+python -m venv ./venv
 source venv/bin/activate
+pip install -r requirements.txt
 uvicorn server.main:app --host 127.0.0.1 --port 4320 --timeout-keep-alive 300
 ```
 Note: The `--timeout-keep-alive` flag controls how long idle HTTP connections are kept alive. A value of 300 seconds (5 minutes) is recommended to prevent premature disconnects when the collector adapts its heartbeat cadence. You can increase this for debugging if needed.
 
 ### 2. Start the UI (optional)
 ```bash
+pip install -r requirements-ui.txt
 streamlit run ui/app.py --server.port 8501
 ```
 
@@ -70,26 +73,7 @@ extensions:
         endpoint: http://127.0.0.1:4320/v1/opamp
 ```
 
-## Docker Compose
-
-A full stack with server, UI, and OpenTelemetry Collector:
-
-```bash
-docker compose up
-```
-
-Access:
-- UI: http://localhost:8501
-- Server: http://localhost:4320
-- Collector OTLP: localhost:4317 (gRPC), localhost:4318 (HTTP)
-
-### Custom Collector Config
-
-```bash
-cp collector/config.yaml collector/custom_config.yaml
-# Edit custom_config.yaml
-docker compose up
-```
+Sample collector configs can be found in `/collector`
 
 ### Environment Variables
 

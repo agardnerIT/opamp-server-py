@@ -2,12 +2,12 @@
 
 ![Warning: Entirely vibecoded](https://img.shields.io/badge/Warning-Entirely%20vibecoded-orange?style=for-the-badge)
 
-OpenTelemetry OpAMP server in Python with FastAPI + Streamlit UI.
+OpenTelemetry OpAMP server in Python with FastAPI + Streamlit UI. Optional integration with [Open Policy Agent](https://www.openpolicyagent.org).
 
 This server also lets you:
 
 - Filter collectors by metadata (such as `environment: production`)
-- Build minimal OTel Collectors
+- Build minimal OTel Collectors (server generates a new `manifest.yaml` which you build with the [OpenTelemetry Collector Builder [OCB]](https://github.com/open-telemetry/opentelemetry-collector/tree/main/cmd/builder))
 - Validate connected collectors against OPA compliance policies
 
 ## Architecture
@@ -17,13 +17,11 @@ This server also lets you:
 │  OTel Collector         │───────▶│  OpAMP Server   │────────│  UI (:8501)  │
 │  (OpAMP Extension)      │        │  (:4320)        │        │              │
 └─────────────────────────┘        └─────────────────┘        └──────────────┘
-            │                      │   │
-            │                 ┌────┴───┴────┐
-            ▼                │   OPA      │ (optional)
-┌──────────────────┐       │  (:8181)   │
-│  Slim Collector    │       └────────────┘
-│  (OBR manifest)  │
-└──────────────────┘
+                                           │
+                                  ┌────────┴──────────────┐
+                                  │   Open Policy Agent   │ (optional)
+                                  │  (:8181)              │
+                                  └───────────────────────┘
 ```
 
 ## Quick Start

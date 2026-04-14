@@ -1,5 +1,7 @@
 # OpAMP Server
 
+![Warning: Entirely vibecoded](https://img.shields.io/badge/Warning-Entirely%20vibecoded-orange?style=for-the-badge)
+
 OpenTelemetry OpAMP server in Python with FastAPI + Streamlit UI.
 
 ## Architecture

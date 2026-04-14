@@ -15,3 +15,9 @@
 
 - When planning an issue, post the plan to the GitHub issue BEFORE modifying any code
 - Wait for human review/approval before actioning
+
+## Issue Closing
+
+- When closing an issue: use "Closes #XX" in commit message
+- ALWAYS push commits after closing so the fix shows in the issue
+- User must be able to see which commit/PR closed the issue

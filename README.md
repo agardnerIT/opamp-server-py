@@ -2,6 +2,8 @@
 
 ![Warning: Entirely vibecoded](https://img.shields.io/badge/Warning-Entirely%20vibecoded-orange?style=for-the-badge)
 
+Build minimal OTel Collectors and validate them against OPA compliance policies.
+
 OpenTelemetry OpAMP server in Python with FastAPI + Streamlit UI.
 
 ## Architecture

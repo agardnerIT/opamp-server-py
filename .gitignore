@@ -187,3 +187,4 @@ pyvenv.cfg
 share/*
 
 data
+opamp.db

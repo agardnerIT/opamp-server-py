@@ -56,6 +56,8 @@ extensions:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `SERVER_HTTP_SCHEME` | `http` | HTTP scheme |
+| `SERVER_ADDRESS` | `localhost` | Server bind address |
 | `SERVER_PORT` | `4320` | Server port |
 | `AGENT_TIMEOUT_SECONDS` | `60` | Seconds before stale agent removed |
 | `DATA_DIR` | `data` | SQLite database directory |
@@ -64,7 +66,6 @@ extensions:
 
 Run OPA server, then set `OPA_ENABLED=true`.
 
-### Variables
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OPA_ENABLED` | `false` | Enable OPA compliance |

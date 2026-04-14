@@ -49,24 +49,30 @@ extensions:
 | `SERVER_PORT` | `4320` | Server port |
 | `AGENT_TIMEOUT_SECONDS` | `60` | Seconds before stale agent removed |
 | `DATA_DIR` | `data` | SQLite database directory |
+
+## OPA (Optional)
+
+Run OPA server, then set `OPA_ENABLED=true`.
+
+### Variables
+| Variable | Default | Description |
+|----------|---------|-------------|
 | `OPA_ENABLED` | `false` | Enable OPA compliance |
 | `OPA_URL` | `http://localhost:8181` | OPA server URL |
-| `POLICIES_DIR` | `policies/tags` | OPA policies directory |
+| `POLICIES_DIR` | `policies/tags` | Policies directory |
 
-## OPA Policies
-
-Run OPA with `--watch` for auto-reload:
+### Policies
 ```bash
 docker run --rm -it -p 8181:8181 -v $(pwd)/policies:/policies \
   openpolicyagent/opa run --server --bundle /policies --watch
 ```
 
-Add policies to `policies/tags/` using package `package opamp.agent.compliance.<name>`.
+Add `package opamp.agent.compliance.<name>` policies to `policies/tags/`.
 
 ## Endpoints
 
 | Endpoint | Method | Description |
-|----------|--------|-------------|
+|----------|---------|-------------|
 | `/v1/opamp` | POST | OpAMP connection |
 | `/metrics` | GET | Prometheus metrics |
 | `/agents` | GET | List agents |

@@ -174,12 +174,10 @@ def show_feedback_dialog():
                     message = f"# {title}\n\n**Feedback:**\n{feedback}"
                     try:
                         requests.post(ntfy_url, data=message.encode("utf-8"), headers={"Content-Type": "text/plain"})
+                        st.session_state.feedback_submitted = True
                     except Exception as e:
                         st.error(f"Failed to send feedback: {e}")
                         st.rerun()
-                    st.session_state.feedback_submitted = True
-                    st.session_state.show_feedback = False
-                    st.rerun()
                 elif not title.strip():
                     st.session_state.feedback_error = "title"
                     st.rerun()
@@ -190,6 +188,14 @@ def show_feedback_dialog():
         with col2:
             if st.button("Close", key="close_feedback"):
                 st.session_state.show_feedback = False
+                st.session_state.feedback_submitted = False
+                st.rerun()
+
+        if st.session_state.get("feedback_submitted"):
+            st.success("Thank you for your feedback!")
+            if st.button("Done", key="dismiss_feedback"):
+                st.session_state.show_feedback = False
+                st.session_state.feedback_submitted = False
                 st.rerun()
 
     dialog_content()

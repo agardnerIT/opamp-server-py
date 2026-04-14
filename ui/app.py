@@ -233,6 +233,8 @@ def show_alerts_dialog():
         types = alert_data.get("types", [])
         events = alert_data.get("events", [])
         
+        st.warning("⚠️ Warning: Enabling alerts will cause alert spam until issue #27 is resolved.")
+        
         event_tabs = st.tabs([e.replace("_", " ").title() for e in events])
         
         event_configs = {}

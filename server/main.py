@@ -18,6 +18,7 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 from proto.opamp_pb2 import AgentToServer, ServerToAgent, ServerCapabilities, ServerToAgentFlags
 from server.state import AgentRegistry, AgentState, AGENT_REGISTRY, utcnow
 from server.opa_client import evaluate_agent_compliance, get_available_policies, get_policy_validation, OPA_ENABLED, OPA_URL
+from server.alerts import get_alert_config, update_alert_config, send_test_alert, send_alert, ALERT_TYPES, ALERT_CONFIG, ALERT_EVENTS, send_new_agent_alert, send_stale_agent_alert
 
 AGENT_TIMEOUT_SECONDS = int(os.environ.get("AGENT_TIMEOUT_SECONDS", 60))
 _cleanup_task = None
@@ -91,6 +92,7 @@ def cleanup_stale_agents():
         logger.info(f"Removing stale agent: {agent_id}")
         AGENT_REGISTRY.remove(agent_id)
         PROM_AGENT_HEALTH.remove(agent_id)
+        send_stale_agent_alert(agent_id)
     
     if stale:
         update_metrics()
@@ -147,6 +149,8 @@ async def opamp_endpoint(request: Request) -> Response:
         AGENT_REGISTRY.update(agent_id, last_heartbeat=utcnow())
         response.flags = ServerToAgentFlags.ServerToAgentFlags_ReportFullState
         update_metrics()
+        
+        send_new_agent_alert(agent_id)
     else:
         if 'health' in agent_dict and agent_dict['health']:
             healthy = agent_dict['health'].get('healthy', False)
@@ -316,6 +320,29 @@ def validate_policies():
     }
 
 
+@app.get("/alerts")
+def get_alerts():
+    config = get_alert_config()
+    return {
+        "types": ALERT_TYPES,
+        "events": ALERT_EVENTS,
+        "config": config,
+    }
+
+
+@app.put("/alerts")
+def put_alerts(request: dict):
+    config = update_alert_config(request)
+    return {"config": config}
+
+
+@app.post("/alerts/test")
+def test_alerts(request: dict = None):
+    event_type = request.get("event_type") if request else None
+    success, error = send_test_alert(event_type or "new_agent")
+    return {"success": success, "error": error}
+
+
 @app.get("/health")
 def health_check():
     return {
@@ -323,6 +350,7 @@ def health_check():
         "agents_connected": AGENT_REGISTRY.count,
         "opa_enabled": OPA_ENABLED,
         "opa_url": OPA_URL if OPA_ENABLED else None,
+        "alerts_enabled": ALERT_CONFIG["enabled"],
     }
 
 

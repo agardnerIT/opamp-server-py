@@ -1,5 +1,6 @@
 import os
 import sys
+from pathlib import Path
 import streamlit as st
 import requests
 import pandas as pd
@@ -59,11 +60,21 @@ def render_sidebar(data: dict):
         
         st.divider()
         
+        if st.button("🔔 Alerts", use_container_width=True):
+            st.session_state.show_help = False
+            st.session_state.show_feedback = False
+            st.session_state.show_slim_distro_builder = False
+            st.session_state.show_policies_modal = False
+            st.session_state.show_alerts = True
+        
+        st.divider()
+        
         if st.button("❓ Collector Setup Help", use_container_width=True):
             st.session_state.show_feedback = False
             st.session_state.show_slim_distro_builder = False
             st.session_state.show_policies_modal = False
             st.session_state.show_help = True
+            st.session_state.show_alerts = False
         
         st.divider()
         
@@ -73,6 +84,7 @@ def render_sidebar(data: dict):
             st.session_state.show_slim_distro_builder = False
             st.session_state.show_policies_modal = False
             st.session_state.show_reports = True
+            st.session_state.show_alerts = False
         
         st.divider()
         
@@ -81,6 +93,7 @@ def render_sidebar(data: dict):
             st.session_state.show_slim_distro_builder = False
             st.session_state.show_policies_modal = False
             st.session_state.show_feedback = True
+            st.session_state.show_alerts = False
 
 
 def show_setup_help():
@@ -198,6 +211,105 @@ def show_feedback_dialog():
                 st.session_state.feedback_submitted = False
                 st.rerun()
 
+    dialog_content()
+
+
+def show_alerts_dialog():
+    st.session_state.show_alerts = False
+    st.session_state.show_help = False
+    st.session_state.show_slim_distro_builder = False
+    st.session_state.show_policies_modal = False
+    
+    @st.dialog("Alerts Configuration", width="large")
+    def dialog_content():
+        try:
+            resp = requests.get(f"{SERVER_URL}/alerts", timeout=5)
+            alert_data = resp.json()
+        except Exception as e:
+            st.error(f"Failed to load alerts config: {e}")
+            return
+        
+        config = alert_data.get("config", {})
+        types = alert_data.get("types", [])
+        events = alert_data.get("events", [])
+        
+        st.toggle("Enable Alerts", value=config.get("enabled", False), key="alerts_enabled_toggle")
+        
+        st.markdown("### Event Configurations")
+        
+        event_tabs = st.tabs([e.replace("_", " ").title() for e in events])
+        
+        event_configs = {}
+        
+        for idx, event in enumerate(events):
+            with event_tabs[idx]:
+                event_config = config.get("events", {}).get(event, {})
+                
+                event_enabled = st.toggle("Enable", value=event_config.get("enabled", False), key=f"enabled_{event}")
+                alert_type = st.selectbox("Type", types, index=types.index(event_config.get("type", "webhook")) if event_config.get("type") in types else 0, key=f"type_{event}")
+                
+                if alert_type in ("webhook", "slack", "discord", "cloudEvents"):
+                    webhook_url = st.text_input("Webhook URL", value=event_config.get("webhook_url", ""), type="default", key=f"url_{event}")
+                    
+                    if alert_type in ("webhook", "cloudEvents"):
+                        headers = st.text_area("Headers (JSON)", value=event_config.get("headers", "{}"), key=f"headers_{event}")
+                        body_template = st.text_area("Body Template", value=event_config.get("body_template", '{"text": "{message}"}'), key=f"body_{event}")
+                    else:
+                        headers = "{}"
+                        body_template = '{"text": "{message}"}'
+                
+                elif alert_type == "telegram":
+                    telegram_bot_token = st.text_input("Bot Token", value=event_config.get("telegram_bot_token", ""), type="password", key=f"token_{event}")
+                    telegram_chat_id = st.text_input("Chat ID", value=event_config.get("telegram_chat_id", ""), key=f"chat_{event}")
+                    webhook_url = ""
+                    headers = "{}"
+                    body_template = '{"text": "{message}"}'
+                else:
+                    webhook_url = event_config.get("webhook_url", "")
+                    headers = event_config.get("headers", "{}")
+                    body_template = event_config.get("body_template", '{"text": "{message}"}')
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button(f"Test {event}", key=f"test_{event}"):
+                        test_payload = {"event_type": event}
+                        test_resp = requests.post(f"{SERVER_URL}/alerts/test", json=test_payload, timeout=10)
+                        result = test_resp.json()
+                        if result.get("success"):
+                            st.success("Test sent!")
+                        else:
+                            st.error(f"Failed: {result.get('error')}")
+                
+                event_configs[event] = {
+                    "enabled": event_enabled,
+                    "type": alert_type,
+                    "webhook_url": webhook_url,
+                    "headers": headers,
+                    "body_template": body_template,
+                }
+                if alert_type == "telegram":
+                    event_configs[event]["telegram_bot_token"] = event_config.get("telegram_bot_token", "")
+                    event_configs[event]["telegram_chat_id"] = event_config.get("telegram_chat_id", "")
+        
+        col_save, col_close = st.columns([1, 1])
+        with col_save:
+            if st.button("Save & Apply", type="primary"):
+                new_config = {
+                    "enabled": st.session_state.get("alerts_enabled_toggle", False),
+                    "events": event_configs,
+                }
+                
+                resp = requests.put(f"{SERVER_URL}/alerts", json=new_config, timeout=5)
+                if resp.status_code == 200:
+                    st.success("Saved!")
+                else:
+                    st.error("Failed to save")
+        
+        with col_close:
+            if st.button("Close"):
+                st.session_state.show_alerts = False
+                st.rerun()
+    
     dialog_content()
 
 
@@ -742,6 +854,10 @@ if st.session_state.get("show_feedback"):
 if st.session_state.get("show_reports"):
     st.session_state.show_reports = False
     show_reports_dialog()
+
+if st.session_state.get("show_alerts"):
+    st.session_state.show_alerts = False
+    show_alerts_dialog()
 
 if st.session_state.get("show_policies_modal"):
     show_policies_modal()

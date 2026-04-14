@@ -229,13 +229,9 @@ def show_alerts_dialog():
             st.error(f"Failed to load alerts config: {e}")
             return
         
-        config = alert_data.get("config", {})
+config = alert_data.get("config", {})
         types = alert_data.get("types", [])
         events = alert_data.get("events", [])
-        
-        st.checkbox("Enable Alerts", value=config.get("enabled", False), key="alerts_enabled_toggle")
-        
-        st.markdown("### Event Configurations")
         
         event_tabs = st.tabs([e.replace("_", " ").title() for e in events])
         
@@ -295,7 +291,6 @@ def show_alerts_dialog():
         with col_save:
             if st.button("Save & Apply", type="primary"):
                 new_config = {
-                    "enabled": st.session_state.alerts_enabled_toggle,
                     "events": event_configs,
                 }
                 

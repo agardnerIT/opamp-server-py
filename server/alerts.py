@@ -151,10 +151,6 @@ DISPATCHERS = {
 
 
 def send_alert(message: str, event_type: str = ALERT_EVENT_NEW_AGENT) -> tuple[bool, str]:
-    if not ALERT_CONFIG.get("enabled", False):
-        logger.warning("Alerts disabled globally")
-        return False, "alerts disabled"
-    
     event_config = ALERT_CONFIG.get("events", {}).get(event_type, {})
     
     if not event_config.get("enabled", False):

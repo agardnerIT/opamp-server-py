@@ -2,23 +2,28 @@
 
 ![Warning: Entirely vibecoded](https://img.shields.io/badge/Warning-Entirely%20vibecoded-orange?style=for-the-badge)
 
-Build minimal OTel Collectors and validate them against OPA compliance policies.
-
 OpenTelemetry OpAMP server in Python with FastAPI + Streamlit UI.
+
+This server also lets you:
+
+- Filter collectors by metadata (such as `environment: production`)
+- Build minimal OTel Collectors
+- Validate connected collectors against OPA compliance policies
 
 ## Architecture
 
 ```
 ┌─────────────────────────┐        ┌─────────────────┐        ┌──────────────┐
-│  OTel Collector       │───────▶│  OpAMP Server  │───────▶│  UI (:8501)  │
-│  (OpAMP Extension)    │        │  (:4320)      │        │              │
-└────────────────────────┘        └─────────────────┘        └──────────────┘
-                                              │
-                                              ▼
-                                      ┌──────────────┐
-                                      │  SQLite DB   │
-                                      │   (data/)    │
-                                      └──────────────┘
+│  OTel Collector         │───────▶│  OpAMP Server   │────────│  UI (:8501)  │
+│  (OpAMP Extension)      │        │  (:4320)        │        │              │
+└─────────────────────────┘        └─────────────────┘        └──────────────┘
+            │                      │   │
+            │                 ┌────┴───┴────┐
+            ▼                │   OPA      │ (optional)
+┌──────────────────┐       │  (:8181)   │
+│  Slim Collector    │       └────────────┘
+│  (OBR manifest)  │
+└──────────────────┘
 ```
 
 ## Quick Start
@@ -38,6 +43,9 @@ streamlit run ui/app.py
 ```
 
 ### Connect Agent
+
+Modify collector YAML by adding the `opamp` extension:
+
 ```yaml
 extensions:
   opamp:

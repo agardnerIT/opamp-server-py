@@ -1,8 +1,6 @@
 # OpAMP Server
 
-[![Vibe Coded with OpenCode](https://img.shields.io/badge/Vibe%20Coded-OpenCode-7C3AED?style=flat-square)](https://opencode.ai)
-
-> This project was vibe coded with [OpenCode](https://opencode.ai)
+![Warning: Entirely vibecoded](https://img.shields.io/badge/Warning-Entirely%20vibecoded-orange?style=for-the-badge)
 
 OpenTelemetry OpAMP server in Python with FastAPI.
 

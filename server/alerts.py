@@ -15,27 +15,14 @@ ALERT_EVENTS = [
 ]
 
 ALERT_TYPE_WEBHOOK = "webhook"
-ALERT_TYPE_SLACK = "slack"
-ALERT_TYPE_DISCORD = "discord"
-ALERT_TYPE_CLOUDEVENTS = "cloudEvents"
-ALERT_TYPE_TELEGRAM = "telegram"
 
 ALERT_TYPES = [
     ALERT_TYPE_WEBHOOK,
-    ALERT_TYPE_SLACK,
-    ALERT_TYPE_DISCORD,
-    ALERT_TYPE_CLOUDEVENTS,
-    ALERT_TYPE_TELEGRAM,
 ]
 
 DEFAULT_EVENT_CONFIG = {
     "enabled": False,
-    "type": ALERT_TYPE_WEBHOOK,
     "webhook_url": "",
-    "headers": "{}",
-    "body_template": '{"text": "{message}"}',
-    "telegram_bot_token": "",
-    "telegram_chat_id": "",
 }
 
 ALERT_CONFIG = {
@@ -62,17 +49,15 @@ def update_alert_config(config: dict):
     return get_alert_config()
 
 
-def _send_webhook(message: str, config: dict):
+def _send_webhook(message: str, config: dict, event_type: str):
     url = config.get("webhook_url", "")
     if not url:
         return False, "webhook_url not configured"
     
-    headers = json.loads(config.get("headers", "{}"))
-    template = config.get("body_template", '{"text": "{message}"}')
-    body = template.replace("{message}", message)
+    payload = {"event_type": event_type, "message": message}
     
     try:
-        resp = requests.post(url, data=body.encode(), headers={**headers, "Content-Type": "application/json"}, timeout=10)
+        resp = requests.post(url, json=payload, timeout=10)
         return resp.status_code < 400, f"status: {resp.status_code}"
     except Exception as e:
         return False, str(e)
@@ -144,29 +129,22 @@ def _send_telegram(message: str, config: dict):
 
 DISPATCHERS = {
     ALERT_TYPE_WEBHOOK: _send_webhook,
-    ALERT_TYPE_SLACK: _send_slack,
-    ALERT_TYPE_DISCORD: _send_discord,
-    ALERT_TYPE_CLOUDEVENTS: _send_cloudevents,
-    ALERT_TYPE_TELEGRAM: _send_telegram,
 }
 
 
 def send_alert(message: str, event_type: str = ALERT_EVENT_NEW_AGENT) -> tuple[bool, str]:
-    logger.warning(f"send_alert called: event_type={event_type}, config={ALERT_CONFIG.get('events', {}).get(event_type, {})}")
     event_config = ALERT_CONFIG.get("events", {}).get(event_type, {})
     
     if not event_config.get("enabled", False):
-        logger.warning(f"Event {event_type} disabled")
         return False, f"{event_type} disabled"
     
-    alert_type = event_config.get("type", ALERT_TYPE_WEBHOOK)
-    dispatcher = DISPATCHERS.get(alert_type)
+    dispatcher = DISPATCHERS.get(ALERT_TYPE_WEBHOOK)
     
     if not dispatcher:
-        return False, f"unknown alert type: {alert_type}"
+        return False, "no dispatcher"
     
-    logger.info(f"Sending {event_type} alert via {alert_type}: {message}")
-    return dispatcher(message, event_config)
+    logger.info(f"Sending {event_type} alert: {message}")
+    return dispatcher(message, event_config, event_type)
 
 
 def send_new_agent_alert(agent_id: str) -> tuple[bool, str]:

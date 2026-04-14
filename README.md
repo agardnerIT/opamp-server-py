@@ -62,6 +62,18 @@ extensions:
 | `AGENT_TIMEOUT_SECONDS` | `60` | Seconds before stale agent removed |
 | `DATA_DIR` | `data` | SQLite database directory |
 
+## Alerts (Webhook)
+
+Configure via UI at `/alerts` endpoint. Webhook sends JSON with `event_type` and `message`.
+
+| event_type | Trigger |
+|-----------|--------|
+| `new_agent` | New agent connects |
+| `agent_disconnected` | Agent becomes stale |
+| `compliance_violation` | OPA policy fails |
+
+> ⚠️ **Warning**: Enable alerts will cause alert spam until issue #27 is resolved.
+
 ## OPA (Optional)
 
 Run OPA server, then set `OPA_ENABLED=true`.

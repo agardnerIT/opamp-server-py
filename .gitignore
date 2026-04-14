@@ -186,5 +186,4 @@ etc/*
 pyvenv.cfg
 share/*
 
-data
-opamp.db
+data/opamp.db

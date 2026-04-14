@@ -5,12 +5,12 @@ from typing import Optional
 from loguru import logger
 
 ALERT_EVENT_NEW_AGENT = "new_agent"
-ALERT_EVENT_STALE_AGENT = "stale_agent"
+ALERT_EVENT_AGENT_DISCONNECTED = "agent_disconnected"
 ALERT_EVENT_COMPLIANCE_VIOLATION = "compliance_violation"
 
 ALERT_EVENTS = [
     ALERT_EVENT_NEW_AGENT,
-    ALERT_EVENT_STALE_AGENT,
+    ALERT_EVENT_AGENT_DISCONNECTED,
     ALERT_EVENT_COMPLIANCE_VIOLATION,
 ]
 
@@ -42,7 +42,7 @@ ALERT_CONFIG = {
     "enabled": os.environ.get("ALERT_ENABLED", "false").lower() == "true",
     "events": {
         ALERT_EVENT_NEW_AGENT: DEFAULT_EVENT_CONFIG.copy(),
-        ALERT_EVENT_STALE_AGENT: DEFAULT_EVENT_CONFIG.copy(),
+        ALERT_EVENT_AGENT_DISCONNECTED: DEFAULT_EVENT_CONFIG.copy(),
         ALERT_EVENT_COMPLIANCE_VIOLATION: DEFAULT_EVENT_CONFIG.copy(),
     },
 }
@@ -174,7 +174,7 @@ def send_new_agent_alert(agent_id: str) -> tuple[bool, str]:
 
 
 def send_stale_agent_alert(agent_id: str) -> tuple[bool, str]:
-    return send_alert(f"**Agent removed (stale):** {agent_id}", ALERT_EVENT_STALE_AGENT)
+    return send_alert(f"**Agent disconnected:** {agent_id}", ALERT_EVENT_AGENT_DISCONNECTED)
 
 
 def send_compliance_alert(agent_id: str, violations: list) -> tuple[bool, str]:

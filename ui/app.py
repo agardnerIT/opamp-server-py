@@ -233,7 +233,7 @@ def show_alerts_dialog():
         types = alert_data.get("types", [])
         events = alert_data.get("events", [])
         
-        st.toggle("Enable Alerts", value=config.get("enabled", False), key="alerts_enabled_toggle")
+        st.checkbox("Enable Alerts", value=config.get("enabled", False), key="alerts_enabled_toggle")
         
         st.markdown("### Event Configurations")
         
@@ -245,7 +245,7 @@ def show_alerts_dialog():
             with event_tabs[idx]:
                 event_config = config.get("events", {}).get(event, {})
                 
-                event_enabled = st.toggle("Enable", value=event_config.get("enabled", False), key=f"enabled_{event}")
+                event_enabled = st.checkbox("Enable", value=event_config.get("enabled", False), key=f"enabled_{event}")
                 alert_type = st.selectbox("Type", types, index=types.index(event_config.get("type", "webhook")) if event_config.get("type") in types else 0, key=f"type_{event}")
                 
                 if alert_type in ("webhook", "slack", "discord", "cloudEvents"):
@@ -295,7 +295,7 @@ def show_alerts_dialog():
         with col_save:
             if st.button("Save & Apply", type="primary"):
                 new_config = {
-                    "enabled": st.session_state.get("alerts_enabled_toggle", False),
+                    "enabled": st.session_state.alerts_enabled_toggle,
                     "events": event_configs,
                 }
                 

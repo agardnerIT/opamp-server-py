@@ -79,12 +79,17 @@ Sample collector configs can be found in `/collector`
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `AGENT_NAME` | `otelcol-contrib` | Agent identifier |
-| `AGENT_ENVIRONMENT` | `development` | Deployment environment |
-| `OPAMP_SERVER_URL` | `http://server:4320/v1/opamp` | Server endpoint |
+| `SERVER_HTTP_SCHEME` | `http` | HTTP scheme for server URLs |
+| `SERVER_ADDRESS` | `localhost` | Server bind address |
+| `SERVER_PORT` | `4320` | Server port |
+| `AGENT_TIMEOUT_SECONDS` | `60` | Seconds before a stale agent is removed |
 | `DATA_DIR` | `data` | Directory for SQLite database (persists agent state) |
 | `OPA_ENABLED` | `false` | Enable OPA compliance checking |
 | `OPA_URL` | `http://localhost:8181` | OPA server URL |
+| `POLICIES_DIR` | `policies/tags` | Directory containing OPA policies |
+| `AGENT_NAME` | `otelcol-contrib` | Agent identifier |
+| `AGENT_ENVIRONMENT` | `development` | Deployment environment |
+| `OPAMP_SERVER_URL` | `http://server:4320/v1/opamp` | Server endpoint |
 
 ## Compliance Policies (OPA)
 

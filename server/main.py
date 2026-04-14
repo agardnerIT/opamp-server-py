@@ -19,7 +19,7 @@ from proto.opamp_pb2 import AgentToServer, ServerToAgent, ServerCapabilities, Se
 from server.state import AgentRegistry, AgentState, AGENT_REGISTRY, utcnow
 from server.opa_client import evaluate_agent_compliance, get_available_policies, get_policy_validation, OPA_ENABLED, OPA_URL
 
-AGENT_TIMEOUT_SECONDS = 60
+AGENT_TIMEOUT_SECONDS = int(os.environ.get("AGENT_TIMEOUT_SECONDS", 60))
 _cleanup_task = None
 
 

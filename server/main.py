@@ -339,7 +339,18 @@ def put_alerts(request: dict):
 @app.post("/alerts/test")
 def test_alerts(request: dict = {}):
     event_type = request.get("event_type", "new_agent")
-    success, error = send_test_alert(event_type)
+    event_config = request.get("event_config")
+    
+    if event_config:
+        old_config = ALERT_CONFIG["events"].get(event_type, {})
+        ALERT_CONFIG["events"][event_type] = event_config
+        try:
+            success, error = send_test_alert(event_type)
+        finally:
+            ALERT_CONFIG["events"][event_type] = old_config
+    else:
+        success, error = send_test_alert(event_type)
+    
     return {"success": success, "error": error}
 
 

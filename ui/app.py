@@ -268,7 +268,14 @@ def show_alerts_dialog():
                 col1, col2 = st.columns(2)
                 with col1:
                     if st.button(f"Test {event}", key=f"test_{event}"):
-                        test_payload = {"event_type": event}
+                        test_event_config = {
+                            "enabled": event_enabled,
+                            "type": alert_type,
+                            "webhook_url": webhook_url,
+                            "headers": headers,
+                            "body_template": body_template,
+                        }
+                        test_payload = {"event_type": event, "event_config": test_event_config}
                         test_resp = requests.post(f"{SERVER_URL}/alerts/test", json=test_payload, timeout=10)
                         result = test_resp.json()
                         if result.get("success"):

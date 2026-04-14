@@ -337,9 +337,9 @@ def put_alerts(request: dict):
 
 
 @app.post("/alerts/test")
-def test_alerts(request: dict = None):
-    event_type = request.get("event_type") if request else None
-    success, error = send_test_alert(event_type or "new_agent")
+def test_alerts(request: dict = {}):
+    event_type = request.get("event_type", "new_agent")
+    success, error = send_test_alert(event_type)
     return {"success": success, "error": error}
 
 

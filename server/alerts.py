@@ -152,12 +152,14 @@ DISPATCHERS = {
 
 def send_alert(message: str, event_type: str = ALERT_EVENT_NEW_AGENT) -> tuple[bool, str]:
     if not ALERT_CONFIG.get("enabled", False):
+        logger.warning("Alerts disabled globally")
         return False, "alerts disabled"
     
     event_config = ALERT_CONFIG.get("events", {}).get(event_type, {})
     
     if not event_config.get("enabled", False):
-        return False, f"event {event_type} disabled"
+        logger.warning(f"Event {event_type} disabled")
+        return False, f"{event_type} disabled"
     
     alert_type = event_config.get("type", ALERT_TYPE_WEBHOOK)
     dispatcher = DISPATCHERS.get(alert_type)

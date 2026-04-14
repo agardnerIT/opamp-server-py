@@ -229,7 +229,7 @@ def show_alerts_dialog():
             st.error(f"Failed to load alerts config: {e}")
             return
         
-config = alert_data.get("config", {})
+        config = alert_data.get("config", {})
         types = alert_data.get("types", [])
         events = alert_data.get("events", [])
         

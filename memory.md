@@ -10,3 +10,8 @@
 ## Environment Variables
 
 - All new configurable settings should be added to `.env.sample`
+
+## Planning Process
+
+- When planning an issue, post the plan to the GitHub issue BEFORE modifying any code
+- Wait for human review/approval before actioning

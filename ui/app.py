@@ -149,20 +149,6 @@ service:
     dialog_content()
 
 
-def get_next_feedback_number():
-    plan_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plan")
-    existing = []
-    for f in os.listdir(plan_dir):
-        if f.startswith("feedback-") and f.endswith(".md"):
-            try:
-                parts = f.replace("feedback-", "").replace(".md", "").split("-")
-                num = int(parts[0])
-                existing.append(num)
-            except (ValueError, IndexError):
-                pass
-    return max(existing) + 1 if existing else 30
-
-
 def show_feedback_dialog():
     st.session_state.feedback_submitted = False
     st.session_state.feedback_error = None
@@ -184,13 +170,13 @@ def show_feedback_dialog():
         with col1:
             if st.button("Submit", type="primary", key="submit_feedback"):
                 if title.strip() and feedback.strip():
-                    plan_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "plan")
-                    feedback_num = get_next_feedback_number()
-                    safe_title = "".join(c if c.isalnum() or c in " -_" else "_" for c in title.strip())
-                    filename = os.path.join(plan_dir, f"feedback-{feedback_num}-{safe_title}.md")
-                    with open(filename, "w") as f:
-                        f.write(f"# {title}\n\n")
-                        f.write(f"{feedback}\n")
+                    ntfy_url = "https://ntfy.sh/agardnerit-opamp-server-py-feedback"
+                    message = f"# {title}\n\n**Feedback:**\n{feedback}"
+                    try:
+                        requests.post(ntfy_url, data=message.encode("utf-8"), headers={"Content-Type": "text/plain"})
+                    except Exception as e:
+                        st.error(f"Failed to send feedback: {e}")
+                        st.rerun()
                     st.session_state.feedback_submitted = True
                     st.session_state.show_feedback = False
                     st.rerun()

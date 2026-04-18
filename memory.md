@@ -1,5 +1,9 @@
 # Decisions
 
+## Design Principles
+
+- As simple as possible. As complex as necessary.
+
 ## Commit/Issue Protocol
 
 - Always create a GitHub issue BEFORE implementing a new feature

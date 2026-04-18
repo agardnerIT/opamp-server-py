@@ -53,107 +53,33 @@ def get_agent(agent_id):
 
 
 def render_sidebar(data: dict):
+    try:
+        health_resp = requests.get(f"{SERVER_URL}/health", timeout=5)
+        health_data = health_resp.json() if health_resp.status_code == 200 else {}
+        opa_available = health_data.get("opa_enabled", False)
+    except Exception:
+        opa_available = False
+    
     with st.sidebar:
-        try:
-            health_resp = requests.get(f"{SERVER_URL}/health", timeout=5)
-            health_data = health_resp.json() if health_resp.status_code == 200 else {}
-            opa_available = health_data.get("opa_enabled", False)
-        except Exception:
-            opa_available = False
-        
-        st.markdown("**Server**")
-        st.caption(get_server_url())
-        
+        st.markdown("**Server Status**")
         status = "🟢 Online" if "error" not in data else "🔴 Offline"
-        st.markdown("**Status**")
         st.caption(status)
         
         if opa_available:
-            st.markdown("**Open Policy Agent**")
+            st.markdown("**Open Policy Agent Status**")
             st.caption("🟢 Available")
         
-        st.markdown("**Connected Agents**")
-        st.caption(f"{data.get('count', 0)} connected")
-        
-        st.divider()
-        
-        st.markdown("**Prometheus Metrics**")
-        st.caption(f"[localhost:4320/metrics](http://localhost:4320/metrics)")
-        
-        st.divider()
-        
-        if st.button("🔔 Alerts", use_container_width=True):
-            st.session_state.show_help = False
-            st.session_state.show_feedback = False
-            st.session_state.show_slim_distro_builder = False
-            st.session_state.show_policies_modal = False
-            st.session_state.show_alerts = True
-
-        if st.button("📜 View Policies", use_container_width=True):
-            st.session_state.show_help = False
-            st.session_state.show_feedback = False
-            st.session_state.show_slim_distro_builder = False
-            st.session_state.show_alerts = False
-            st.session_state.show_policies_modal = True
-        
-        st.divider()
-        
-        if st.button("❓ Collector Setup Help", use_container_width=True):
-            st.session_state.show_feedback = False
-            st.session_state.show_slim_distro_builder = False
-            st.session_state.show_policies_modal = False
-            st.session_state.show_help = True
-            st.session_state.show_alerts = False
-        
-        st.markdown("""
-<style>
-.opamp-link {
-    background-color: #f0f2f6;
-    padding: 10px 12px;
-    border-radius: 6px;
-    text-align: center;
-    font-size: 13px;
-    margin: 4px 0;
-}
-</style>
-<div class="opamp-link">
-    <a href="https://opentelemetry.io/docs/specs/opamp/" target="_blank">📖 What is OpAMP? Learn more</a>
-</div>
-""", unsafe_allow_html=True)
-        
-        st.divider()
-        
-        if st.button("📊 Reports", use_container_width=True):
-            st.session_state.show_help = False
-            st.session_state.show_feedback = False
-            st.session_state.show_slim_distro_builder = False
-            st.session_state.show_policies_modal = False
-            st.session_state.show_reports = True
-            st.session_state.show_alerts = False
-        
-        st.divider()
-        
-        if st.button("💬 Feedback", use_container_width=True):
-            st.session_state.show_help = False
-            st.session_state.show_slim_distro_builder = False
-            st.session_state.show_policies_modal = False
-            st.session_state.show_feedback = True
-            st.session_state.show_alerts = False
+        st.markdown("**Agents Connected**")
+        st.caption(f"{data.get('count', 0)}")
 
 
-def show_setup_help():
-    st.session_state.show_feedback = False
-    st.session_state.show_slim_distro_builder = False
-    st.session_state.show_policies_modal = False
+def show_setup_help_page():
+    server_url = get_server_url()
     
-    @st.dialog("Collector Setup Help")
-    def dialog_content():
-        server_url = get_server_url()
-        
-        st.markdown("## Collector Configuration")
-        st.markdown("Add this minimal config to your OpenTelemetry Collector to connect to this OpAMP server:")
-        
-        default_yaml = f"""extensions:
+    st.markdown("## Collector Configuration")
+    st.markdown("Add this minimal config to your OpenTelemetry Collector to connect to this OpAMP server:")
+    
+    default_yaml = f"""extensions:
   opamp:
     server:
       http:
@@ -168,43 +94,57 @@ def show_setup_help():
 service:
   extensions: [opamp]
 """
-        
-        st.code(default_yaml, language="yaml")
-        
-        st.download_button(
-            "Download config.yaml",
-            default_yaml,
-            file_name="config.yaml",
-            mime="text/yaml",
-            key="download_config"
-        )
-        
-        st.divider()
-        
-        st.markdown("## Capabilities Explained")
-        
-        with st.expander("**Reports Health**"):
-            st.write("The agent periodically sends health status. Enable this to see healthy/unhealthy indicators in the dashboard.")
-        
-        with st.expander("**Reports Effective Config**"):
-            st.write("The agent reports its running config. Enable this to see what the agent is actually using (including any local overrides).")
-        
-        with st.expander("**Reports Available Components**"):
-            st.write("The agent reports all installed components (receivers, processors, exporters). Enable this to see the full component inventory.")
-        
-        with st.expander("**Reports Status** (always enabled)"):
-            st.write("The agent reports basic status on every connection. This is always on.")
-        
-        with st.expander("**Accepts Remote Config**"):
-            st.write("The server can push configuration changes to the agent. (Not yet implemented server-side, but the client capability can be enabled for future use.)")
-        
-        with st.expander("**Accepts Restart**"):
-            st.write("The server can request the agent to restart. (Not yet implemented server-side, but the client capability can be enabled for future use.)")
-        
-        if st.button("Close", type="primary"):
-            st.rerun()
     
-    dialog_content()
+    st.code(default_yaml, language="yaml")
+    
+    st.download_button(
+        "Download config.yaml",
+        default_yaml,
+        file_name="config.yaml",
+        mime="text/yaml",
+        key="download_config"
+    )
+    
+    st.divider()
+    
+    st.markdown("### Agent Description")
+    st.markdown("""
+    The OpAMP extension supports both **identifying** and **non-identifying** attributes:
+    
+    - **Identifying attributes** uniquely identify the agent (e.g., `agent.id`, `host.name`)
+    - **Non-identifying attributes** provide additional context (e.g., `environment`, `service.name`)
+    
+    These are used for filtering and grouping in the Agents view.
+    """)
+    
+    st.divider()
+    
+    st.markdown("### Capabilities")
+    st.markdown("""
+    The OpAMP extension can report:
+    
+    | Capability | Description |
+    |------------|-------------|
+    | `reports_health` | Send periodic health status |
+    | `reports_effective_config` | Report current collector configuration |
+    | `reports_available_components` | Report which components (receivers, processors, exporters) are in use |
+    """)
+    
+    st.divider()
+    
+    st.markdown("### Advanced: Custom Capabilities")
+    st.markdown("""
+    You can enable additional capabilities:
+    
+    ```yaml
+    capabilities:
+      reports_health: true
+      reports_effective_config: true
+      reports_available_components: true
+      accepts_remote_config: true
+      accepts_packages: true
+    ```
+    """)
 
 
 def show_feedback_dialog():
@@ -259,78 +199,62 @@ def show_feedback_dialog():
     dialog_content()
 
 
-def show_alerts_dialog():
-    st.session_state.show_alerts = False
-    st.session_state.show_help = False
-    st.session_state.show_slim_distro_builder = False
-    st.session_state.show_policies_modal = False
+def show_alerts_page():
+    try:
+        resp = requests.get(f"{SERVER_URL}/alerts", timeout=5)
+        alert_data = resp.json()
+    except Exception as e:
+        st.error(f"Failed to load alerts config: {e}")
+        return
     
-    @st.dialog("Alerts Configuration", width="large")
-    def dialog_content():
-        try:
-            resp = requests.get(f"{SERVER_URL}/alerts", timeout=5)
-            alert_data = resp.json()
-        except Exception as e:
-            st.error(f"Failed to load alerts config: {e}")
-            return
-        
-        config = alert_data.get("config", {})
-        types = alert_data.get("types", [])
-        events = alert_data.get("events", [])
-        
-        event_tabs = st.tabs([e.replace("_", " ").title() for e in events])
-        
-        event_configs = {}
-        
-        for idx, event in enumerate(events):
-            with event_tabs[idx]:
-                event_config = config.get("events", {}).get(event, {})
-                
-                event_enabled = st.checkbox("Enable", value=event_config.get("enabled", False), key=f"enabled_{event}")
-                webhook_url = st.text_input("Webhook URL", value=event_config.get("webhook_url", ""), type="default", key=f"url_{event}")
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    if st.button(f"Test {event}", key=f"test_{event}"):
-                        test_event_config = {
-                            "enabled": event_enabled,
-                            "webhook_url": webhook_url,
-                        }
-                        test_payload = {"event_type": event, "event_config": test_event_config}
-                        test_resp = requests.post(f"{SERVER_URL}/alerts/test", json=test_payload, timeout=10)
-                        try:
-                            result = test_resp.json()
-                            if result.get("success"):
-                                st.success("Test sent!")
-                            else:
-                                st.error(f"Failed: {result.get('error')}")
-                        except:
-                            st.success("Test sent! (server received request)")
-                
-                event_configs[event] = {
-                    "enabled": event_enabled,
-                    "webhook_url": webhook_url,
-                }
-        
-        col_save, col_close = st.columns([1, 1])
-        with col_save:
-            if st.button("Save & Apply", type="primary"):
-                new_config = {
-                    "events": event_configs,
-                }
-                
-                resp = requests.put(f"{SERVER_URL}/alerts", json=new_config, timeout=5)
-                if resp.status_code == 200:
-                    st.success("Saved!")
-                else:
-                    st.error("Failed to save")
-        
-        with col_close:
-            if st.button("Close"):
-                st.session_state.show_alerts = False
-                st.rerun()
+    config = alert_data.get("config", {})
+    types = alert_data.get("types", [])
+    events = alert_data.get("events", [])
     
-    dialog_content()
+    event_tabs = st.tabs([e.replace("_", " ").title() for e in events])
+    
+    event_configs = {}
+    
+    for idx, event in enumerate(events):
+        with event_tabs[idx]:
+            event_config = config.get("events", {}).get(event, {})
+            
+            event_enabled = st.checkbox("Enable", value=event_config.get("enabled", False), key=f"enabled_{event}")
+            webhook_url = st.text_input("Webhook URL", value=event_config.get("webhook_url", ""), type="default", key=f"url_{event}")
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button(f"Test {event}", key=f"test_{event}"):
+                    test_event_config = {
+                        "enabled": event_enabled,
+                        "webhook_url": webhook_url,
+                    }
+                    test_payload = {"event_type": event, "event_config": test_event_config}
+                    test_resp = requests.post(f"{SERVER_URL}/alerts/test", json=test_payload, timeout=10)
+                    try:
+                        result = test_resp.json()
+                        if result.get("success"):
+                            st.success("Test sent!")
+                        else:
+                            st.error(f"Failed: {result.get('error')}")
+                    except:
+                        st.success("Test sent! (server received request)")
+            
+            event_configs[event] = {
+                "enabled": event_enabled,
+                "webhook_url": webhook_url,
+            }
+    
+    if st.button("Save & Apply", type="primary"):
+        new_config = {
+            "events": event_configs,
+        }
+        
+        resp = requests.put(f"{SERVER_URL}/alerts", json=new_config, timeout=5)
+        if resp.status_code == 200:
+            st.success("Saved!")
+        else:
+            st.error("Failed to save")
 
 
 def generate_agent_report(data: dict, format: str = "markdown") -> str:
@@ -550,135 +474,177 @@ def get_latest_collector_version() -> str:
     return versions[0] if versions else "0.149.0"
 
 
-def show_reports_dialog():
+def show_reports_page():
     data = get_agents()
     latest_version = get_latest_collector_version()
     
-    @st.dialog("Fleet Reports")
-    def dialog_content():
-        if data.get("agents"):
-            report_type = st.selectbox(
-                "Report Type",
-                ["Fleet Summary", "Heavy Collectors (>50% unused)", "Outdated Collectors"],
-                index=0
-            )
-            
-            if report_type == "Fleet Summary":
-                report_md = generate_agent_report(data, "markdown")
-                st.caption(f"Full fleet analysis - {len(data['agents'])} agent(s)")
-            elif report_type == "Heavy Collectors (>50% unused)":
-                report_md = generate_heavy_collectors_report(data)
-                heavy_count = sum(1 for a in data["agents"] if _is_heavy(a))
-                st.caption(f"Collectors with >50% unused components - {heavy_count} found")
-            else:
-                version_options = get_collector_versions()
-                threshold_version = st.selectbox(
-                    "Minimum version",
-                    version_options,
-                    index=0
-                )
-                report_md = generate_outdated_collectors_report(data, threshold_version)
-                outdated_count = _count_outdated_collectors(data["agents"], threshold_version)
-                st.caption(f"Collectors with components below v{threshold_version} - {outdated_count} found")
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                st.download_button(
-                    "Download Markdown",
-                    report_md,
-                    file_name=f"{report_type.lower().replace(' ', '-')}.md",
-                    mime="text/markdown",
-                    key="download_report_md"
-                )
-            
-            with col2:
-                st.download_button(
-                    "Download CSV",
-                    report_md,
-                    file_name=f"{report_type.lower().replace(' ', '-')}.csv",
-                    mime="text/csv",
-                    key="download_report_csv"
-                )
-        else:
-            st.info("No agents connected. Connect agents to generate reports.")
-        
-        if st.button("Close", type="primary", key="close_reports"):
-            st.session_state.show_reports = False
-            st.rerun()
-    
-    dialog_content()
-
-
-def show_slim_distro_builder_modal(comps: dict):
-    st.session_state.show_feedback = False
-    st.session_state.show_policies_modal = False
-    
-    @st.dialog("Slim Distro Builder")
-    def dialog_content():
-        st.markdown("### What is this?")
-        st.markdown("""
-        This tool analyzes your collector's components and generates a **manifest.yaml** for the 
-        OpenTelemetry Collector Builder (OCB). Use OCB to build a slim collector 
-        binary containing ONLY the components you actually use.
-        """)
-        
-        st.markdown("### What is OCB?")
-        st.markdown("""
-        The **OpenTelemetry Collector Builder (OCB)** is a CLI tool that builds custom
-        collector binaries from a manifest. [Learn more](https://opentelemetry.io/docs/collector/extend/ocb/)
-        """)
-        
-        st.markdown("### How to use")
-        st.markdown("""
-        1. Copy the manifest.yaml below
-        2. Install OCB: `go install go.opentelemetry.io/collector/cmd/builder@latest`
-        3. Run: `ocb build --config manifest.yaml`
-        4. Your slim collector is in `./_build/`
-        
-        **Docker alternative:** `docker run --rm -v $(pwd):/workspace ghcr.io/open-telemetry/otel-collector-builder --config manifest.yaml`
-        """)
-        
-        st.divider()
-        
-        version = st.text_input("Collector version", value="1.0.0", key="slim_version")
-        distro_manifest = generate_manifest(comps, version)
-        
-        st.markdown("#### manifest.yaml")
-        st.code(distro_manifest, language="yaml")
-        
-        st.download_button(
-            "Download manifest.yaml",
-            distro_manifest,
-            file_name="manifest.yaml",
-            mime="text/yaml",
-            key="download_manifest"
+    if data.get("agents"):
+        report_type = st.selectbox(
+            "Report Type",
+            ["Fleet Summary", "Heavy Collectors (>50% unused)", "Outdated Collectors"],
+            index=0
         )
         
-        st.markdown("#### OCB Command")
-        st.code(generate_ocb_command(version), language="bash")
+        if report_type == "Fleet Summary":
+            report_md = generate_agent_report(data, "markdown")
+            st.caption(f"Full fleet analysis - {len(data['agents'])} agent(s)")
+        elif report_type == "Heavy Collectors (>50% unused)":
+            report_md = generate_heavy_collectors_report(data)
+            heavy_count = sum(1 for a in data["agents"] if _is_heavy(a))
+            st.caption(f"Collectors with >50% unused components - {heavy_count} found")
+        else:
+            version_options = get_collector_versions()
+            threshold_version = st.selectbox(
+                "Minimum version",
+                version_options,
+                index=0
+            )
+            report_md = generate_outdated_collectors_report(data, threshold_version)
+            outdated_count = _count_outdated_collectors(data["agents"], threshold_version)
+            st.caption(f"Collectors with components below v{threshold_version} - {outdated_count} found")
         
-        if st.button("Close", type="primary"):
-            st.session_state.show_slim_distro_builder = False
-            st.rerun()
+        col1, col2 = st.columns(2)
+        with col1:
+            st.download_button(
+                "Download Markdown",
+                report_md,
+                file_name=f"{report_type.lower().replace(' ', '-')}.md",
+                mime="text/markdown",
+                key="download_report_md"
+            )
+        
+        with col2:
+            st.download_button(
+                "Download CSV",
+                report_md,
+                file_name=f"{report_type.lower().replace(' ', '-')}.csv",
+                mime="text/csv",
+                key="download_report_csv"
+            )
+    else:
+        st.info("No agents connected. Connect agents to generate reports.")
+
+
+def show_slim_distro_builder_page(comps: dict):
+    st.markdown("### What is this?")
+    st.markdown("""
+    This tool analyzes your collector's components and generates a **manifest.yaml** for the 
+    OpenTelemetry Collector Builder (OCB). Use OCB to build a slim collector 
+    binary containing ONLY the components you actually use.
+    """)
     
-    dialog_content()
+    st.markdown("### What is OCB?")
+    st.markdown("""
+    The **OpenTelemetry Collector Builder (OCB)** is a CLI tool that builds custom
+    collector binaries from a manifest. [Learn more](https://opentelemetry.io/docs/collector/extend/ocb/)
+    """)
+    
+    st.markdown("### How to use")
+    st.markdown("""
+    1. Copy the manifest.yaml below
+    2. Install OCB: `go install go.opentelemetry.io/collector/cmd/builder@latest`
+    3. Run: `ocb build --config manifest.yaml`
+    4. Your slim collector is in `./_build/`
+    
+    **Docker alternative:** `docker run --rm -v $(pwd):/workspace ghcr.io/open-telemetry/otel-collector-builder --config manifest.yaml`
+    """)
+    
+    st.divider()
+    
+    version = st.text_input("Collector version", value="1.0.0", key="slim_version")
+    distro_manifest = generate_manifest(comps, version)
+    
+    st.markdown("#### manifest.yaml")
+    st.code(distro_manifest, language="yaml")
+    
+    st.download_button(
+        "Download manifest.yaml",
+        distro_manifest,
+        file_name="manifest.yaml",
+        mime="text/yaml",
+        key="download_manifest"
+    )
+    
+    st.markdown("#### OCB Command")
+    st.code(generate_ocb_command(version), language="bash")
 
 
-def show_policies_modal():
-    @st.dialog("Compliance Policies")
-    def dialog_content():
-        tab1, tab2, tab3, tab4 = st.tabs(["Policies", "Validation", "Input Fields", "Create Policy"])
-        
-        with tab1:
-            st.markdown("**How to add a new policy:**")
-            st.info("Use the **Create Policy** tab for an easy form, or write in code manually")
-            st.code("""1. Create policies/tags/require_MYPOLICY.rego
+def show_policies_page():
+    st.markdown("**How to add a new policy:**")
+    st.info("Use the **Create Policy** tab for an easy form, or write in code manually")
+    st.code("""1. Create policies/tags/require_MYPOLICY.rego
 2. Package: package opamp.agent.compliance.MYPOLICY
 3. Add violations rule with checks
 4. Save file - changes auto-reload! (may take up to 10s)""", language="text")
-            st.divider()
-            
-            if st.button("Reload", key="modal_reload_policies"):
+    st.divider()
+    
+    pol_tab1, pol_tab2, pol_tab3, pol_tab4 = st.tabs(["Policies", "Validation", "Input Fields", "Create Policy"])
+    
+    with pol_tab1:
+        if st.button("Reload", key="page_reload_policies"):
+            try:
+                resp = requests.post(f"{SERVER_URL}/compliance/reload", timeout=10)
+                if resp.status_code == 200:
+                    st.success("Policies reloaded!")
+                else:
+                    st.error("Reload failed")
+            except Exception as e:
+                st.error(f"Error: {e}")
+            st.rerun()
+        
+        try:
+            resp = requests.get(f"{SERVER_URL}/compliance/validate", timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                policies = data.get("policies", [])
+                valid_policies = [p for p in policies if p.get("valid")]
+                if valid_policies:
+                    st.markdown(f"**{len(valid_policies)} policy rule(s)**")
+                    df_policies = pd.DataFrame([
+                        {"Policy": p["name"], "Description": p.get("description", "-")}
+                        for p in valid_policies
+                    ])
+                    st.dataframe(df_policies, width='stretch', hide_index=True, use_container_width=True)
+                else:
+                    st.info("No valid policies. Check Validation tab for errors.")
+            else:
+                st.error("Failed to load policies")
+        except Exception as e:
+            st.error(f"Error: {e}")
+    
+    with pol_tab2:
+        st.markdown("**Policy File Validation**")
+        st.caption("Validates .rego files for correct format")
+        
+        if st.button("Revalidate", key="page_revalidate"):
+            st.rerun()
+        
+        try:
+            resp = requests.get(f"{SERVER_URL}/compliance/validate", timeout=5)
+            if resp.status_code == 200:
+                data = resp.json()
+                validation = data.get("policies", [])
+                
+                valid = [v for v in validation if v.get("valid")]
+                invalid = [v for v in validation if not v.get("valid")]
+                
+                if valid:
+                    st.success(f"✅ {len(valid)} valid policy file(s)")
+                if invalid:
+                    st.error(f"❌ {len(invalid)} invalid policy file(s)")
+                    for v in invalid:
+                        st.markdown(f"**{v['filename']}**")
+                        for err in v.get("errors", []):
+                            st.caption(f"  • {err}")
+                if not validation:
+                    st.info("No .rego files found in policies/tags/")
+        except Exception as e:
+            st.error(f"Error: {e}")
+        
+        st.divider()
+        
+        if st.button("Reload Policies", key="page_reload_btn", use_container_width=True):
+            with st.spinner("Reloading..."):
                 try:
                     resp = requests.post(f"{SERVER_URL}/compliance/reload", timeout=10)
                     if resp.status_code == 200:
@@ -687,129 +653,64 @@ def show_policies_modal():
                         st.error("Reload failed")
                 except Exception as e:
                     st.error(f"Error: {e}")
-                st.rerun()
-            
-            try:
-                resp = requests.get(f"{SERVER_URL}/compliance/validate", timeout=5)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    policies = data.get("policies", [])
-                    valid_policies = [p for p in policies if p.get("valid")]
-                    if valid_policies:
-                        st.markdown(f"**{len(valid_policies)} policy rule(s)**")
-                        df_policies = pd.DataFrame([
-                            {"Policy": p["name"], "Description": p.get("description", "-")}
-                            for p in valid_policies
-                        ])
-                        st.dataframe(df_policies, width='stretch', hide_index=True, use_container_width=True)
-                    else:
-                        st.info("No valid policies. Check Validation tab for errors.")
-                else:
-                    st.error("Failed to load policies")
-            except Exception as e:
-                st.error(f"Error: {e}")
+    
+    with pol_tab3:
+        st.markdown("**Available Input Fields**")
+        st.caption("These fields are available in your policy's `input` object:")
         
-        with tab2:
-            st.markdown("**Policy File Validation**")
-            st.caption("Validates .rego files for correct format")
-            
-            if st.button("Revalidate", key="modal_revalidate"):
-                st.rerun()
-            
-            try:
-                resp = requests.get(f"{SERVER_URL}/compliance/validate", timeout=5)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    validation = data.get("policies", [])
-                    
-                    valid = [v for v in validation if v.get("valid")]
-                    invalid = [v for v in validation if not v.get("valid")]
-                    
-                    if valid:
-                        st.success(f"✅ {len(valid)} valid policy file(s)")
-                    if invalid:
-                        st.error(f"❌ {len(invalid)} invalid policy file(s)")
-                        for v in invalid:
-                            st.markdown(f"**{v['filename']}**")
-                            for err in v.get("errors", []):
-                                st.caption(f"  • {err}")
-                    if not validation:
-                        st.info("No .rego files found in policies/tags/")
-            except Exception as e:
-                st.error(f"Error: {e}")
-            
-            st.divider()
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                if st.button("Reload Policies", key="modal_reload_btn", use_container_width=True):
-                    with st.spinner("Reloading..."):
-                        try:
-                            resp = requests.post(f"{SERVER_URL}/compliance/reload", timeout=10)
-                            if resp.status_code == 200:
-                                st.success("Policies reloaded!")
-                            else:
-                                st.error("Reload failed")
-                        except Exception as e:
-                            st.error(f"Error: {e}")
+        st.markdown("""
+        - **agent_id**: unique agent identifier
+        - **description.identifyingAttributes**: key-value pairs identifying the agent  
+        - **description.non_identifyingAttributes**: additional key-value pairs
+        """)
         
-        with tab3:
-            st.markdown("**Available Input Fields**")
-            st.caption("These fields are available in your policy's `input` object:")
-            
-            st.markdown("""
-            - **agent_id**: unique agent identifier
-            - **description.identifyingAttributes**: key-value pairs identifying the agent  
-            - **description.non_identifyingAttributes**: additional key-value pairs
-            """)
-            
-            with st.expander("Example: How to access attributes"):
-                st.code('''# Check if agent has a specific attribute
+        with st.expander("Example: How to access attributes"):
+            st.code('''# Check if agent has a specific attribute
 attr := input.description.identifyingAttributes[_]
 attr.key == "agent.version"
 
 # Get the value
 version := attr.value.stringValue''', language="rego")
-            
-            with st.expander("Common attribute keys"):
-                st.markdown("""
-                - `agent.name` - Name of the agent (e.g., "otelcol-contrib")
-                - `agent.version` - Version string (e.g., "0.100.0")
-                - `environment` - Deployment environment (e.g., "production")
-                - `host.name` - Host where agent is running
-                - `os.type` - Operating system type
-                """)
         
-        with tab4:
-            st.markdown("**Create New Policy**")
-            st.caption("Generate a policy template and save it to policies/tags/")
-            
-            policy_name = st.text_input("Policy name", placeholder="my_policy", help="This will be the filename: require_<name>.rego")
-            policy_desc = st.text_input("Description", placeholder="Agent must have a version", help="Shown in compliance results")
-            
-            attr_to_check = st.selectbox("Attribute to check", [
-                "agent.version",
-                "agent.name", 
-                "environment",
-                "host.name",
-                "custom"
-            ], help="Which agent attribute to validate")
-            
-            if attr_to_check == "custom":
-                attr_to_check = st.text_input("Custom attribute key", placeholder="my.custom.attr")
-            
-            condition = st.selectbox("Condition", [
-                "must exist",
-                "must not be empty"
-            ], help="When should a violation be raised?")
-            
-            if st.button("Generate Policy", use_container_width=True):
-                if not policy_name:
-                    st.error("Please enter a policy name")
-                else:
-                    import re
-                    pkg_name = policy_name.replace(" ", "_").replace("-", "_")
-                    rego_template = f'''package opamp.agent.compliance.{pkg_name}
+        with st.expander("Common attribute keys"):
+            st.markdown("""
+            - `agent.name` - Name of the agent (e.g., "otelcol-contrib")
+            - `agent.version` - Version string (e.g., "0.100.0")
+            - `environment` - Deployment environment (e.g., "production")
+            - `host.name` - Host where agent is running
+            - `os.type` - Operating system type
+""")
+    
+    with pol_tab4:
+        st.markdown("**Create New Policy**")
+        st.caption("Generate a policy template and save it to policies/tags/")
+        
+        policy_name = st.text_input("Policy name", placeholder="my_policy", help="This will be the filename: require_<name>.rego")
+        policy_desc = st.text_input("Description", placeholder="Agent must have a version", help="Shown in compliance results")
+        
+        attr_to_check = st.selectbox("Attribute to check", [
+            "agent.version",
+            "agent.name", 
+            "environment",
+            "host.name",
+            "custom"
+        ], help="Which agent attribute to validate")
+        
+        if attr_to_check == "custom":
+            attr_to_check = st.text_input("Custom attribute key", placeholder="my.custom.attr")
+        
+        condition = st.selectbox("Condition", [
+            "must exist",
+            "must not be empty"
+        ], help="When should a violation be raised?")
+        
+        if st.button("Generate Policy", use_container_width=True):
+            if not policy_name:
+                st.error("Please enter a policy name")
+            else:
+                import re
+                pkg_name = policy_name.replace(" ", "_").replace("-", "_")
+                rego_template = f'''package opamp.agent.compliance.{pkg_name}
 
 violations contains msg if {{
     not val
@@ -827,69 +728,49 @@ val := attr.value.stringValue if {{
     attr.key == "{attr_to_check}"
 }}
 '''
-                    policies_dir = "policies/tags"
-                    safe_name = policy_name.replace(" ", "_").replace("-", "_")
-                    filepath = f"{policies_dir}/require_{safe_name}.rego"
+                policies_dir = "policies/tags"
+                safe_name = policy_name.replace(" ", "_").replace("-", "_")
+                filepath = f"{policies_dir}/require_{safe_name}.rego"
+                
+                try:
+                    os.makedirs(policies_dir, exist_ok=True)
+                    with open(filepath, 'w') as f:
+                        f.write(rego_template)
+                    st.success(f"Created {filepath}")
                     
                     try:
-                        os.makedirs(policies_dir, exist_ok=True)
-                        with open(filepath, 'w') as f:
-                            f.write(rego_template)
-                        st.success(f"Created {filepath}")
-                        
-                        try:
-                            resp = requests.post(f"{SERVER_URL}/compliance/reload", timeout=10)
-                            if resp.status_code == 200:
-                                st.info("Policy reloaded! May take up to 10s to appear.")
-                        except:
-                            pass
-                    except Exception as e:
-                        st.error(f"Could not write file: {e}")
-                        st.code(rego_template, language="rego")
-                        st.info("Copy the code above and save it manually.")
-        
-        if st.button("Close", key="policies_close_btn", type="primary"):
-            st.session_state.show_policies_modal = False
-            st.rerun()
-    
-    dialog_content()
+                        resp = requests.post(f"{SERVER_URL}/compliance/reload", timeout=10)
+                        if resp.status_code == 200:
+                            st.info("Policy reloaded! May take up to 10s to appear.")
+                    except:
+                        pass
+                except Exception as e:
+                    st.error(f"Could not write file: {e}")
+                    st.code(rego_template, language="rego")
+                    st.info("Copy the code above and save it manually.")
 
 
 ui_dir = os.path.dirname(os.path.abspath(__file__))
-st.image(f"{ui_dir}/otel-logo.png", width=300)
-st.title("OpAMP Server")
+st.image(f"{ui_dir}/otel-logo.png", width=200)
+
+tabs = st.tabs(["Agents", "Policies", "Alerts", "Reports", "Help"])
+
+tab_fleet = tabs[0]
+tab_policies = tabs[1]
+tab_alerts = tabs[2]
+tab_help = tabs[3]
+tab_reports = tabs[4]
 
 data = get_agents()
 
 render_sidebar(data)
 
-if st.session_state.get("show_help"):
-    st.session_state.show_help = False
-    show_setup_help()
-
-if st.session_state.get("show_feedback"):
-    st.session_state.show_feedback = False
-    show_feedback_dialog()
-
-if st.session_state.get("show_reports"):
-    st.session_state.show_reports = False
-    show_reports_dialog()
-
-if st.session_state.get("show_alerts"):
-    st.session_state.show_alerts = False
-    show_alerts_dialog()
-
-if st.session_state.get("show_policies_modal"):
-    show_policies_modal()
-
-
-st.divider()
-
-if data["agents"]:
-    agents = data["agents"]
-    
-    st.header("Fleet Management")
-    st.caption(f"Showing {len(agents)} agent(s)")
+with tab_fleet:
+    if data["agents"]:
+        agents = data["agents"]
+        
+        st.header("Agent List")
+        st.caption(f"Showing {len(agents)} agent(s)")
 
     view_mode_options = ["Table", "By Property"]
     saved_view_mode = st.query_params.get("view_mode", "Table")
@@ -1084,10 +965,10 @@ if data["agents"]:
         with col1:
             st.markdown("**Components**")
         with col2:
-            if st.button("Create Slim Distro", key="create_slim_distro", use_container_width=True):
-                st.session_state.show_help = False
-                st.session_state.show_feedback = False
-                st.session_state.show_slim_distro_builder = True
+            show_slim_distro_builder_inline = st.checkbox("Create Slim Distro", key="slim_distro_toggle")
+        
+        if show_slim_distro_builder_inline:
+            show_slim_distro_builder_page(comps)
         
         COMPONENT_ORDER = ["receiver", "processor", "exporter", "extension", "connector"]
         
@@ -1212,13 +1093,26 @@ if data["agents"]:
             st.caption("Toggle to show configuration")
         else:
             st.caption("No effective config available from this collector")
-        
-        if st.session_state.get("show_slim_distro_builder"):
-            show_slim_distro_builder_modal(comps)
-else:
-    if "error" in data:
-        st.error("Server offline — no agents")
     else:
-        st.info("No agents connected. Start an OpenTelemetry Collector with OpAMP extension to see it here.")
+        if "error" in data:
+            st.error("Server offline — no agents")
+        else:
+            st.info("No agents connected. Start an OpenTelemetry Collector with OpAMP extension to see it here.")
+
+
+with tab_policies:
+    show_policies_page()
+
+
+with tab_alerts:
+    show_alerts_page()
+
+
+with tab_help:
+    show_setup_help_page()
+
+
+with tab_reports:
+    show_reports_page()
 
 

@@ -10,6 +10,8 @@ This server also lets you:
 - Build minimal OTel Collectors (server generates a new `manifest.yaml` which you build with the [OpenTelemetry Collector Builder [OCB]](https://github.com/open-telemetry/opentelemetry-collector/tree/main/cmd/builder))
 - Validate connected collectors against OPA compliance policies
 
+Want to learn more about OpAMP? [Read the spec](https://opentelemetry.io/docs/specs/opamp/).
+
 ## Architecture
 
 ```

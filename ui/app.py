@@ -76,7 +76,21 @@ def render_sidebar(data: dict):
             st.session_state.show_help = True
             st.session_state.show_alerts = False
         
-        st.caption("[What is OpAMP? Learn more →](https://opentelemetry.io/docs/specs/opamp/)")
+        st.markdown("""
+<style>
+.opamp-link {
+    background-color: #f0f2f6;
+    padding: 10px 12px;
+    border-radius: 6px;
+    text-align: center;
+    font-size: 13px;
+    margin: 4px 0;
+}
+</style>
+<div class="opamp-link">
+    <a href="https://opentelemetry.io/docs/specs/opamp/" target="_blank">📖 What is OpAMP? Learn more</a>
+</div>
+""", unsafe_allow_html=True)
         
         st.divider()
         

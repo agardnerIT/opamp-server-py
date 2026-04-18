@@ -4,7 +4,18 @@ from pathlib import Path
 import streamlit as st
 import requests
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timezone
+
+
+def format_local_time(utc_str):
+    if not utc_str:
+        return "N/A"
+    try:
+        dt = datetime.fromisoformat(utc_str.replace("Z", "+00:00"))
+        local_dt = dt.astimezone()
+        return local_dt.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return utc_str[:19] if len(utc_str) > 19 else utc_str
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ui.manifest import generate_manifest, generate_ocb_command
@@ -876,7 +887,7 @@ if data["agents"]:
                 "Agent ID": a["id"][:16] + "...",
                 "Healthy": "✅" if a.get("healthy") else "❌" if a.get("healthy") is False else "⚪",
                 "Compliance": _compliance_badge(a.get("compliance")),
-                "Last Heartbeat": a.get("last_heartbeat", "N/A")[:19] if a.get("last_heartbeat") else "N/A",
+                "Last Heartbeat": format_local_time(a.get("last_heartbeat")),
             }
             for a in agents
         ])
@@ -964,7 +975,7 @@ if data["agents"]:
             st.markdown("**Agent ID**")
             st.code(selected_id[:32] + "..." if len(selected_id) > 32 else selected_id, height=60)
             st.markdown("**Last Heartbeat**")
-            st.caption(last_heartbeat[:19] if last_heartbeat else "N/A")
+            st.caption(format_local_time(last_heartbeat))
         
         with col2:
             comps = comps or {}

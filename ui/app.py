@@ -891,13 +891,20 @@ if data["agents"]:
     st.header("Fleet Management")
     st.caption(f"Showing {len(agents)} agent(s)")
 
+    view_mode_options = ["Table", "By Property"]
+    saved_view_mode = st.query_params.get("view_mode", "Table")
+    default_index = view_mode_options.index(saved_view_mode) if saved_view_mode in view_mode_options else 0
+
     view_mode = st.radio(
         "View Mode",
-        ["Table", "By Property"],
+        view_mode_options,
         horizontal=True,
-        index=0,
+        index=default_index,
         key="view_mode"
     )
+    
+    if view_mode != saved_view_mode:
+        st.query_params["view_mode"] = view_mode
     
     if view_mode == "Table":
         try:
@@ -946,11 +953,18 @@ if data["agents"]:
         discovered_props = list(set(a.get("key", "") for a in attrs))
         
         all_props = sorted(set(available_properties + discovered_props))
+        
+        saved_group = st.query_params.get("group_by", all_props[0] if all_props else "")
+        default_index = all_props.index(saved_group) if saved_group in all_props else 0
+        
         col1, col2 = st.columns([1, 2])
         with col1:
-            group_by = st.selectbox("Group by", all_props, label_visibility="collapsed")
+            group_by = st.selectbox("Group by", all_props, index=default_index, label_visibility="collapsed", key="group_by")
         with col2:
             search = st.text_input("Search", placeholder="Filter by value...", label_visibility="collapsed")
+        
+        if group_by != saved_group:
+            st.query_params["group_by"] = group_by
         
         def get_property_value(agent, prop):
             desc = agent.get("description", {})

@@ -758,8 +758,8 @@ tabs = st.tabs(["Agents", "Policies", "Alerts", "Reports", "Help"])
 tab_fleet = tabs[0]
 tab_policies = tabs[1]
 tab_alerts = tabs[2]
-tab_help = tabs[3]
-tab_reports = tabs[4]
+tab_reports = tabs[3]
+tab_help = tabs[4]
 
 data = get_agents()
 
@@ -1005,9 +1005,7 @@ with tab_fleet:
         st.divider()
         
         compliance = fleet_agent.get("compliance")
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            st.markdown("**Compliance**")
+        st.markdown("**Compliance**")
         
         try:
             health_resp = requests.get(f"{SERVER_URL}/health", timeout=5)
@@ -1015,12 +1013,6 @@ with tab_fleet:
             opa_enabled = health_data.get("opa_enabled", False)
         except Exception:
             opa_enabled = False
-        
-        with col2:
-            if opa_enabled:
-                if st.button("View Policies", key=f"btn_view_pol_{selected_id[:8]}", disabled=not selected_id):
-                    st.session_state.show_policies_modal = True
-                    st.rerun()
         
         if not opa_enabled:
             st.info("Compliance checking is disabled. Set `OPA_ENABLED=true` and configure `OPA_URL` to enable.")

@@ -8,6 +8,7 @@ extensions:
       non_identifying_attributes:
         "agent.name": "collector1"
         "environment": "development"
+        "description": "foobar"
     capabilities:
       reports_health: true
       reports_effective_config: true

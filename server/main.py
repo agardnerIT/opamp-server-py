@@ -152,6 +152,8 @@ async def opamp_endpoint(request: Request) -> Response:
         
         send_new_agent_alert(agent_id)
     else:
+        AGENT_REGISTRY.update(agent_id, last_heartbeat=utcnow())
+        
         if 'health' in agent_dict and agent_dict['health']:
             healthy = agent_dict['health'].get('healthy', False)
             AGENT_REGISTRY.update(agent_id, healthy=healthy)
@@ -182,13 +184,6 @@ async def opamp_endpoint(request: Request) -> Response:
             status = agent_dict['remoteConfigStatus'].get('status', 'UNSET')
             AGENT_REGISTRY.update(agent_id, remote_config_status=status)
         
-        if 'health' in agent_dict and not agent_dict['health']:
-            logger.info(f"Agent sent empty health (disconnect): {agent_id}")
-            AGENT_REGISTRY.remove(agent_id)
-            PROM_AGENT_HEALTH.remove(agent_id)
-            update_metrics()
-            return Response(content=response.SerializeToString(), media_type="application/x-protobuf")
-        
         PROM_MESSAGES_RECEIVED.labels(message_type="heartbeat").inc()
     
     if 'agentDisconnect' in agent_dict:
@@ -196,8 +191,6 @@ async def opamp_endpoint(request: Request) -> Response:
         AGENT_REGISTRY.remove(agent_id)
         PROM_AGENT_HEALTH.remove(agent_id)
         update_metrics()
-    
-    cleanup_stale_agents()
     
     return Response(
         content=response.SerializeToString(),
@@ -375,4 +368,6 @@ if __name__ == "__main__":
         port=4320,
         keepalive_timeout=300,
         timeout_keep_alive=300,
+        limit_concurrency=1000,
+        backlog=1024,
     )

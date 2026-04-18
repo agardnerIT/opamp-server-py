@@ -2,7 +2,7 @@ extensions:
   opamp:
     server:
       http:
-        endpoint: http://localhost:4320/v1/opamp
+        endpoint: http://127.0.0.1:4320/v1/opamp
         polling_interval: 5s
     agent_description:
       non_identifying_attributes:

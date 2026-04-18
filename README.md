@@ -72,8 +72,6 @@ Configure via UI at `/alerts` endpoint. Webhook sends JSON with `event_type` and
 | `agent_disconnected` | Agent becomes stale |
 | `compliance_violation` | OPA policy fails |
 
-> ⚠️ **Warning**: Enable alerts will cause alert spam until issue #27 is resolved.
-
 ## OPA (Optional)
 
 Run OPA server, then set `OPA_ENABLED=true`.
@@ -87,7 +85,7 @@ Run OPA server, then set `OPA_ENABLED=true`.
 ### Policies
 ```bash
 docker run --rm -it -p 8181:8181 -v $(pwd)/policies:/policies \
-  openpolicyagent/opa run --server --bundle /policies --watch
+  openpolicyagent/opa run --server --bundle /policies --watch --addr :8181
 ```
 
 Add `package opamp.agent.compliance.<name>` policies to `policies/tags/`.

@@ -76,6 +76,8 @@ def render_sidebar(data: dict):
             st.session_state.show_help = True
             st.session_state.show_alerts = False
         
+        st.caption("[What is OpAMP? Learn more →](https://opentelemetry.io/docs/specs/opamp/)")
+        
         st.divider()
         
         if st.button("📊 Reports", use_container_width=True):

@@ -54,12 +54,23 @@ def get_agent(agent_id):
 
 def render_sidebar(data: dict):
     with st.sidebar:
+        try:
+            health_resp = requests.get(f"{SERVER_URL}/health", timeout=5)
+            health_data = health_resp.json() if health_resp.status_code == 200 else {}
+            opa_available = health_data.get("opa_enabled", False)
+        except Exception:
+            opa_available = False
+        
         st.markdown("**Server**")
         st.caption(get_server_url())
         
         status = "🟢 Online" if "error" not in data else "🔴 Offline"
         st.markdown("**Status**")
         st.caption(status)
+        
+        if opa_available:
+            st.markdown("**Open Policy Agent**")
+            st.caption("🟢 Available")
         
         st.markdown("**Connected Agents**")
         st.caption(f"{data.get('count', 0)} connected")
@@ -77,6 +88,13 @@ def render_sidebar(data: dict):
             st.session_state.show_slim_distro_builder = False
             st.session_state.show_policies_modal = False
             st.session_state.show_alerts = True
+
+        if st.button("📜 View Policies", use_container_width=True):
+            st.session_state.show_help = False
+            st.session_state.show_feedback = False
+            st.session_state.show_slim_distro_builder = False
+            st.session_state.show_alerts = False
+            st.session_state.show_policies_modal = True
         
         st.divider()
         
@@ -882,6 +900,34 @@ if data["agents"]:
     )
     
     if view_mode == "Table":
+        try:
+            health_resp = requests.get(f"{SERVER_URL}/health", timeout=5)
+            health_data = health_resp.json() if health_resp.status_code == 200 else {}
+            opa_enabled = health_data.get("opa_enabled", False)
+        except Exception:
+            opa_enabled = False
+
+        if opa_enabled:
+            st.markdown("**Check Compliance**")
+            selected_ids = st.multiselect(
+                "Select agents",
+                options=[a["id"] for a in agents],
+                format_func=lambda x: x[:16] + "...",
+                label_visibility="collapsed"
+            )
+            if st.button("✅ Check Compliance", use_container_width=True):
+                if selected_ids:
+                    with st.spinner("Checking..."):
+                        for agent_id in selected_ids:
+                            try:
+                                requests.get(f"{SERVER_URL}/agent/{agent_id}/compliance", timeout=30)
+                            except Exception:
+                                pass
+                        st.success(f"Done ({len(selected_ids)})")
+                        st.rerun()
+                else:
+                    st.warning("Select agents first")
+
         df = pd.DataFrame([
             {
                 "Agent ID": a["id"][:16] + "...",
@@ -967,7 +1013,7 @@ if data["agents"]:
         
         st.markdown(f"### {health_icon} Agent Details")
         
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         
         with col1:
             st.metric("Status", health_text)
@@ -993,7 +1039,7 @@ if data["agents"]:
                     st.markdown(f"**{key}:** {value}")
             else:
                 st.caption("No attributes")
-        
+
         with col3:
             tags = capability_tags or []
             st.metric("Capabilities", len(tags))
@@ -1004,6 +1050,19 @@ if data["agents"]:
                     st.markdown(f"{tag.get('icon', '•')} {tag.get('label', 'Unknown')}")
             else:
                 st.caption("No capabilities")
+
+        with col4:
+            compliance = fleet_agent.get("compliance") if fleet_agent else None
+            comp_status = "Compliant" if compliance and compliance.get("compliant") is True else "Non-compliant" if compliance and compliance.get("compliant") is False else "Unknown"
+            comp_color = "normal" if compliance and compliance.get("compliant") is True else "inverse" if compliance and compliance.get("compliant") is False else "off"
+            st.metric("Compliance", comp_status, delta_color=comp_color)
+            st.divider()
+            st.markdown("**Violations**")
+            if compliance and compliance.get("violations"):
+                for v in compliance.get("violations", []):
+                    st.caption(f"⚠️ {v}")
+            else:
+                st.caption("None")
         
         st.divider()
         
@@ -1051,7 +1110,7 @@ if data["agents"]:
         st.divider()
         
         compliance = fleet_agent.get("compliance")
-        col1, col2, col3 = st.columns([3, 1, 1])
+        col1, col2 = st.columns([3, 1])
         with col1:
             st.markdown("**Compliance**")
         
@@ -1067,19 +1126,6 @@ if data["agents"]:
                 if st.button("View Policies", key=f"btn_view_pol_{selected_id[:8]}", disabled=not selected_id):
                     st.session_state.show_policies_modal = True
                     st.rerun()
-        
-        with col3:
-            if opa_enabled:
-                if st.button("Check Compliance", key=f"btn_check_cmp_{selected_id[:8]}", disabled=not selected_id):
-                    with st.spinner("Checking compliance..."):
-                        try:
-                            resp = requests.get(f"{SERVER_URL}/agent/{selected_id}/compliance", timeout=10)
-                            if resp.status_code == 200:
-                                st.rerun()
-                        except Exception as e:
-                            st.error(f"Failed to check compliance: {e}")
-            else:
-                st.caption("OPA disabled")
         
         if not opa_enabled:
             st.info("Compliance checking is disabled. Set `OPA_ENABLED=true` and configure `OPA_URL` to enable.")

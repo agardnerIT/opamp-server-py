@@ -351,10 +351,13 @@ def test_alerts(request: dict = None):
 
 @app.get("/health")
 def health_check():
+    from server.opa_client import OPAClient
+    opa_client = OPAClient()
+    opa_available = OPA_ENABLED and opa_client.is_available()
     return {
         "status": "healthy",
         "agents_connected": AGENT_REGISTRY.count,
-        "opa_enabled": OPA_ENABLED,
+        "opa_enabled": opa_available,
         "opa_url": OPA_URL if OPA_ENABLED else None,
         "alerts_enabled": ALERT_CONFIG["enabled"],
     }

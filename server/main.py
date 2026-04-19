@@ -99,6 +99,13 @@ def auth_status():
     return {"password_required": bool(ADMIN_PASSWORD)}
 
 
+@app.get("/auth/verify")
+def verify_auth(request: Request):
+    if not require_admin(request):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    return {"authenticated": True}
+
+
 AGENT_METRICS: Dict[str, Dict[str, Any]] = {}
 
 logger.info(f"Loaded {AGENT_REGISTRY.count} agents from persistent store")

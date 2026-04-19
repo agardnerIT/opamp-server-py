@@ -74,12 +74,13 @@
 - Added pretty-printed JSON defaults
 - Committed & closed
 
-## Issue #44: Streamlit Multi-Page UI (In Progress)
-- Restructured UI from tab-based (`st.tabs()`) to Streamlit's native multi-page architecture
+## Issue #44: Streamlit Multi-Page UI
+- Restructured UI from tab-based (`st.tabs()`) to Streamlit's native multi-page architecture with pages/ directory
 - Created `ui/shared.py` for shared imports, constants, sidebar navigation
 - Created pages: `1_Agents.py`, `2_Reports.py`, `3_Admin.py`, `4_Help.py`
-- Replaced `st.page_link()` (crashes with `KeyError: 'url_pathname'`) with `st.button()` + `st.switch_page(Path(...))`
+- Simplified `app.py` to landing page, hid default "app" sidebar header with CSS
 - Maintained `?agent_id=` query parameter routing for agent detail views
+- Committed & closed
 
 # Technical Discoveries
 

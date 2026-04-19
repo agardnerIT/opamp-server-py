@@ -43,8 +43,21 @@ if get_auth_status().get("password_required"):
             submitted = st.form_submit_button("Submit")
 
             if submitted and password:
-                st.session_state["admin_password"] = password
-                st.rerun()
+                test_encoded = base64.b64encode(f":{password}".encode()).decode()
+                test_headers = {"Authorization": f"Basic {test_encoded}"}
+                try:
+                    test_resp = requests.get(f"{SERVER_URL}/auth/verify", headers=test_headers, timeout=5)
+                    if test_resp.status_code == 200:
+                        st.session_state["admin_password"] = password
+                        st.rerun()
+                    elif test_resp.status_code == 401:
+                        st.session_state["admin_password_attempt"] += 1
+                        st.session_state["admin_password_error"] = True
+                        st.rerun()
+                    else:
+                        st.error(f"Server error: {test_resp.status_code}")
+                except Exception as e:
+                    st.error(f"Failed to verify password: {e}")
             elif submitted and not password:
                 st.session_state["admin_password_attempt"] += 1
                 st.error("Password required")

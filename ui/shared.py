@@ -42,8 +42,9 @@ def get_auth_status():
 
 
 def get_auth_headers():
-    if "admin_password_input" in st.session_state and st.session_state["admin_password_input"]:
-        password = st.session_state["admin_password_input"]
+    # Check for stored password from Admin page first, then current input
+    password = st.session_state.get("admin_password") or st.session_state.get("admin_password_input")
+    if password:
         encoded = base64.b64encode(f":{password}".encode()).decode()
         return {"Authorization": f"Basic {encoded}"}
     return {}
@@ -70,8 +71,21 @@ def prompt_for_password(password_key, attempt_key, page_suffix=""):
                 submitted = st.form_submit_button("Submit")
                 
                 if submitted and password:
-                    st.session_state[password_key] = password
-                    st.rerun()
+                    test_encoded = base64.b64encode(f":{password}".encode()).decode()
+                    test_headers = {"Authorization": f"Basic {test_encoded}"}
+                    try:
+                        test_resp = requests.get(f"{SERVER_URL}/auth/verify", headers=test_headers, timeout=5)
+                        if test_resp.status_code == 200:
+                            st.session_state[password_key] = password
+                            st.rerun()
+                        elif test_resp.status_code == 401:
+                            st.session_state[attempt_key] += 1
+                            st.session_state["admin_password_error"] = True
+                            st.rerun()
+                        else:
+                            st.error(f"Server error: {test_resp.status_code}")
+                    except Exception as e:
+                        st.error(f"Failed to verify password: {e}")
                 elif submitted and not password:
                     st.session_state[attempt_key] += 1
                     st.error("Password required")

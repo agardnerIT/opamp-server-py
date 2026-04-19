@@ -14,6 +14,7 @@ from ui.shared import (
     show_slim_distro_builder_page,
     generate_manifest,
     generate_ocb_command,
+    get_auth_headers,
     json_module,
     yaml,
     base64,
@@ -371,32 +372,92 @@ if agent_id_param:
     
     if not opa_enabled:
         st.info("Compliance checking is disabled. Set `OPA_ENABLED=true` and configure `OPA_URL` to enable.")
-    elif compliance:
-        policy_results = compliance.get("policy_results", [])
-        if policy_results:
-            df_policies = pd.DataFrame([
-                {
-                    "Policy": p["name"],
-                    "Status": "✅ Pass" if p["status"] == "pass" else "❌ Fail" if p["status"] == "fail" else "⚪ Unknown",
-                    "Details": ", ".join(p["violations"]) if p["violations"] else "-",
-                }
-                for p in policy_results
-            ])
-            st.dataframe(df_policies, width='stretch', hide_index=True)
-        else:
-            if compliance.get("compliant") is True:
-                st.success("Agent is compliant with all policies")
-            elif compliance.get("compliant") is False:
-                violations = compliance.get("violations", [])
-                if violations:
-                    for v in violations:
-                        st.error(f"Violation: {v}")
-                else:
-                    st.error("Agent is not compliant")
-            else:
-                st.warning("Compliance status unknown")
     else:
-        st.caption("Compliance not yet evaluated. Click 'Check Compliance' to evaluate.")
+        has_password = bool(st.session_state.get("admin_password"))
+        
+        if not has_password:
+            st.warning("🔒 Admin password required to check compliance")
+            
+            if "compliance_auth_attempt" not in st.session_state:
+                st.session_state["compliance_auth_attempt"] = 0
+            form_key = f"compliance_auth_{selected_id[:8]}_{st.session_state['compliance_auth_attempt']}"
+            
+            with st.form(key=form_key):
+                if st.session_state.get("admin_password_error"):
+                    st.error("Invalid password. Try again.")
+                    st.session_state["admin_password_error"] = False
+                password = st.text_input("Password", type="password", key=f"compliance_pwd_{selected_id[:8]}")
+                col1, col2 = st.columns([1, 1])
+                with col1:
+                    submit = st.form_submit_button("Submit", type="primary")
+                with col2:
+                    skip = st.form_submit_button("Skip")
+                
+                if submit and password:
+                    test_encoded = base64.b64encode(f":{password}".encode()).decode()
+                    test_headers = {"Authorization": f"Basic {test_encoded}"}
+                    try:
+                        test_resp = requests.get(f"{SERVER_URL}/auth/verify", headers=test_headers, timeout=5)
+                        if test_resp.status_code == 200:
+                            st.session_state["admin_password"] = password
+                            st.rerun()
+                        elif test_resp.status_code == 401:
+                            st.session_state["compliance_auth_attempt"] += 1
+                            st.session_state["admin_password_error"] = True
+                            st.rerun()
+                        else:
+                            st.error(f"Server error: {test_resp.status_code}")
+                    except Exception as e:
+                        st.error(f"Failed to verify password: {e}")
+                elif submit and not password:
+                    st.error("Please enter a password")
+        else:
+            if st.button("🔍 Check Compliance", key=f"check_compliance_{selected_id[:8]}_btn", type="primary"):
+                with st.spinner("Evaluating compliance..."):
+                    try:
+                        headers = get_auth_headers()
+                        resp = requests.post(f"{SERVER_URL}/compliance/check/{selected_id}", headers=headers, timeout=30)
+                        if resp.status_code == 200:
+                            st.success("Compliance check completed!")
+                            st.session_state.metrics_refresh = st.session_state.get("metrics_refresh", {})
+                            st.session_state.metrics_refresh[selected_id] = True
+                            st.rerun()
+                        elif resp.status_code == 401:
+                            st.session_state.pop("admin_password", None)
+                            st.session_state["compliance_auth_attempt"] = st.session_state.get("compliance_auth_attempt", 0) + 1
+                            st.session_state["admin_password_error"] = True
+                            st.rerun()
+                        else:
+                            st.error(f"Compliance check failed: {resp.text}")
+                    except Exception as e:
+                        st.error(f"Failed to check compliance: {e}")
+        
+        if compliance:
+            policy_results = compliance.get("policy_results", [])
+            if policy_results:
+                df_policies = pd.DataFrame([
+                    {
+                        "Policy": p["name"],
+                        "Status": "✅ Pass" if p["status"] == "pass" else "❌ Fail" if p["status"] == "fail" else "⚪ Unknown",
+                        "Details": ", ".join(p["violations"]) if p["violations"] else "-",
+                    }
+                    for p in policy_results
+                ])
+                st.dataframe(df_policies, width='stretch', hide_index=True)
+            else:
+                if compliance.get("compliant") is True:
+                    st.success("Agent is compliant with all policies")
+                elif compliance.get("compliant") is False:
+                    violations = compliance.get("violations", [])
+                    if violations:
+                        for v in violations:
+                            st.error(f"Violation: {v}")
+                    else:
+                        st.error("Agent is not compliant")
+                else:
+                    st.warning("Compliance status unknown")
+        else:
+            st.caption("Compliance not yet evaluated. Click 'Check Compliance' to evaluate.")
     
     st.divider()
     

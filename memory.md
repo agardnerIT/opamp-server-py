@@ -59,3 +59,33 @@
 
 - Always keep dependencies up to date with latest versions
 - Check for updates regularly and update requirements files accordingly
+
+# Completed Work
+
+## Issue #42: Admin Mode Consolidation
+- Consolidated scattered admin operations into a single Admin page/tab with unified password prompt
+- Fixed duplicate form keys, wrong password UX, and broken agent navigation links
+- Committed & closed
+
+## Issue #43: Configurable CloudEvents Alerts
+- Implemented configurable alert headers/body templates with CloudEvents 1.0 defaults
+- Added autosave before test alert, removed global `ALERT_ENABLED` toggle
+- Fixed JSON brace substitution using `str.replace()` instead of `str.format()`
+- Added pretty-printed JSON defaults
+- Committed & closed
+
+## Issue #44: Streamlit Multi-Page UI (In Progress)
+- Restructured UI from tab-based (`st.tabs()`) to Streamlit's native multi-page architecture
+- Created `ui/shared.py` for shared imports, constants, sidebar navigation
+- Created pages: `1_Agents.py`, `2_Reports.py`, `3_Admin.py`, `4_Help.py`
+- Replaced `st.page_link()` (crashes with `KeyError: 'url_pathname'`) with `st.button()` + `st.switch_page(Path(...))`
+- Maintained `?agent_id=` query parameter routing for agent detail views
+
+# Technical Discoveries
+
+- `st.page_link()` throws `KeyError: 'url_pathname'` with string paths or improperly resolved paths in this project structure
+- `str.format()` conflicts with JSON braces in alert body templates; use `str.replace()` instead
+- Streamlit multi-page apps require `st.set_page_config()` in each page file
+- Duplicate `st.form()` keys cause `StreamlitAPIException`; use unique keys per page/context
+- `st.rerun()` immediately after `st.error()` clears the error; use session state flags or `st.stop()` to persist errors
+- Test alert button should autosave config before sending, otherwise unsaved templates are ignored

@@ -739,361 +739,399 @@ val := attr.value.stringValue if {{
                     st.info("Copy the code above and save it manually.")
 
 
-ui_dir = os.path.dirname(os.path.abspath(__file__))
-st.image(f"{ui_dir}/otel-logo.png", width=200)
-
-tabs = st.tabs(["Agents", "Policies", "Alerts", "Reports", "Help"])
-
-tab_fleet = tabs[0]
-tab_policies = tabs[1]
-tab_alerts = tabs[2]
-tab_reports = tabs[3]
-tab_help = tabs[4]
-
-data = get_agents()
-
-render_sidebar(data)
-
-with tab_fleet:
-    if data["agents"]:
-        agents = data["agents"]
+def show_agent_details_page(agent_id):
+    ui_dir = os.path.dirname(os.path.abspath(__file__))
+    st.image(f"{ui_dir}/otel-logo.png", width=200)
+    
+    try:
+        health_resp = requests.get(f"{SERVER_URL}/health", timeout=5)
+        health_data = health_resp.json() if health_resp.status_code == 200 else {}
+        opa_available = health_data.get("opa_enabled", False)
+    except Exception:
+        opa_available = False
+    
+    with st.sidebar:
+        st.markdown("**Server Status**")
+        status = "🟢 Online"
+        st.caption(status)
         
-        st.header("Agent List")
-        st.caption(f"Showing {len(agents)} agent(s)")
-
-    view_mode_options = ["Table", "By Property"]
-    saved_view_mode = st.query_params.get("view_mode", "Table")
-    default_index = view_mode_options.index(saved_view_mode) if saved_view_mode in view_mode_options else 0
-
-    view_mode = st.radio(
-        "View Mode",
-        view_mode_options,
-        horizontal=True,
-        index=default_index,
-        key="view_mode"
-    )
+        if opa_available:
+            st.markdown("**Open Policy Agent Status**")
+            st.caption("🟢 Available")
+        
+        st.markdown('<a href="/Agents" target="_self">← Back to Agents</a>', unsafe_allow_html=True)
     
-    if view_mode != saved_view_mode:
-        st.query_params["view_mode"] = view_mode
+    selected_id = agent_id
     
-    if view_mode == "Table":
-        try:
-            health_resp = requests.get(f"{SERVER_URL}/health", timeout=5)
-            health_data = health_resp.json() if health_resp.status_code == 200 else {}
-            opa_enabled = health_data.get("opa_enabled", False)
-        except Exception:
-            opa_enabled = False
-
-        if opa_enabled:
-            st.markdown("**Check Compliance**")
-            selected_ids = st.multiselect(
-                "Select agents",
-                options=[a["id"] for a in agents],
-                format_func=lambda x: x[:16] + "...",
-                label_visibility="collapsed"
-            )
-            if st.button("✅ Check Compliance", use_container_width=True):
-                if selected_ids:
-                    with st.spinner("Checking..."):
-                        for agent_id in selected_ids:
-                            try:
-                                requests.get(f"{SERVER_URL}/agent/{agent_id}/compliance", timeout=30)
-                            except Exception:
-                                pass
-                        st.success(f"Done ({len(selected_ids)})")
-                        st.rerun()
-                else:
-                    st.warning("Select agents first")
-
-        df = pd.DataFrame([
-            {
-                "Agent ID": a["id"][:16] + "...",
-                "Healthy": "✅" if a.get("healthy") else "❌" if a.get("healthy") is False else "⚪",
-                "Compliance": _compliance_badge(a.get("compliance")),
-                "Last Heartbeat": format_local_time(a.get("last_heartbeat")),
-            }
-            for a in agents
-        ])
-        st.dataframe(df, width='stretch', hide_index=True)
+    data = get_agents()
+    agents = data.get("agents", [])
+    
+    fleet_agent = next((a for a in agents if a.get("id") == selected_id), None)
+    detailed_agent = get_agent(selected_id)
+    
+    if "error" not in detailed_agent:
+        health = detailed_agent.get("healthy") or fleet_agent.get("healthy") if fleet_agent else detailed_agent.get("healthy")
+        description = detailed_agent.get("description") or fleet_agent.get("description") if fleet_agent else detailed_agent.get("description")
+        capability_tags = detailed_agent.get("capability_tags") or fleet_agent.get("capability_tags") if fleet_agent else detailed_agent.get("capability_tags")
+        comps = detailed_agent.get("components") or fleet_agent.get("components") if fleet_agent else detailed_agent.get("components")
+        last_heartbeat = detailed_agent.get("last_heartbeat") or fleet_agent.get("last_heartbeat") if fleet_agent else detailed_agent.get("last_heartbeat")
+        effective_config = detailed_agent.get("effective_config")
     else:
-        available_properties = ["environment", "host.arch", "host.name", "os.type", "os.version"]
-        
-        desc = agents[0].get("description", {}) if agents else {}
-        attrs = desc.get("nonIdentifyingAttributes", []) + desc.get("identifyingAttributes", [])
-        discovered_props = list(set(a.get("key", "") for a in attrs))
-        
-        all_props = sorted(set(available_properties + discovered_props))
-        
-        saved_group = st.query_params.get("group_by", all_props[0] if all_props else "")
-        default_index = all_props.index(saved_group) if saved_group in all_props else 0
-        
-        col1, col2 = st.columns([1, 2])
-        with col1:
-            group_by = st.selectbox("Group by", all_props, index=default_index, label_visibility="collapsed", key="group_by")
-        with col2:
-            search = st.text_input("Search", placeholder="Filter by value...", label_visibility="collapsed")
-        
-        if group_by != saved_group:
-            st.query_params["group_by"] = group_by
-        
-        def get_property_value(agent, prop):
-            desc = agent.get("description", {})
-            attrs = desc.get("nonIdentifyingAttributes", []) + desc.get("identifyingAttributes", [])
+        agent = fleet_agent
+        health = agent.get("healthy") if agent else None
+        description = agent.get("description") if agent else {}
+        capability_tags = agent.get("capability_tags") if agent else []
+        comps = agent.get("components") if agent else {}
+        last_heartbeat = agent.get("last_heartbeat") if agent else "N/A"
+        effective_config = None
+    
+    health_color = "green" if health else "red" if health is False else "gray"
+    health_text = "Healthy" if health else "Unhealthy" if health is False else "Unknown"
+    health_icon = "✅" if health else "❌" if health is False else "⚪"
+    
+    st.markdown("### Agent Details")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("Status", health_text)
+        st.divider()
+        st.markdown("**Agent ID**")
+        st.code(selected_id[:32] + "..." if len(selected_id) > 32 else selected_id, height=60)
+        st.markdown("**Last Heartbeat**")
+        st.caption(format_local_time(last_heartbeat))
+    
+    with col2:
+        comps = comps or {}
+        total = sum(len(c) for c in comps.values()) if comps else 0
+        used = sum(1 for cl in comps.values() for c in cl if c.get("used")) if comps else 0
+        st.metric("Components", f"{used}/{total} in use")
+        st.divider()
+        st.markdown("**Attributes**")
+        desc = description or {}
+        if desc:
+            attrs = desc.get("identifyingAttributes", []) + desc.get("nonIdentifyingAttributes", [])
             for attr in attrs:
-                if attr.get("key", "") == prop:
-                    value = attr.get("value", {})
-                    return list(value.values())[0] if value else "Unknown"
-            return "Ungrouped"
-        
-        groups = {}
-        for agent in agents:
-            value = get_property_value(agent, group_by)
-            if value not in groups:
-                groups[value] = []
-            groups[value].append(agent)
-        
-        search_lower = search.lower() if search else ""
-        for group_name, group_agents in sorted(groups.items()):
-            if search_lower and search_lower not in group_name.lower():
-                continue
-            healthy = sum(1 for a in group_agents if a.get("healthy"))
-            with st.expander(f"**{group_name}** ({len(group_agents)} agents, {healthy} healthy)", expanded=True):
-                for agent in group_agents:
-                    health_icon = "✅" if agent.get("healthy") else "❌" if agent.get("healthy") is False else "⚪"
-                    st.markdown(f"{health_icon} `{agent['id'][:16]}...`")
+                key = attr.get("key", "")
+                value = list(attr.get("value", {}).values())[0] if attr.get("value") else "N/A"
+                st.markdown(f"**{key}:** {value}")
+        else:
+            st.caption("No attributes")
+
+    with col3:
+        tags = capability_tags or []
+        st.metric("Capabilities", len(tags))
+        st.divider()
+        st.markdown("**Capabilities**")
+        if tags:
+            for tag in tags:
+                st.markdown(f"{tag.get('icon', '•')} {tag.get('label', 'Unknown')}")
+        else:
+            st.caption("No capabilities")
+
+    with col4:
+        compliance = fleet_agent.get("compliance") if fleet_agent else None
+        comp_status = "Compliant" if compliance and compliance.get("compliant") is True else "Non-compliant" if compliance and compliance.get("compliant") is False else "Unknown"
+        comp_color = "normal" if compliance and compliance.get("compliant") is True else "inverse" if compliance and compliance.get("compliant") is False else "off"
+        st.metric("Compliance", comp_status, delta_color=comp_color)
+        st.divider()
+        st.markdown("**Violations**")
+        if compliance and compliance.get("violations"):
+            for v in compliance.get("violations", []):
+                st.caption(f"⚠️ {v}")
+        else:
+            st.caption("None")
     
     st.divider()
-    st.header("Agent Details")
     
-    selected_id = st.selectbox(
-        "Select an agent",
-        options=[a["id"] for a in agents],
-        format_func=lambda x: x[:16] + "...",
-        key="agent_selector"
-    )
+    col1, col2 = st.columns([4, 1])
+    with col1:
+        st.markdown("**Components**")
+    with col2:
+        show_slim_distro_builder_inline = st.checkbox("Create Slim Distro", key="slim_distro_toggle")
     
-    if selected_id:
-        fleet_agent = next((a for a in agents if a.get("id") == selected_id), None)
-        detailed_agent = get_agent(selected_id)
+    if show_slim_distro_builder_inline:
+        show_slim_distro_builder_page(comps)
+    
+    COMPONENT_ORDER = ["receiver", "processor", "exporter", "extension", "connector"]
+    
+    all_components = []
+    for comp_type in COMPONENT_ORDER:
+        if comp_type in comps:
+            for comp in comps[comp_type]:
+                all_components.append({
+                    "Type": comp_type.title(),
+                    "Name": comp["id"],
+                    "Version": comp.get("version", ""),
+                    "In Use": "✅" if comp["used"] else "❌"
+                })
+    
+    if all_components:
+        show_in_use_only = st.toggle(
+            "Show in-use components only",
+            value=False,
+            key=f"in_use_toggle_{selected_id[:8] if selected_id else 'none'}"
+        )
         
-        if "error" not in detailed_agent:
-            health = detailed_agent.get("healthy") or fleet_agent.get("healthy") if fleet_agent else detailed_agent.get("healthy")
-            description = detailed_agent.get("description") or fleet_agent.get("description") if fleet_agent else detailed_agent.get("description")
-            capability_tags = detailed_agent.get("capability_tags") or fleet_agent.get("capability_tags") if fleet_agent else detailed_agent.get("capability_tags")
-            comps = detailed_agent.get("components") or fleet_agent.get("components") if fleet_agent else detailed_agent.get("components")
-            last_heartbeat = detailed_agent.get("last_heartbeat") or fleet_agent.get("last_heartbeat") if fleet_agent else detailed_agent.get("last_heartbeat")
-            effective_config = detailed_agent.get("effective_config")
+        if show_in_use_only:
+            df_comps = pd.DataFrame([c for c in all_components if c["In Use"] == "✅"])
         else:
-            agent = fleet_agent
-            health = agent.get("healthy") if agent else None
-            description = agent.get("description") if agent else {}
-            capability_tags = agent.get("capability_tags") if agent else []
-            comps = agent.get("components") if agent else {}
-            last_heartbeat = agent.get("last_heartbeat") if agent else "N/A"
+            df_comps = pd.DataFrame(all_components)
         
-        health_color = "green" if health else "red" if health is False else "gray"
-        health_text = "Healthy" if health else "Unhealthy" if health is False else "Unknown"
-        health_icon = "✅" if health else "❌" if health is False else "⚪"
-        
-        st.markdown(f"### {health_icon} Agent Details")
-        
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            st.metric("Status", health_text)
-            st.divider()
-            st.markdown("**Agent ID**")
-            st.code(selected_id[:32] + "..." if len(selected_id) > 32 else selected_id, height=60)
-            st.markdown("**Last Heartbeat**")
-            st.caption(format_local_time(last_heartbeat))
-        
-        with col2:
-            comps = comps or {}
-            total = sum(len(c) for c in comps.values()) if comps else 0
-            used = sum(1 for cl in comps.values() for c in cl if c.get("used")) if comps else 0
-            st.metric("Components", f"{used}/{total} in use")
-            st.divider()
-            st.markdown("**Attributes**")
-            desc = description or {}
-            if desc:
-                attrs = desc.get("identifyingAttributes", []) + desc.get("nonIdentifyingAttributes", [])
-                for attr in attrs:
-                    key = attr.get("key", "")
-                    value = list(attr.get("value", {}).values())[0] if attr.get("value") else "N/A"
-                    st.markdown(f"**{key}:** {value}")
-            else:
-                st.caption("No attributes")
-
-        with col3:
-            tags = capability_tags or []
-            st.metric("Capabilities", len(tags))
-            st.divider()
-            st.markdown("**Tags**")
-            if tags:
-                for tag in tags:
-                    st.markdown(f"{tag.get('icon', '•')} {tag.get('label', 'Unknown')}")
-            else:
-                st.caption("No capabilities")
-
-        with col4:
-            compliance = fleet_agent.get("compliance") if fleet_agent else None
-            comp_status = "Compliant" if compliance and compliance.get("compliant") is True else "Non-compliant" if compliance and compliance.get("compliant") is False else "Unknown"
-            comp_color = "normal" if compliance and compliance.get("compliant") is True else "inverse" if compliance and compliance.get("compliant") is False else "off"
-            st.metric("Compliance", comp_status, delta_color=comp_color)
-            st.divider()
-            st.markdown("**Violations**")
-            if compliance and compliance.get("violations"):
-                for v in compliance.get("violations", []):
-                    st.caption(f"⚠️ {v}")
-            else:
-                st.caption("None")
-        
-        st.divider()
-        
-        col1, col2 = st.columns([4, 1])
-        with col1:
-            st.markdown("**Components**")
-        with col2:
-            show_slim_distro_builder_inline = st.checkbox("Create Slim Distro", key="slim_distro_toggle")
-        
-        if show_slim_distro_builder_inline:
-            show_slim_distro_builder_page(comps)
-        
-        COMPONENT_ORDER = ["receiver", "processor", "exporter", "extension", "connector"]
-        
-        all_components = []
-        for comp_type in COMPONENT_ORDER:
-            if comp_type in comps:
-                for comp in comps[comp_type]:
-                    all_components.append({
-                        "Type": comp_type.title(),
-                        "Name": comp["id"],
-                        "Version": comp.get("version", ""),
-                        "In Use": "✅" if comp["used"] else "❌"
-                    })
-        
-        if all_components:
-            show_in_use_only = st.toggle(
-                "Show in-use components only",
-                value=False,
-                key=f"in_use_toggle_{selected_id[:8] if selected_id else 'none'}"
-            )
-            
-            if show_in_use_only:
-                df_comps = pd.DataFrame([c for c in all_components if c["In Use"] == "✅"])
-            else:
-                df_comps = pd.DataFrame(all_components)
-            
-            if not df_comps.empty:
-                st.dataframe(df_comps, width='stretch', hide_index=True)
-            else:
-                st.write("No in-use components")
+        if not df_comps.empty:
+            st.dataframe(df_comps, width='stretch', hide_index=True)
         else:
-            st.write("No components reported")
-        
-        st.divider()
-        
-        compliance = fleet_agent.get("compliance")
-        st.markdown("**Compliance**")
-        
-        try:
-            health_resp = requests.get(f"{SERVER_URL}/health", timeout=5)
-            health_data = health_resp.json() if health_resp.status_code == 200 else {}
-            opa_enabled = health_data.get("opa_enabled", False)
-        except Exception:
-            opa_enabled = False
-        
-        if not opa_enabled:
-            st.info("Compliance checking is disabled. Set `OPA_ENABLED=true` and configure `OPA_URL` to enable.")
-        elif compliance:
-            policy_results = compliance.get("policy_results", [])
-            if policy_results:
-                df_policies = pd.DataFrame([
-                    {
-                        "Policy": p["name"],
-                        "Status": "✅ Pass" if p["status"] == "pass" else "❌ Fail" if p["status"] == "fail" else "⚪ Unknown",
-                        "Details": ", ".join(p["violations"]) if p["violations"] else "-",
-                    }
-                    for p in policy_results
-                ])
-                st.dataframe(df_policies, width='stretch', hide_index=True)
-            else:
-                if compliance.get("compliant") is True:
-                    st.success("Agent is compliant with all policies")
-                elif compliance.get("compliant") is False:
-                    violations = compliance.get("violations", [])
-                    if violations:
-                        for v in violations:
-                            st.error(f"Violation: {v}")
-                    else:
-                        st.error("Agent is not compliant")
-                else:
-                    st.warning("Compliance status unknown")
-        else:
-            st.caption("Compliance not yet evaluated. Click 'Check Compliance' to evaluate.")
-        
-        st.divider()
-        
-        col1, col2 = st.columns([4, 1])
-        with col1:
-            st.markdown("**Collector Configuration**")
-        with col2:
-            show_config = st.toggle("Show", value=False, key=f"show_config_{selected_id[:8] if selected_id else 'none'}")
-        
-        if show_config and effective_config:
-            import json
-            yaml_body = None
-            try:
-                import base64
-                config_data = json.loads(effective_config)
-                raw_body = config_data.get("configMap", {}).get("configMap", {}).get("", {}).get("body", "")
-                if isinstance(raw_body, str):
-                    try:
-                        yaml_body = base64.b64decode(raw_body).decode("utf-8")
-                    except Exception:
-                        yaml_body = raw_body.encode("utf-8").decode("utf-8")
-                elif isinstance(raw_body, bytes):
-                    yaml_body = raw_body.decode("utf-8")
-                else:
-                    yaml_body = str(raw_body)
-            except Exception:
-                pass
-            
-            if yaml_body:
-                st.download_button(
-                    "Download YAML",
-                    yaml_body,
-                    file_name="collector-config.yaml",
-                    mime="text/yaml",
-                    key=f"download_config_{selected_id[:8] if selected_id else 'none'}"
-                )
-                st.code(yaml_body, language="yaml", height=400)
-            else:
-                st.caption("Failed to parse configuration")
-        elif effective_config:
-            st.caption("Toggle to show configuration")
-        else:
-            st.caption("No effective config available from this collector")
+            st.write("No in-use components")
     else:
-        if "error" in data:
-            st.error("Server offline — no agents")
+        st.write("No components reported")
+    
+    st.divider()
+    
+    compliance = fleet_agent.get("compliance")
+    st.markdown("**Compliance**")
+    
+    try:
+        health_resp = requests.get(f"{SERVER_URL}/health", timeout=5)
+        health_data = health_resp.json() if health_resp.status_code == 200 else {}
+        opa_enabled = health_data.get("opa_enabled", False)
+    except Exception:
+        opa_enabled = False
+    
+    if not opa_enabled:
+        st.info("Compliance checking is disabled. Set `OPA_ENABLED=true` and configure `OPA_URL` to enable.")
+    elif compliance:
+        policy_results = compliance.get("policy_results", [])
+        if policy_results:
+            df_policies = pd.DataFrame([
+                {
+                    "Policy": p["name"],
+                    "Status": "✅ Pass" if p["status"] == "pass" else "❌ Fail" if p["status"] == "fail" else "⚪ Unknown",
+                    "Details": ", ".join(p["violations"]) if p["violations"] else "-",
+                }
+                for p in policy_results
+            ])
+            st.dataframe(df_policies, width='stretch', hide_index=True)
         else:
-            st.info("No agents connected. Start an OpenTelemetry Collector with OpAMP extension to see it here.")
+            if compliance.get("compliant") is True:
+                st.success("Agent is compliant with all policies")
+            elif compliance.get("compliant") is False:
+                violations = compliance.get("violations", [])
+                if violations:
+                    for v in violations:
+                        st.error(f"Violation: {v}")
+                else:
+                    st.error("Agent is not compliant")
+            else:
+                st.warning("Compliance status unknown")
+    else:
+        st.caption("Compliance not yet evaluated. Click 'Check Compliance' to evaluate.")
+    
+    st.divider()
+    
+    col1, col2 = st.columns([4, 1])
+    with col1:
+        st.markdown("**Collector Configuration**")
+    with col2:
+        show_config = st.toggle("Show", value=False, key=f"show_config_{selected_id[:8] if selected_id else 'none'}")
+    
+    if show_config and effective_config:
+        import json
+        yaml_body = None
+        try:
+            import base64
+            config_data = json.loads(effective_config)
+            raw_body = config_data.get("configMap", {}).get("configMap", {}).get("", {}).get("body", "")
+            if isinstance(raw_body, str):
+                try:
+                    yaml_body = base64.b64decode(raw_body).decode("utf-8")
+                except Exception:
+                    yaml_body = raw_body.encode("utf-8").decode("utf-8")
+            elif isinstance(raw_body, bytes):
+                yaml_body = raw_body.decode("utf-8")
+            else:
+                yaml_body = str(raw_body)
+        except Exception:
+            pass
+        
+        if yaml_body:
+            st.download_button(
+                "Download YAML",
+                yaml_body,
+                file_name="collector-config.yaml",
+                mime="text/yaml",
+                key=f"download_config_{selected_id[:8] if selected_id else 'none'}"
+            )
+            st.code(yaml_body, language="yaml", height=400)
+        else:
+            st.caption("Failed to parse configuration")
+    elif effective_config:
+        st.caption("Toggle to show configuration")
+    else:
+        st.caption("No effective config available from this collector")
 
+agent_id_param = st.query_params.get("agent_id")
 
-with tab_policies:
-    show_policies_page()
+if agent_id_param:
+    show_agent_details_page(agent_id_param)
+else:
+    ui_dir = os.path.dirname(os.path.abspath(__file__))
+    st.image(f"{ui_dir}/otel-logo.png", width=200)
+    
+    tabs = st.tabs(["Agents", "Policies", "Alerts", "Reports", "Help"])
+    
+    tab_fleet = tabs[0]
+    tab_policies = tabs[1]
+    tab_alerts = tabs[2]
+    tab_reports = tabs[3]
+    tab_help = tabs[4]
+    
+    data = get_agents()
+    
+    render_sidebar(data)
 
+    with tab_fleet:
+        if data["agents"]:
+            agents = data["agents"]
+            
+            st.header("Agent List")
+            st.caption(f"Showing {len(agents)} agent(s)")
 
-with tab_alerts:
-    show_alerts_page()
+        view_mode_options = ["Table", "By Property"]
+        saved_view_mode = st.query_params.get("view_mode", "Table")
+        default_index = view_mode_options.index(saved_view_mode) if saved_view_mode in view_mode_options else 0
 
+        view_mode = st.radio(
+            "View Mode",
+            view_mode_options,
+            horizontal=True,
+            index=default_index,
+            key="view_mode"
+        )
+        
+        if view_mode != saved_view_mode:
+            st.query_params["view_mode"] = view_mode
+        
+        if view_mode == "Table":
+            try:
+                health_resp = requests.get(f"{SERVER_URL}/health", timeout=5)
+                health_data = health_resp.json() if health_resp.status_code == 200 else {}
+                opa_enabled = health_data.get("opa_enabled", False)
+            except Exception:
+                opa_enabled = False
 
-with tab_help:
-    show_setup_help_page()
+            if opa_enabled:
+                st.markdown("**Check Compliance**")
+                selected_ids = st.multiselect(
+                    "Select agents",
+                    options=[a["id"] for a in agents],
+                    format_func=lambda x: x[:16] + "...",
+                    label_visibility="collapsed"
+                )
+                if st.button("Check Compliance", use_container_width=True):
+                    if selected_ids:
+                        with st.spinner("Checking..."):
+                            for agent_id in selected_ids:
+                                try:
+                                    requests.get(f"{SERVER_URL}/agent/{agent_id}/compliance", timeout=30)
+                                except Exception:
+                                    pass
+                            st.success(f"Done ({len(selected_ids)})")
+                            st.rerun()
+                    else:
+                        st.warning("Select agents first")
 
-
-with tab_reports:
-    show_reports_page()
+            df = pd.DataFrame([
+                {
+                    "Agent": a["id"],
+                    "Healthy": "✅" if a.get("healthy") else "❌" if a.get("healthy") is False else "⚪",
+                    "Compliance": _compliance_badge(a.get("compliance")),
+                    "Last Heartbeat": format_local_time(a.get("last_heartbeat")),
+                }
+                for a in agents
+            ])
+            
+            html = '<style>td a { color: inherit; text-decoration: none; }</style>'
+            html += '<table style="width:100%">'
+            html += '<thead><tr>'
+            for col in df.columns:
+                html += f'<th>{col}</th>'
+            html += '</tr></thead><tbody>'
+            for _, row in df.iterrows():
+                agent_id = row["Agent"]
+                html += f'<tr>'
+                html += f'<td><a href="/Agents?agent_id={agent_id}" target="_self">Agent: {agent_id[:12]}...</a></td>'
+                for col in df.columns:
+                    if col != "Agent":
+                        html += f'<td>{row[col]}</td>'
+                html += '</tr>'
+            html += '</tbody></table>'
+            
+            st.markdown(html, unsafe_allow_html=True)
+        else:
+            available_properties = ["environment", "host.arch", "host.name", "os.type", "os.version"]
+            
+            desc = agents[0].get("description", {}) if agents else {}
+            attrs = desc.get("nonIdentifyingAttributes", []) + desc.get("identifyingAttributes", [])
+            discovered_props = list(set(a.get("key", "") for a in attrs))
+            
+            all_props = sorted(set(available_properties + discovered_props))
+            
+            saved_group = st.query_params.get("group_by", all_props[0] if all_props else "")
+            default_index = all_props.index(saved_group) if saved_group in all_props else 0
+            
+            col1, col2 = st.columns([1, 2])
+            with col1:
+                group_by = st.selectbox("Group by", all_props, index=default_index, label_visibility="collapsed", key="group_by")
+            with col2:
+                search = st.text_input("Search", placeholder="Filter by value...", label_visibility="collapsed")
+            
+            if group_by != saved_group:
+                st.query_params["group_by"] = group_by
+            
+            def get_property_value(agent, prop):
+                desc = agent.get("description", {})
+                attrs = desc.get("nonIdentifyingAttributes", []) + desc.get("identifyingAttributes", [])
+                for attr in attrs:
+                    if attr.get("key", "") == prop:
+                        value = attr.get("value", {})
+                        return list(value.values())[0] if value else "Unknown"
+                return "Ungrouped"
+            
+            groups = {}
+            for agent in agents:
+                value = get_property_value(agent, group_by)
+                if value not in groups:
+                    groups[value] = []
+                groups[value].append(agent)
+            
+            search_lower = search.lower() if search else ""
+            for group_name, group_agents in sorted(groups.items()):
+                if search_lower and search_lower not in group_name.lower():
+                    continue
+                healthy = sum(1 for a in group_agents if a.get("healthy"))
+                with st.expander(f"**{group_name}** ({len(group_agents)} agents, {healthy} healthy)", expanded=True):
+                    for agent in group_agents:
+                        health_icon = "✅" if agent.get("healthy") else "❌" if agent.get("healthy") is False else "⚪"
+                        st.markdown(f"**{health_icon}** [{agent['id'][:16]}...](/Agents?agent_id={agent['id']})")
+        if not data["agents"]:
+            if "error" in data:
+                st.error("Server offline — no agents")
+            else:
+                st.info("No agents connected. Start an OpenTelemetry Collector with OpAMP extension to see it here.")
+        
+        with tab_policies:
+            show_policies_page()
+        
+        
+        with tab_alerts:
+            show_alerts_page()
+        
+        
+        with tab_help:
+            show_setup_help_page()
+        
+        
+        with tab_reports:
+            show_reports_page()
 
 

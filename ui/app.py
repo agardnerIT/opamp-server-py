@@ -641,18 +641,7 @@ def show_policies_page():
         except Exception as e:
             st.error(f"Error: {e}")
         
-        st.divider()
         
-        if st.button("Reload Policies", key="page_reload_btn", use_container_width=True):
-            with st.spinner("Reloading..."):
-                try:
-                    resp = requests.post(f"{SERVER_URL}/compliance/reload", timeout=10)
-                    if resp.status_code == 200:
-                        st.success("Policies reloaded!")
-                    else:
-                        st.error("Reload failed")
-                except Exception as e:
-                    st.error(f"Error: {e}")
     
     with pol_tab3:
         st.markdown("**Available Input Fields**")

@@ -605,16 +605,79 @@ else:
         st.markdown(df.to_html(escape=False, index=False), unsafe_allow_html=True)
     
     elif view_mode == "By Property":
-        group_by = st.selectbox("Group by", ["Healthy", "Compliance"])
+        # Get all unique attribute keys from agents for dynamic grouping options
+        attr_keys = set()
+        for agent in agents:
+            desc = agent.get("description", {})
+            attrs = desc.get("identifyingAttributes", []) + desc.get("nonIdentifyingAttributes", [])
+            for attr in attrs:
+                key = attr.get("key", "")
+                if key:
+                    attr_keys.add(key)
+        
+        # Sort attribute keys and add to options
+        attr_options = sorted(attr_keys)
+        group_options = ["Healthy", "Compliance"] + attr_options
+        
+        # Get saved group_by from query params, default to "Healthy"
+        saved_group_by = st.query_params.get("group_by", "Healthy")
+        # Ensure saved value is valid
+        if saved_group_by not in group_options:
+            saved_group_by = "Healthy"
+        
+        # Initialize session state for the selectbox if not set or if query param changed externally
+        if "group_by_select" not in st.session_state or st.session_state.group_by_select not in group_options:
+            st.session_state.group_by_select = saved_group_by
+        
+        def on_group_change():
+            # Update query params when selection changes
+            st.query_params["group_by"] = st.session_state.group_by_select
+        
+        group_by = st.selectbox(
+            "Group by",
+            group_options,
+            key="group_by_select",
+            on_change=on_group_change
+        )
+        
         groups = {}
         for agent in agents:
             if group_by == "Healthy":
                 key = "Healthy" if agent.get("healthy") else "Unhealthy" if agent.get("healthy") is False else "Unknown"
+            elif group_by == "Compliance":
+                compliance = agent.get("compliance")
+                if compliance is None:
+                    key = "Not Evaluated"
+                elif compliance.get("opa_disabled"):
+                    key = "OPA Disabled"
+                elif compliance.get("compliant") is True:
+                    key = "Compliant"
+                elif compliance.get("compliant") is False:
+                    key = "Non-compliant"
+                else:
+                    key = "Unknown"
             else:
-                key = _compliance_badge(agent.get("compliance"))
+                # Group by attribute value
+                desc = agent.get("description", {})
+                attrs = desc.get("identifyingAttributes", []) + desc.get("nonIdentifyingAttributes", [])
+                key = "Not Set"
+                for attr in attrs:
+                    if attr.get("key") == group_by:
+                        value = attr.get("value", {})
+                        if value:
+                            # Extract value from the oneOf structure
+                            key = list(value.values())[0] if value else "Not Set"
+                        break
             groups.setdefault(key, []).append(agent)
         
-        for group_name, group_agents in groups.items():
+        # Sort groups alphabetically, but put "Not Set" and "Unknown" last
+        def sort_key(item):
+            name = item[0]
+            if name in ("Not Set", "Unknown", "Not Evaluated"):
+                return (1, name)
+            return (0, name)
+        
+        for group_name, group_agents in sorted(groups.items(), key=sort_key):
             st.subheader(f"{group_name} ({len(group_agents)})")
             for agent in group_agents:
                 health_icon = "✅" if agent.get("healthy") else "❌" if agent.get("healthy") is False else "⚪"

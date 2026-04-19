@@ -88,6 +88,8 @@ def cleanup_stale_agents():
         if now - agent.last_heartbeat > timeout:
             stale.append(agent.agent_id)
     
+    logger.info(f"Found {len(stale)} stale agents")
+    
     for agent_id in stale:
         logger.info(f"Removing stale agent: {agent_id}")
         AGENT_REGISTRY.remove(agent_id)

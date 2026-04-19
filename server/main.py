@@ -1,6 +1,7 @@
 import asyncio
 import binascii
 import os
+import base64
 from pathlib import Path
 import prometheus_client as prom_client
 from contextlib import asynccontextmanager
@@ -9,7 +10,8 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import Response
 from google.protobuf.json_format import MessageToDict
 from loguru import logger
-from typing import Optional
+from typing import Optional, Dict, Any
+from functools import wraps
 
 from dotenv import load_dotenv
 
@@ -21,7 +23,28 @@ from server.opa_client import evaluate_agent_compliance, get_available_policies,
 from server.alerts import get_alert_config, update_alert_config, send_test_alert, send_alert, ALERT_TYPES, ALERT_CONFIG, ALERT_EVENTS, send_new_agent_alert, send_stale_agent_alert, send_compliance_alert
 
 AGENT_TIMEOUT_SECONDS = int(os.environ.get("AGENT_TIMEOUT_SECONDS", 60))
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 _cleanup_task = None
+
+
+def require_admin(request: Request):
+    if not ADMIN_PASSWORD:
+        return True
+    
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Basic "):
+        return False
+    
+    try:
+        encoded = auth_header[6:]
+        decoded = base64.b64decode(encoded).decode("utf-8")
+        if ":" in decoded:
+            password = decoded.split(":", 1)[1]
+        else:
+            password = decoded
+        return password == ADMIN_PASSWORD
+    except Exception:
+        return False
 
 
 async def periodic_cleanup():
@@ -41,6 +64,7 @@ async def lifespan(app: FastAPI):
 prom_client.REGISTRY.unregister(prom_client.PROCESS_COLLECTOR)
 prom_client.REGISTRY.unregister(prom_client.PLATFORM_COLLECTOR)
 prom_client.REGISTRY.unregister(prom_client.GC_COLLECTOR)
+
 
 PROM_CONNECTED_AGENTS = prom_client.Gauge(
     "opamp_connected_agents",
@@ -69,10 +93,128 @@ PROM_OPA_ENABLED.set(1 if OPA_ENABLED else 0)
 
 app = FastAPI(title="OpAMP Server", lifespan=lifespan)
 
+
+@app.get("/auth/status")
+def auth_status():
+    return {"password_required": bool(ADMIN_PASSWORD)}
+
+
+AGENT_METRICS: Dict[str, Dict[str, Any]] = {}
+
 logger.info(f"Loaded {AGENT_REGISTRY.count} agents from persistent store")
 
 metrics_app = prom_client.make_asgi_app()
 app.mount("/metrics", metrics_app)
+
+
+@app.post("/v1/metrics")
+async def receive_metrics(request: Request):
+    """Receive OTLP metrics from collectors (JSON or protobuf format)"""
+    try:
+        content_type = request.headers.get("content-type", "")
+        
+        if "application/json" in content_type:
+            data = await request.json()
+            service_name = None
+            service_instance_id = None
+            
+            for resource in data.get("resourceMetrics", []):
+                for attr in resource.get("resource", {}).get("attributes", []):
+                    if attr.get("key") == "service.name":
+                        service_name = attr.get("value", {}).get("stringValue")
+                    elif attr.get("key") == "service.instance.id":
+                        service_instance_id = attr.get("value", {}).get("stringValue")
+            
+            agent_id = (service_instance_id or service_name or "").replace("-", "")
+            
+            logger.info(f"JSON metrics received: agent_id={agent_id}, found={agent_id and agent_id in AGENT_REGISTRY._agents}")
+            
+            if agent_id and agent_id in AGENT_REGISTRY._agents:
+                metrics_data = {}
+                for resource in data.get("resourceMetrics", []):
+                    for scope in resource.get("scopeMetrics", []):
+                        for metric in scope.get("metrics", []):
+                            val = _extract_json_metric_value(metric)
+                            if val is not None:
+                                metrics_data[metric.get("name", "")] = val
+                
+                AGENT_METRICS[agent_id] = {
+                    "metrics": metrics_data,
+                    "updated_at": datetime.now(timezone.utc).isoformat()
+                }
+                logger.info(f"JSON: Stored metrics for {agent_id}")
+        else:
+            body = await request.body()
+            
+            from opentelemetry.proto.collector.metrics.v1.metrics_service_pb2 import ExportMetricsServiceRequest
+            metrics_req = ExportMetricsServiceRequest()
+            metrics_req.ParseFromString(body)
+            
+            service_name = None
+            service_instance_id = None
+            
+            for resource in metrics_req.resource_metrics:
+                for attr in resource.resource.attributes:
+                    if attr.key == "service.name":
+                        service_name = attr.value.string_value
+                    elif attr.key == "service.instance.id":
+                        service_instance_id = attr.value.string_value
+            
+            agent_id = (service_instance_id or service_name or "").replace("-", "")
+            
+            logger.info(f"Protobuf metrics received: agent_id={agent_id}, found={agent_id and agent_id in AGENT_REGISTRY._agents}")
+            
+            if agent_id and agent_id in AGENT_REGISTRY._agents:
+                metrics_data = {}
+                for resource in metrics_req.resource_metrics:
+                    for scope in resource.scope_metrics:
+                        for metric in scope.metrics:
+                            val = _extract_proto_metric_value(metric)
+                            if val is not None:
+                                metrics_data[metric.name] = val
+                
+                AGENT_METRICS[agent_id] = {
+                    "metrics": metrics_data,
+                    "updated_at": datetime.now(timezone.utc).isoformat()
+                }
+                logger.info(f"Protobuf: Stored metrics for {agent_id}, log_records={metrics_data.get('otelcol_receiver_accepted_log_records')}, all={metrics_data}")
+        
+        return {"status": "success"}
+    except Exception as e:
+        logger.error(f"Failed to process metrics: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+def _extract_json_metric_value(metric: Dict) -> Any:
+    gauge = metric.get("gauge", {})
+    data_points = gauge.get("dataPoints", [])
+    if data_points:
+        dp = data_points[0]
+        if "asInt" in dp:
+            return dp["asInt"]
+        elif "asDouble" in dp:
+            return dp["asDouble"]
+    return None
+
+
+def _extract_proto_metric_value(metric) -> Any:
+    if metric.HasField("gauge"):
+        for dp in metric.gauge.data_points:
+            if dp.HasField("as_int"):
+                return dp.as_int
+            elif dp.HasField("as_double"):
+                return dp.as_double
+            elif dp.HasField("as_uint"):
+                return dp.as_uint
+    if metric.HasField("sum"):
+        for dp in metric.sum.data_points:
+            if dp.HasField("as_int"):
+                return dp.as_int
+            elif dp.HasField("as_double"):
+                return dp.as_double
+            elif dp.HasField("as_uint"):
+                return dp.as_uint
+    return None
 
 
 def update_metrics():
@@ -214,7 +356,18 @@ def get_agent(agent_id: str):
     agent = AGENT_REGISTRY.get(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
-    return agent.to_dict()
+    
+    agent_dict = agent.to_dict()
+    agent_dict["metrics"] = AGENT_METRICS.get(agent_id, {})
+    
+    return agent_dict
+
+
+@app.get("/agent/{agent_id}/metrics")
+def get_agent_metrics(agent_id: str):
+    if agent_id not in AGENT_REGISTRY._agents:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    return AGENT_METRICS.get(agent_id, {})
 
 
 @app.get("/agent/{agent_id}/compliance")
@@ -241,7 +394,10 @@ def get_agent_compliance(agent_id: str):
 
 
 @app.post("/compliance/check/{agent_id}")
-def check_compliance(agent_id: str):
+def check_compliance(agent_id: str, request: Request):
+    if not require_admin(request):
+        raise HTTPException(status_code=401, detail="Authentication required")
+    
     agent = AGENT_REGISTRY.get(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -294,8 +450,11 @@ def list_policies():
 
 
 @app.post("/compliance/reload")
-def reload_policies():
+def reload_policies(request: Request):
     """Trigger OPA to reload policies from disk"""
+    if not require_admin(request):
+        raise HTTPException(status_code=401, detail="Authentication required")
+    
     if not OPA_ENABLED:
         return {"success": False, "error": "OPA not enabled"}
     
@@ -324,7 +483,10 @@ def validate_policies():
 
 
 @app.get("/alerts")
-def get_alerts():
+def get_alerts(request: Request):
+    if not require_admin(request):
+        raise HTTPException(status_code=401, detail="Authentication required")
+    
     config = get_alert_config()
     return {
         "types": ALERT_TYPES,
@@ -334,17 +496,23 @@ def get_alerts():
 
 
 @app.put("/alerts")
-def put_alerts(request: dict):
-    config = update_alert_config(request)
+def put_alerts(request: Request, body: dict):
+    if not require_admin(request):
+        raise HTTPException(status_code=401, detail="Authentication required")
+    
+    config = update_alert_config(body)
     return {"config": config}
 
 
 @app.post("/alerts/test")
-def test_alerts(request: dict = None):
-    if request is None:
-        request = {}
-    event_type = request.get("event_type", "new_agent")
-    event_config = request.get("event_config")
+def test_alerts(request: Request, body: dict = None):
+    if not require_admin(request):
+        raise HTTPException(status_code=401, detail="Authentication required")
+    
+    if body is None:
+        body = {}
+    event_type = body.get("event_type", "new_agent")
+    event_config = body.get("event_config")
     
     if event_config:
         old_config = ALERT_CONFIG["events"].get(event_type, {})
@@ -369,7 +537,7 @@ def health_check():
         "agents_connected": AGENT_REGISTRY.count,
         "opa_enabled": opa_available,
         "opa_url": OPA_URL if OPA_ENABLED else None,
-        "alerts_enabled": ALERT_CONFIG["enabled"],
+        "alerts_enabled": True,
     }
 
 

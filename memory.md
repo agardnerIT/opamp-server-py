@@ -10,10 +10,13 @@
 - Never write sensitive information to Github issues
 - Link issues to commits (use "Closes #XX" or "Refs #XX" in commit message)
 - NEVER close issues until the user confirms they're resolved
+- Always add a comment to issues and comments that this work was assisted by AI
+- Compact your memory after we close each issue
 
 ## Issue Handling
 
 - When asked to do an issue, FIRST look it up and understand it
+- Create as mant subtasks as you need to simplify work
 - Fix the issue and add/update comments on the issue
 - Link commits to the issue but DO NOT close until explicitly told
 - This applies to all future issue work

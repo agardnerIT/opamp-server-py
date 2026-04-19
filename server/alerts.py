@@ -1,6 +1,8 @@
 import os
 import json
+import uuid
 import requests
+from datetime import datetime, timezone
 from typing import Optional
 from loguru import logger
 
@@ -23,10 +25,11 @@ ALERT_TYPES = [
 DEFAULT_EVENT_CONFIG = {
     "enabled": False,
     "webhook_url": "",
+    "headers": "",
+    "body_template": "",
 }
 
 ALERT_CONFIG = {
-    "enabled": os.environ.get("ALERT_ENABLED", "false").lower() == "true",
     "events": {
         ALERT_EVENT_NEW_AGENT: DEFAULT_EVENT_CONFIG.copy(),
         ALERT_EVENT_AGENT_DISCONNECTED: DEFAULT_EVENT_CONFIG.copy(),
@@ -34,14 +37,24 @@ ALERT_CONFIG = {
     },
 }
 
+CLOUDEVENTS_BODY_TEMPLATE = json.dumps({
+    "specversion": "1.0",
+    "type": "io.opentelemetry.opamp.agent.{event_type}",
+    "source": "opamp-server",
+    "id": "{id}",
+    "time": "{time}",
+    "datacontenttype": "application/json",
+    "data": {
+        "message": "{message}",
+    },
+})
+
 
 def get_alert_config():
     return ALERT_CONFIG.copy()
 
 
 def update_alert_config(config: dict):
-    if "enabled" in config:
-        ALERT_CONFIG["enabled"] = config["enabled"]
     if "events" in config:
         for event, event_config in config["events"].items():
             if event in ALERT_CONFIG["events"]:
@@ -54,10 +67,34 @@ def _send_webhook(message: str, config: dict, event_type: str):
     if not url:
         return False, "webhook_url not configured"
     
-    payload = {"event_type": event_type, "message": message}
+    body_template = config.get("body_template", "")
+    headers_str = config.get("headers", "")
+    
+    if not body_template:
+        body_template = CLOUDEVENTS_BODY_TEMPLATE
+    
+    replacements = {
+        "{event_type}": event_type,
+        "{message}": message,
+        "{id}": str(uuid.uuid4()),
+        "{time}": datetime.now(timezone.utc).isoformat(),
+    }
+    
+    body = body_template
+    for placeholder, value in replacements.items():
+        body = body.replace(placeholder, value)
+    
+    headers = {"Content-Type": "application/cloudevents+json; charset=UTF-8"}
+    
+    if headers_str:
+        try:
+            custom_headers = json.loads(headers_str)
+            headers.update(custom_headers)
+        except json.JSONDecodeError:
+            pass
     
     try:
-        resp = requests.post(url, json=payload, timeout=10)
+        resp = requests.post(url, data=body.encode(), headers=headers, timeout=10)
         return resp.status_code < 400, f"status: {resp.status_code}"
     except Exception as e:
         return False, str(e)

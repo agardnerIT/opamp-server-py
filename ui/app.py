@@ -1,5 +1,8 @@
 import os
 import sys
+import json as json_module
+import yaml
+import base64
 from pathlib import Path
 import streamlit as st
 import requests
@@ -34,6 +37,72 @@ SERVER_URL = f"{SERVER_HTTP_SCHEME}://{SERVER_ADDRESS}:{SERVER_PORT}"
 
 def get_server_url():
     return SERVER_URL
+
+
+def get_auth_status():
+    try:
+        resp = requests.get(f"{SERVER_URL}/auth/status", timeout=5)
+        return resp.json()
+    except Exception:
+        return {"password_required": False}
+
+
+def get_auth_headers():
+    if "admin_password_input" in st.session_state and st.session_state["admin_password_input"]:
+        password = st.session_state["admin_password_input"]
+        encoded = base64.b64encode(f":{password}".encode()).decode()
+        return {"Authorization": f"Basic {encoded}"}
+    return {}
+
+
+def prompt_for_password(password_key, attempt_key, page_suffix=""):
+    """Show password prompt. Returns password if valid, None otherwise."""
+    if get_auth_status().get("password_required"):
+        if password_key not in st.session_state:
+            if attempt_key not in st.session_state:
+                st.session_state[attempt_key] = 0
+            show_form = True
+            form_key = f"{password_key}_form_{page_suffix}_{st.session_state[attempt_key]}"
+        else:
+            show_form = False
+            form_key = None
+        
+        if show_form:
+            with st.form(form_key):
+                st.markdown("**🔒 Admin Password Required**")
+                if st.session_state.get("admin_password_error"):
+                    st.error("Invalid password. Try again.")
+                    st.session_state["admin_password_error"] = False
+                password = st.text_input("Password", type="password", key=f"{password_key}_input_{page_suffix}")
+                submitted = st.form_submit_button("Submit")
+                
+                if submitted and password:
+                    st.session_state[password_key] = password
+                    st.rerun()
+                elif submitted and not password:
+                    st.session_state[attempt_key] += 1
+                    st.error("Password required")
+                    st.rerun()
+                return None
+        else:
+            return st.session_state.get(password_key)
+    return None
+
+
+def prompt_admin_password():
+    """Show a modal to get admin password. Returns headers dict."""
+    if not get_auth_status().get("password_required"):
+        return {}
+    
+    with st.form("admin_password_form"):
+        st.markdown("**🔒 Admin Password Required**")
+        password = st.text_input("Password", type="password", key="admin_password_modal")
+        submitted = st.form_submit_button("Submit")
+        
+        if submitted and password:
+            return get_auth_headers()
+    
+    return {}
 
 
 def get_agents():
@@ -199,62 +268,247 @@ def show_feedback_dialog():
     dialog_content()
 
 
-def show_alerts_page():
+def show_admin_page():
+    st.markdown("**Admin Panel**")
+    st.caption("Sensitive operations that require authentication.")
+    st.divider()
+
+    password = None
+    if get_auth_status().get("password_required"):
+        if "admin_password" not in st.session_state:
+            if "admin_password_attempt" not in st.session_state:
+                st.session_state["admin_password_attempt"] = 0
+            show_form = True
+            form_key = f"admin_password_form_{st.session_state['admin_password_attempt']}"
+            with st.form(form_key):
+                st.markdown("**🔒 Admin Password Required**")
+                if st.session_state.get("admin_password_error"):
+                    st.error("Invalid password. Try again.")
+                    st.session_state["admin_password_error"] = False
+                password = st.text_input("Password", type="password", key="admin_password_input_main")
+                submitted = st.form_submit_button("Submit")
+
+                if submitted and password:
+                    st.session_state["admin_password"] = password
+                    st.rerun()
+                elif submitted and not password:
+                    st.session_state["admin_password_attempt"] += 1
+                    st.error("Password required")
+                    st.rerun()
+                return
+        else:
+            password = st.session_state.get("admin_password")
+
+    if password:
+        encoded = base64.b64encode(f":{password}".encode()).decode()
+        headers = {"Authorization": f"Basic {encoded}"}
+    else:
+        return
+
+    admin_tabs = st.tabs(["Alerts", "Compliance"])
+
+    with admin_tabs[0]:
+        show_alerts_content(headers)
+
+    with admin_tabs[1]:
+        show_compliance_content(headers)
+
+
+def show_alerts_content(headers):
     try:
-        resp = requests.get(f"{SERVER_URL}/alerts", timeout=5)
+        resp = requests.get(f"{SERVER_URL}/alerts", timeout=5, headers=headers)
+        if resp.status_code == 401:
+            st.session_state.pop("admin_password", None)
+            st.session_state["admin_password_attempt"] = st.session_state.get("admin_password_attempt", 0) + 1
+            st.session_state["admin_password_error"] = True
+            st.rerun()
+            return
         alert_data = resp.json()
     except Exception as e:
         st.error(f"Failed to load alerts config: {e}")
         return
-    
+
     config = alert_data.get("config", {})
     types = alert_data.get("types", [])
     events = alert_data.get("events", [])
-    
+
     event_tabs = st.tabs([e.replace("_", " ").title() for e in events])
-    
+
     event_configs = {}
-    
+
     for idx, event in enumerate(events):
         with event_tabs[idx]:
             event_config = config.get("events", {}).get(event, {})
-            
+
             event_enabled = st.checkbox("Enable", value=event_config.get("enabled", False), key=f"enabled_{event}")
             webhook_url = st.text_input("Webhook URL", value=event_config.get("webhook_url", ""), type="default", key=f"url_{event}")
-            
+
+            default_headers = json_module.dumps({"Content-Type": "application/cloudevents+json; charset=UTF-8"}, indent=2)
+            headers_json = st.text_area(
+                "Headers (JSON)",
+                value=event_config.get("headers") or default_headers,
+                key=f"headers_{event}",
+                help="Request headers as JSON. Content-Type defaults to application/cloudevents+json; charset=UTF-8"
+            )
+            body_default = json_module.dumps({"specversion":"1.0","type":"io.opentelemetry.opamp.agent.{event_type}","source":"opamp-server","id":"{id}","time":"{time}","datacontenttype":"application/json","data":{"message":"{message}"}}, indent=2)
+            st.caption("Available placeholders: **{event_type}**, **{message}**, **{id}** (auto-generated UUID), **{time}** (auto-generated UTC timestamp)")
+            body_template = st.text_area(
+                "Body Template",
+                value=event_config.get("body_template") or body_default,
+                key=f"body_{event}",
+                height=200,
+            )
+
             col1, col2 = st.columns(2)
             with col1:
                 if st.button(f"Test {event}", key=f"test_{event}"):
                     test_event_config = {
                         "enabled": event_enabled,
                         "webhook_url": webhook_url,
+                        "headers": headers_json,
+                        "body_template": body_template,
                     }
-                    test_payload = {"event_type": event, "event_config": test_event_config}
-                    test_resp = requests.post(f"{SERVER_URL}/alerts/test", json=test_payload, timeout=10)
+                    save_payload = {"events": {event: test_event_config}}
+                    requests.put(f"{SERVER_URL}/alerts", json=save_payload, timeout=5, headers=headers)
+                    test_resp = requests.post(f"{SERVER_URL}/alerts/test", json={"event_type": event}, timeout=10, headers=headers)
                     try:
                         result = test_resp.json()
-                        if result.get("success"):
+                        if test_resp.status_code == 401:
+                            st.session_state.pop("admin_password", None)
+                            st.session_state["admin_password_attempt"] = st.session_state.get("admin_password_attempt", 0) + 1
+                            st.session_state["admin_password_error"] = True
+                            st.rerun()
+                        elif result.get("success"):
                             st.success("Test sent!")
                         else:
                             st.error(f"Failed: {result.get('error')}")
                     except:
                         st.success("Test sent! (server received request)")
-            
+
             event_configs[event] = {
                 "enabled": event_enabled,
                 "webhook_url": webhook_url,
+                "headers": headers_json,
+                "body_template": body_template,
             }
-    
-    if st.button("Save & Apply", type="primary"):
+
+    if st.button("Save & Apply", type="primary", key="save_alerts"):
         new_config = {
             "events": event_configs,
         }
-        
-        resp = requests.put(f"{SERVER_URL}/alerts", json=new_config, timeout=5)
-        if resp.status_code == 200:
+
+        resp = requests.put(f"{SERVER_URL}/alerts", json=new_config, timeout=5, headers=headers)
+        if resp.status_code == 401:
+            st.session_state.pop("admin_password", None)
+            st.session_state["admin_password_attempt"] = st.session_state.get("admin_password_attempt", 0) + 1
+            st.session_state["admin_password_error"] = True
+            st.rerun()
+        elif resp.status_code == 200:
             st.success("Saved!")
         else:
             st.error("Failed to save")
+
+
+def show_compliance_content(headers):
+    col1, col2 = st.columns([1, 4])
+    with col1:
+        if st.button("Reload & Validate", key="admin_reload_validate"):
+            try:
+                resp = requests.post(f"{SERVER_URL}/compliance/reload", timeout=10, headers=headers)
+                if resp.status_code == 401:
+                    st.session_state.pop("admin_password", None)
+                    st.session_state["admin_password_attempt"] = st.session_state.get("admin_password_attempt", 0) + 1
+                    st.session_state["admin_password_error"] = True
+                    st.rerun()
+                elif resp.status_code == 200:
+                    st.success("Policies reloaded!")
+            except Exception as e:
+                st.error(f"Error: {e}")
+            st.rerun()
+
+    try:
+        resp = requests.get(f"{SERVER_URL}/compliance/validate", timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            validation = data.get("policies", [])
+
+            valid = [v for v in validation if v.get("valid")]
+            invalid = [v for v in validation if not v.get("valid")]
+
+            if valid:
+                st.success(f"✅ {len(valid)} valid policy file(s)")
+                st.markdown(f"**{len(valid)} policy rule(s)**")
+                df_policies = pd.DataFrame([
+                    {"Policy": p["name"], "Description": p.get("description", "-")}
+                    for p in valid
+                ])
+                st.dataframe(df_policies, width='stretch', hide_index=True, use_container_width=True)
+
+            if invalid:
+                st.error(f"❌ {len(invalid)} invalid policy file(s)")
+                for v in invalid:
+                    st.markdown(f"**{v['filename']}**")
+                    for err in v.get("errors", []):
+                        st.caption(f"  • {err}")
+
+            if not validation:
+                st.info("No .rego files found in policies/tags/")
+        else:
+            st.error("Failed to load policies")
+    except Exception as e:
+        st.error(f"Error: {e}")
+
+    st.divider()
+    st.markdown("**Check Agent Compliance**")
+
+    data = get_agents()
+    agents = data.get("agents", [])
+    if agents:
+        selected_ids = st.multiselect(
+            "Select agents",
+            options=[a["id"] for a in agents],
+            format_func=lambda x: x[:16] + "...",
+            label_visibility="collapsed",
+            key="admin_compliance_select"
+        )
+        if st.button("Check Compliance", type="primary", key="admin_check_compliance"):
+            if selected_ids:
+                results = []
+                for agent_id in selected_ids:
+                    try:
+                        resp = requests.get(f"{SERVER_URL}/agent/{agent_id}/compliance", timeout=30, headers=headers)
+                        if resp.status_code == 401:
+                            st.session_state.pop("admin_password", None)
+                            st.session_state["admin_password_attempt"] = st.session_state.get("admin_password_attempt", 0) + 1
+                            st.session_state["admin_password_error"] = True
+                            st.rerun()
+                            break
+                        elif resp.status_code == 200:
+                            result = resp.json()
+                            results.append((agent_id, result))
+                    except Exception as e:
+                        results.append((agent_id, {"error": str(e)}))
+                
+                if results:
+                    for agent_id, result in results:
+                        if "error" in result:
+                            st.error(f"**{agent_id[:16]}**: {result['error']}")
+                        elif result.get("compliant"):
+                            st.success(f"**{agent_id[:16]}**: ✅ Compliant")
+                        else:
+                            violations = result.get("violations", [])
+                            st.error(f"**{agent_id[:16]}**: ❌ {len(violations)} violation(s)")
+                            for v in violations:
+                                st.caption(f"  • {v}")
+                    st.session_state["last_compliance_check"] = results
+            else:
+                st.warning("Select agents first")
+    else:
+        st.info("No agents connected")
+
+
+def show_alerts_page():
+    st.info("Alerts management has moved to the **Admin** tab.")
 
 
 def generate_agent_report(data: dict, format: str = "markdown") -> str:
@@ -456,8 +710,7 @@ def get_collector_versions() -> list:
         req = urllib.request.Request(url, headers={"Accept": "application/json"})
         with urllib.request.urlopen(req, timeout=10) as response:
             data = response.read().decode()
-            import json
-            tags = json.loads(data)
+            tags = json_module.loads(data)
             versions = []
             for tag in tags:
                 name = tag.get("name", "")
@@ -581,17 +834,6 @@ def show_policies_page():
     pol_tab1, pol_tab2, pol_tab3 = st.tabs(["Policies", "Input Fields", "Create Policy"])
     
     with pol_tab1:
-        col1, col2 = st.columns([1, 4])
-        with col1:
-            if st.button("Reload & Validate", key="page_reload_validate"):
-                try:
-                    resp = requests.post(f"{SERVER_URL}/compliance/reload", timeout=10)
-                    if resp.status_code == 200:
-                        st.success("Policies reloaded!")
-                except Exception as e:
-                    st.error(f"Error: {e}")
-                st.rerun()
-        
         try:
             resp = requests.get(f"{SERVER_URL}/compliance/validate", timeout=5)
             if resp.status_code == 200:
@@ -711,10 +953,12 @@ val := attr.value.stringValue if {{
                     
                     try:
                         resp = requests.post(f"{SERVER_URL}/compliance/reload", timeout=10)
-                        if resp.status_code == 200:
-                            st.info("Policy reloaded! May take up to 10s to appear.")
-                    except:
-                        pass
+                        if resp.status_code == 401:
+                            st.warning("Policy created but reload requires admin password. Use the Admin tab.")
+                        elif resp.status_code == 200:
+                            st.success("Policy created and reloaded!")
+                    except Exception:
+                        st.success("Policy created! Reload policies in Admin tab.")
                 except Exception as e:
                     st.error(f"Could not write file: {e}")
                     st.code(rego_template, language="rego")
@@ -826,6 +1070,190 @@ def show_agent_details_page(agent_id):
     
     st.divider()
     
+    if "metrics_refresh" not in st.session_state:
+        st.session_state.metrics_refresh = {}
+    
+    if st.session_state.metrics_refresh.get(selected_id):
+        detailed_agent = get_agent(selected_id)
+        st.session_state.metrics_refresh[selected_id] = False
+    
+    col_refresh, _ = st.columns([1, 5])
+    with col_refresh:
+        if st.button("↻ Refresh", key=f"refresh_metrics_{selected_id[:8]}"):
+            st.session_state.metrics_refresh[selected_id] = True
+            st.rerun()
+    
+    metrics_data = detailed_agent.get("metrics", {})
+    if metrics_data and metrics_data.get("metrics"):
+        m = metrics_data.get("metrics", {})
+        
+        st.markdown("**Collector Telemetry**")
+        st.caption("Real-time metrics from the collector's internal telemetry. These show how data flows through the collector.")
+        
+        st.markdown("### Data Flow (Inputs)")
+        st.caption("Data being received by the collector. Sudden drops may indicate connectivity issues.")
+        
+        cols = st.columns(4)
+        with cols[0]:
+            recv_logs = m.get("otelcol_receiver_accepted_log_records")
+            st.metric("Logs In", f"{recv_logs:,.0f}" if recv_logs is not None else "-")
+        with cols[1]:
+            recv_spans = m.get("otelcol_receiver_accepted_spans")
+            st.metric("Traces In", f"{recv_spans:,.0f}" if recv_spans is not None else "-")
+        with cols[2]:
+            recv_metrics = m.get("otelcol_receiver_accepted_metric_points")
+            st.metric("Metrics In", f"{recv_metrics:,.0f}" if recv_metrics is not None else "-")
+        with cols[3]:
+            refused_logs = m.get("otelcol_receiver_refused_log_records")
+            st.metric("Refused", f"{refused_logs:,.0f}" if refused_logs is not None else "-")
+        
+        failed_logs = m.get("otelcol_receiver_failed_log_records", 0) or 0
+        if failed_logs > 0:
+            st.error(f"⚠️ Failed: {failed_logs}")
+        
+        st.markdown("### Data Flow (Outputs)")
+        st.caption("Data being sent to downstream systems. If this drops but inputs are normal, check exporter connectivity.")
+        
+        cols = st.columns(3)
+        with cols[0]:
+            sent_logs = m.get("otelcol_exporter_sent_log_records")
+            st.metric("Logs Out", f"{sent_logs:,.0f}" if sent_logs is not None else "-")
+        with cols[1]:
+            sent_spans = m.get("otelcol_exporter_sent_spans")
+            st.metric("Traces Out", f"{sent_spans:,.0f}" if sent_spans is not None else "-")
+        with cols[2]:
+            sent_metrics = m.get("otelcol_exporter_sent_metric_points")
+            st.metric("Metrics Out", f"{sent_metrics:,.0f}" if sent_metrics is not None else "-")
+        
+        st.markdown("### Collector Health")
+        st.caption("Resource usage of the collector process itself.")
+        
+        cols = st.columns(4)
+        with cols[0]:
+            cpu = m.get("otelcol_process_cpu_seconds")
+            st.metric("CPU (sec)", f"{cpu:,.1f}" if cpu is not None else "-")
+        with cols[1]:
+            mem = m.get("otelcol_process_memory_rss")
+            st.metric("Memory (MB)", f"{mem / 1024 / 1024:,.0f}" if mem is not None else "-")
+        with cols[2]:
+            heap = m.get("otelcol_process_runtime_heap_alloc_bytes")
+            st.metric("Heap (MB)", f"{heap / 1024 / 1024:,.0f}" if heap is not None else "-")
+        with cols[3]:
+            uptime = m.get("otelcol_process_uptime")
+            st.metric("Uptime (sec)", f"{uptime:,.0f}" if uptime is not None else "-")
+        
+        with st.expander("Show all raw metrics"):
+            st.caption("All available internal metrics from the collector:")
+            for k, v in sorted(m.items()):
+                st.caption(f"**{k}:** {v}")
+        
+        st.caption(f"Last updated: {metrics_data.get('updated_at', '')}")
+    else:
+        st.caption("No telemetry data received.")
+        
+        if effective_config:
+            import base64
+            try:
+                config_data = json_module.loads(effective_config)
+                raw_body = config_data.get("configMap", {}).get("configMap", {}).get("", {}).get("body", "")
+                if isinstance(raw_body, str):
+                    try:
+                        yaml_body = base64.b64decode(raw_body).decode("utf-8")
+                    except Exception:
+                        yaml_body = raw_body
+                elif isinstance(raw_body, bytes):
+                    yaml_body = raw_body.decode("utf-8")
+                else:
+                    yaml_body = str(raw_body)
+                
+                if yaml_body:
+                    config_yaml = yaml.safe_load(yaml_body)
+                    if config_yaml is None:
+                        config_yaml = {}
+                    
+                    def clean_config(d):
+                        if isinstance(d, dict):
+                            result = {}
+                            for k, v in d.items():
+                                if v is None:
+                                    continue
+                                if isinstance(v, str) and v == '':
+                                    continue
+                                if isinstance(v, dict) and v == {}:
+                                    continue
+                                result[k] = clean_config(v)
+                            return result
+                        elif isinstance(d, list):
+                            return [clean_config(i) for i in d if i is not None and i != {}]
+                        return d
+                    
+                    config_yaml = clean_config(config_yaml)
+                    
+                    if "extensions" in config_yaml and "opamp" in config_yaml["extensions"]:
+                        if "server" not in config_yaml["extensions"]["opamp"]:
+                            config_yaml["extensions"]["opamp"]["server"] = {}
+                        if "http" not in config_yaml["extensions"]["opamp"]["server"]:
+                            config_yaml["extensions"]["opamp"]["server"]["http"] = {}
+                        if "endpoint" not in config_yaml["extensions"]["opamp"]["server"]["http"]:
+                            config_yaml["extensions"]["opamp"]["server"]["http"]["endpoint"] = "http://127.0.0.1:4320/v1/opamp"
+                    
+                    if "exporters" in config_yaml and "debug" in config_yaml["exporters"]:
+                        if config_yaml["exporters"]["debug"].get("use_internal_logger"):
+                            config_yaml["exporters"]["debug"].pop("output_paths", None)
+                    
+                    if "receivers" not in config_yaml:
+                        config_yaml["receivers"] = {"otlp": {"protocols": {"grpc": {}, "http": {}}}}
+                    if "processors" not in config_yaml:
+                        config_yaml["processors"] = {"batch": {}}
+                    if "exporters" not in config_yaml:
+                        config_yaml["exporters"] = {"debug": {}}
+                    
+                    existing_pipelines = config_yaml.get("service", {}).get("pipelines", {})
+                    existing_pipelines.setdefault("traces", {
+                        "receivers": ["otlp"],
+                        "processors": ["batch"],
+                        "exporters": ["debug"]
+                    })
+                    
+                    config_yaml["service"] = {
+                        "extensions": ["opamp"],
+                        "pipelines": existing_pipelines,
+                        "telemetry": {"metrics": {
+                            "level": "basic",
+                            "readers": [{
+                                "periodic": {
+                                    "exporter": {
+                                        "otlp": {
+                                            "protocol": "http/protobuf",
+                                            "endpoint": f"http://{SERVER_URL.split('://')[1] if '://' in SERVER_URL else SERVER_URL}/v1/metrics"
+                                        }
+                                    }
+                                }
+                            }]
+                        }}
+                    }
+                    
+                    new_yaml = yaml.dump(config_yaml, default_flow_style=False, sort_keys=False)
+                    
+                    col_btn, col_exp = st.columns([1, 2])
+                    with col_btn:
+                        st.download_button(
+                            "Download Config with Telemetry",
+                            new_yaml,
+                            file_name="collector-config.yaml",
+                            mime="text/yaml",
+                            key="download_telemetry_config"
+                        )
+                    with col_exp:
+                        with st.expander("Show config"):
+                            st.code(new_yaml, language="yaml")
+                else:
+                    st.caption("Config body is empty")
+            except Exception as e:
+                st.caption(f"Could not parse config: {type(e).__name__}")
+    
+    st.divider()
+    
     col1, col2 = st.columns([4, 1])
     with col1:
         st.markdown("**Components**")
@@ -869,7 +1297,10 @@ def show_agent_details_page(agent_id):
     
     st.divider()
     
-    compliance = fleet_agent.get("compliance")
+    if fleet_agent:
+        compliance = fleet_agent.get("compliance")
+    else:
+        compliance = None
     st.markdown("**Compliance**")
     
     try:
@@ -917,35 +1348,101 @@ def show_agent_details_page(agent_id):
         show_config = st.toggle("Show", value=False, key=f"show_config_{selected_id[:8] if selected_id else 'none'}")
     
     if show_config and effective_config:
-        import json
-        yaml_body = None
         try:
             import base64
-            config_data = json.loads(effective_config)
+            config_data = json_module.loads(effective_config)
             raw_body = config_data.get("configMap", {}).get("configMap", {}).get("", {}).get("body", "")
             if isinstance(raw_body, str):
                 try:
                     yaml_body = base64.b64decode(raw_body).decode("utf-8")
                 except Exception:
-                    yaml_body = raw_body.encode("utf-8").decode("utf-8")
+                    yaml_body = raw_body
             elif isinstance(raw_body, bytes):
                 yaml_body = raw_body.decode("utf-8")
             else:
                 yaml_body = str(raw_body)
-        except Exception:
-            pass
-        
-        if yaml_body:
-            st.download_button(
-                "Download YAML",
-                yaml_body,
-                file_name="collector-config.yaml",
-                mime="text/yaml",
-                key=f"download_config_{selected_id[:8] if selected_id else 'none'}"
-            )
-            st.code(yaml_body, language="yaml", height=400)
-        else:
-            st.caption("Failed to parse configuration")
+            
+            if yaml_body:
+                config_yaml = yaml.safe_load(yaml_body)
+                if config_yaml is None:
+                    config_yaml = {}
+                
+                def clean_config(d):
+                    if isinstance(d, dict):
+                        result = {}
+                        for k, v in d.items():
+                            if v is None:
+                                continue
+                            if isinstance(v, str) and v == '':
+                                continue
+                            if isinstance(v, dict) and v == {}:
+                                continue
+                            result[k] = clean_config(v)
+                        return result
+                    elif isinstance(d, list):
+                        return [clean_config(i) for i in d if i is not None and i != {}]
+                    return d
+                
+                config_yaml = clean_config(config_yaml)
+                
+                if "extensions" in config_yaml and "opamp" in config_yaml["extensions"]:
+                    if "server" not in config_yaml["extensions"]["opamp"]:
+                        config_yaml["extensions"]["opamp"]["server"] = {}
+                    if "http" not in config_yaml["extensions"]["opamp"]["server"]:
+                        config_yaml["extensions"]["opamp"]["server"]["http"] = {}
+                    if "endpoint" not in config_yaml["extensions"]["opamp"]["server"]["http"]:
+                        config_yaml["extensions"]["opamp"]["server"]["http"]["endpoint"] = "http://127.0.0.1:4320/v1/opamp"
+                
+                if "exporters" in config_yaml and "debug" in config_yaml["exporters"]:
+                    if config_yaml["exporters"]["debug"].get("use_internal_logger"):
+                        config_yaml["exporters"]["debug"].pop("output_paths", None)
+                
+                if "receivers" not in config_yaml:
+                    config_yaml["receivers"] = {"otlp": {"protocols": {"grpc": {}, "http": {}}}}
+                if "processors" not in config_yaml:
+                    config_yaml["processors"] = {"batch": {}}
+                if "exporters" not in config_yaml:
+                    config_yaml["exporters"] = {"debug": {}}
+                
+                existing_pipelines = config_yaml.get("service", {}).get("pipelines", {})
+                existing_pipelines.setdefault("traces", {
+                    "receivers": ["otlp"],
+                    "processors": ["batch"],
+                    "exporters": ["debug"]
+                })
+                
+                config_yaml["service"] = {
+                    "extensions": ["opamp"],
+                    "pipelines": existing_pipelines,
+                    "telemetry": {"metrics": {
+                        "level": "basic",
+                        "readers": [{
+                            "periodic": {
+                                "exporter": {
+                                    "otlp": {
+                                        "protocol": "http/protobuf",
+                                        "endpoint": f"http://{SERVER_URL.split('://')[1] if '://' in SERVER_URL else SERVER_URL}/v1/metrics"
+                                    }
+                                }
+                            }
+                        }]
+                    }}
+                }
+                
+                cleaned_yaml = yaml.dump(config_yaml, default_flow_style=False, sort_keys=False)
+                
+                st.download_button(
+                    "Download Config",
+                    cleaned_yaml,
+                    file_name="collector-config.yaml",
+                    mime="text/yaml",
+                    key=f"download_config_{selected_id[:8] if selected_id else 'none'}"
+                )
+                st.code(cleaned_yaml, language="yaml", height=400)
+            else:
+                st.caption("Failed to parse configuration")
+        except Exception as e:
+            st.caption(f"Error: {e}")
     elif effective_config:
         st.caption("Toggle to show configuration")
     else:
@@ -959,19 +1456,18 @@ else:
     ui_dir = os.path.dirname(os.path.abspath(__file__))
     st.image(f"{ui_dir}/otel-logo.png", width=200)
     
-    tabs = st.tabs(["Agents", "Policies", "Alerts", "Reports", "Help"])
+    tabs = st.tabs(["Agents", "Reports", "Admin", "Help"])
     
-    tab_fleet = tabs[0]
-    tab_policies = tabs[1]
-    tab_alerts = tabs[2]
-    tab_reports = tabs[3]
-    tab_help = tabs[4]
+    tab_agents = tabs[0]
+    tab_reports = tabs[1]
+    tab_admin = tabs[2]
+    tab_help = tabs[3]
     
     data = get_agents()
     
     render_sidebar(data)
 
-    with tab_fleet:
+    with tab_agents:
         agents = data.get("agents", [])
         
         if agents:
@@ -996,126 +1492,46 @@ else:
             st.query_params["view_mode"] = view_mode
         
         if view_mode == "Table":
-            try:
-                health_resp = requests.get(f"{SERVER_URL}/health", timeout=5)
-                health_data = health_resp.json() if health_resp.status_code == 200 else {}
-                opa_enabled = health_data.get("opa_enabled", False)
-            except Exception:
-                opa_enabled = False
-
-            if opa_enabled:
-                st.markdown("**Check Compliance**")
-                selected_ids = st.multiselect(
-                    "Select agents",
-                    options=[a["id"] for a in agents],
-                    format_func=lambda x: x[:16] + "...",
-                    label_visibility="collapsed"
-                )
-                if st.button("Check Compliance", use_container_width=True):
-                    if selected_ids:
-                        with st.spinner("Checking..."):
-                            for agent_id in selected_ids:
-                                try:
-                                    requests.get(f"{SERVER_URL}/agent/{agent_id}/compliance", timeout=30)
-                                except Exception:
-                                    pass
-                            st.success(f"Done ({len(selected_ids)})")
-                            st.rerun()
-                    else:
-                        st.warning("Select agents first")
-
-            df = pd.DataFrame([
-                {
-                    "Agent": a["id"],
+            rows = []
+            for a in agents:
+                link = f'<a href="/Agents?agent_id={a["id"]}" target="_self" style="color:#0066cc;text-decoration:underline;cursor:pointer">{a["id"][:32]}{"..." if len(a["id"]) > 32 else ""}</a>'
+                rows.append({
+                    "Agent": link,
                     "Healthy": "✅" if a.get("healthy") else "❌" if a.get("healthy") is False else "⚪",
                     "Compliance": _compliance_badge(a.get("compliance")),
                     "Last Heartbeat": format_local_time(a.get("last_heartbeat")),
-                }
-                for a in agents
-            ])
-            
-            html = '<style>td a { color: inherit; text-decoration: none; }</style>'
-            html += '<table style="width:100%">'
-            html += '<thead><tr>'
-            for col in df.columns:
-                html += f'<th>{col}</th>'
-            html += '</tr></thead><tbody>'
-            for _, row in df.iterrows():
-                agent_id = row["Agent"]
-                html += f'<tr>'
-                html += f'<td><a href="/Agents?agent_id={agent_id}" target="_self">Agent: {agent_id[:12]}...</a></td>'
-                for col in df.columns:
-                    if col != "Agent":
-                        html += f'<td>{row[col]}</td>'
-                html += '</tr>'
-            html += '</tbody></table>'
-            
-            st.markdown(html, unsafe_allow_html=True)
-        else:
-            available_properties = ["environment", "host.arch", "host.name", "os.type", "os.version"]
-            
-            desc = agents[0].get("description", {}) if agents else {}
-            attrs = desc.get("nonIdentifyingAttributes", []) + desc.get("identifyingAttributes", [])
-            discovered_props = list(set(a.get("key", "") for a in attrs))
-            
-            all_props = sorted(set(available_properties + discovered_props))
-            
-            saved_group = st.query_params.get("group_by", all_props[0] if all_props else "")
-            default_index = all_props.index(saved_group) if saved_group in all_props else 0
-            
-            col1, col2 = st.columns([1, 2])
-            with col1:
-                group_by = st.selectbox("Group by", all_props, index=default_index, label_visibility="collapsed", key="group_by")
-            with col2:
-                search = st.text_input("Search", placeholder="Filter by value...", label_visibility="collapsed")
-            
-            if group_by != saved_group:
-                st.query_params["group_by"] = group_by
-            
-            def get_property_value(agent, prop):
-                desc = agent.get("description", {})
-                attrs = desc.get("nonIdentifyingAttributes", []) + desc.get("identifyingAttributes", [])
-                for attr in attrs:
-                    if attr.get("key", "") == prop:
-                        value = attr.get("value", {})
-                        return list(value.values())[0] if value else "Unknown"
-                return "Ungrouped"
-            
+                })
+            df = pd.DataFrame(rows)
+            st.markdown(df.to_html(escape=False, index=False), unsafe_allow_html=True)
+        
+        elif view_mode == "By Property":
+            group_by = st.selectbox("Group by", ["Healthy", "Compliance"])
             groups = {}
             for agent in agents:
-                value = get_property_value(agent, group_by)
-                if value not in groups:
-                    groups[value] = []
-                groups[value].append(agent)
+                if group_by == "Healthy":
+                    key = "Healthy" if agent.get("healthy") else "Unhealthy" if agent.get("healthy") is False else "Unknown"
+                else:
+                    key = _compliance_badge(a.get("compliance"))
+                groups.setdefault(key, []).append(agent)
             
-            search_lower = search.lower() if search else ""
-            for group_name, group_agents in sorted(groups.items()):
-                if search_lower and search_lower not in group_name.lower():
-                    continue
-                healthy = sum(1 for a in group_agents if a.get("healthy"))
-                with st.expander(f"**{group_name}** ({len(group_agents)} agents, {healthy} healthy)", expanded=True):
-                    for agent in group_agents:
-                        health_icon = "✅" if agent.get("healthy") else "❌" if agent.get("healthy") is False else "⚪"
-                        st.markdown(f"**{health_icon}** [{agent['id'][:16]}...](/Agents?agent_id={agent['id']})")
+            for group_name, group_agents in groups.items():
+                st.subheader(f"{group_name} ({len(group_agents)})")
+                for agent in group_agents:
+                    health_icon = "✅" if agent.get("healthy") else "❌" if agent.get("healthy") is False else "⚪"
+                    st.markdown(f"**{health_icon}** [{agent['id'][:16]}...](/Agents?agent_id={agent['id']})")
         if not data["agents"]:
             if "error" in data:
                 st.error("Server offline — no agents")
             else:
                 st.info("No agents connected. Start an OpenTelemetry Collector with OpAMP extension to see it here.")
-        
-        with tab_policies:
-            show_policies_page()
-        
-        
-        with tab_alerts:
-            show_alerts_page()
-        
-        
-        with tab_help:
-            show_setup_help_page()
-        
-        
-        with tab_reports:
-            show_reports_page()
+    
+    with tab_reports:
+        show_reports_page()
+    
+    with tab_admin:
+        show_admin_page()
+
+    with tab_help:
+        show_setup_help_page()
 
 

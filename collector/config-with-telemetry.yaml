@@ -1,0 +1,78 @@
+exporters:
+  debug:
+    sampling_initial: 2
+    sampling_thereafter: 1
+    use_internal_logger: true
+    verbosity: Detailed
+extensions:
+  opamp:
+    agent_description:
+      include_resource_attributes: false
+      non_identifying_attributes:
+        agent.name: collector1
+        description: foobar
+        environment: development
+    capabilities:
+      accepts_restart_command: false
+      reports_available_components: true
+      reports_effective_config: true
+      reports_health: true
+    ppid: 0
+    ppid_poll_interval: 5s
+    server:
+      http:
+        polling_interval: 5s
+        endpoint: http://127.0.0.1:4320/v1/opamp
+processors:
+  batch:
+    metadata_cardinality_limit: 1000
+    metadata_keys: []
+    send_batch_max_size: 0
+    send_batch_size: 8192
+    timeout: 200ms
+receivers:
+  filelog:
+    include: ["collector/file.log"]
+    start_at: beginning
+  otlp:
+    protocols:
+      grpc:
+        endpoint: localhost:4317
+        keepalive: {}
+        read_buffer_size: 524288
+        transport: tcp
+      http:
+        endpoint: localhost:4318
+        idle_timeout: 0s
+        keep_alives_enabled: true
+        logs_url_path: /v1/logs
+        metrics_url_path: /v1/metrics
+        read_header_timeout: 0s
+        traces_url_path: /v1/traces
+        transport: tcp
+        write_timeout: 0s
+service:
+  extensions:
+  - opamp
+  pipelines:
+    traces:
+      receivers:
+      - otlp
+      processors:
+      - batch
+      exporters:
+      - debug
+    logs:
+      receivers:
+        - filelog
+      exporters:
+        - debug
+  telemetry:
+    metrics:
+      level: detailed
+      readers:
+      - periodic:
+          exporter:
+            otlp:
+              protocol: http/protobuf
+              endpoint: http://localhost:4320/v1/metrics

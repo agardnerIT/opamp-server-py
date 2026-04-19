@@ -51,8 +51,8 @@ if data.get("agents"):
             index=0
         )
         report_md = generate_outdated_collectors_report(data, threshold_version)
-        outdated_count = _count_outdated_collectors(data["agents"], threshold_version)
-        st.caption(f"Collectors with components below v{threshold_version} - {outdated_count} found")
+        collectors_count, components_count = _count_outdated_collectors(data["agents"], threshold_version)
+        st.caption(f"{collectors_count} collector{'s' if collectors_count != 1 else ''} with components below v{threshold_version} ({components_count} component{'s' if components_count != 1 else ''} found)")
     
     col1, col2 = st.columns(2)
     with col1:

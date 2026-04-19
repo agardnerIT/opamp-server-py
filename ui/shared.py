@@ -313,17 +313,22 @@ def generate_outdated_collectors_report(data, latest_version="0.149.0"):
 
 
 def _count_outdated_collectors(agents, latest_version):
+    """Return tuple of (collectors_count, components_count) with outdated versions."""
     latest = parse_version(latest_version)
-    count = 0
+    collectors_count = 0
+    components_count = 0
     for agent in agents:
+        has_outdated = False
         comps = agent.get("components", {})
         for comp_list in comps.values():
             for comp in comp_list:
                 vid = comp.get("version", "")
                 if vid and parse_version(vid) < latest:
-                    count += 1
-                    break
-    return count
+                    components_count += 1
+                    has_outdated = True
+        if has_outdated:
+            collectors_count += 1
+    return collectors_count, components_count
 
 
 def show_slim_distro_builder_page(comps):

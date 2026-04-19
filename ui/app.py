@@ -578,46 +578,19 @@ def show_policies_page():
 4. Save file - changes auto-reload! (may take up to 10s)""", language="text")
     st.divider()
     
-    pol_tab1, pol_tab2, pol_tab3, pol_tab4 = st.tabs(["Policies", "Validation", "Input Fields", "Create Policy"])
+    pol_tab1, pol_tab2, pol_tab3 = st.tabs(["Policies", "Input Fields", "Create Policy"])
     
     with pol_tab1:
-        if st.button("Reload", key="page_reload_policies"):
-            try:
-                resp = requests.post(f"{SERVER_URL}/compliance/reload", timeout=10)
-                if resp.status_code == 200:
-                    st.success("Policies reloaded!")
-                else:
-                    st.error("Reload failed")
-            except Exception as e:
-                st.error(f"Error: {e}")
-            st.rerun()
-        
-        try:
-            resp = requests.get(f"{SERVER_URL}/compliance/validate", timeout=5)
-            if resp.status_code == 200:
-                data = resp.json()
-                policies = data.get("policies", [])
-                valid_policies = [p for p in policies if p.get("valid")]
-                if valid_policies:
-                    st.markdown(f"**{len(valid_policies)} policy rule(s)**")
-                    df_policies = pd.DataFrame([
-                        {"Policy": p["name"], "Description": p.get("description", "-")}
-                        for p in valid_policies
-                    ])
-                    st.dataframe(df_policies, width='stretch', hide_index=True, use_container_width=True)
-                else:
-                    st.info("No valid policies. Check Validation tab for errors.")
-            else:
-                st.error("Failed to load policies")
-        except Exception as e:
-            st.error(f"Error: {e}")
-    
-    with pol_tab2:
-        st.markdown("**Policy File Validation**")
-        st.caption("Validates .rego files for correct format")
-        
-        if st.button("Revalidate", key="page_revalidate"):
-            st.rerun()
+        col1, col2 = st.columns([1, 4])
+        with col1:
+            if st.button("Reload & Validate", key="page_reload_validate"):
+                try:
+                    resp = requests.post(f"{SERVER_URL}/compliance/reload", timeout=10)
+                    if resp.status_code == 200:
+                        st.success("Policies reloaded!")
+                except Exception as e:
+                    st.error(f"Error: {e}")
+                st.rerun()
         
         try:
             resp = requests.get(f"{SERVER_URL}/compliance/validate", timeout=5)
@@ -630,20 +603,29 @@ def show_policies_page():
                 
                 if valid:
                     st.success(f"✅ {len(valid)} valid policy file(s)")
+                    st.markdown(f"**{len(valid)} policy rule(s)**")
+                    df_policies = pd.DataFrame([
+                        {"Policy": p["name"], "Description": p.get("description", "-")}
+                        for p in valid
+                    ])
+                    st.dataframe(df_policies, width='stretch', hide_index=True, use_container_width=True)
+                
                 if invalid:
                     st.error(f"❌ {len(invalid)} invalid policy file(s)")
                     for v in invalid:
                         st.markdown(f"**{v['filename']}**")
                         for err in v.get("errors", []):
                             st.caption(f"  • {err}")
+                
                 if not validation:
                     st.info("No .rego files found in policies/tags/")
+            else:
+                st.error("Failed to load policies")
         except Exception as e:
             st.error(f"Error: {e}")
-        
-        
     
-    with pol_tab3:
+    
+    with pol_tab2:
         st.markdown("**Available Input Fields**")
         st.caption("These fields are available in your policy's `input` object:")
         
@@ -670,7 +652,7 @@ version := attr.value.stringValue''', language="rego")
             - `os.type` - Operating system type
 """)
     
-    with pol_tab4:
+    with pol_tab3:
         st.markdown("**Create New Policy**")
         st.caption("Generate a policy template and save it to policies/tags/")
         

@@ -972,11 +972,13 @@ else:
     render_sidebar(data)
 
     with tab_fleet:
-        if data["agents"]:
-            agents = data["agents"]
-            
+        agents = data.get("agents", [])
+        
+        if agents:
             st.header("Agent List")
             st.caption(f"Showing {len(agents)} agent(s)")
+        else:
+            st.info("No agents connected")
 
         view_mode_options = ["Table", "By Property"]
         saved_view_mode = st.query_params.get("view_mode", "Table")

@@ -18,7 +18,7 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 from proto.opamp_pb2 import AgentToServer, ServerToAgent, ServerCapabilities, ServerToAgentFlags
 from server.state import AgentRegistry, AgentState, AGENT_REGISTRY, utcnow
 from server.opa_client import evaluate_agent_compliance, get_available_policies, get_policy_validation, OPA_ENABLED, OPA_URL
-from server.alerts import get_alert_config, update_alert_config, send_test_alert, send_alert, ALERT_TYPES, ALERT_CONFIG, ALERT_EVENTS, send_new_agent_alert, send_stale_agent_alert
+from server.alerts import get_alert_config, update_alert_config, send_test_alert, send_alert, ALERT_TYPES, ALERT_CONFIG, ALERT_EVENTS, send_new_agent_alert, send_stale_agent_alert, send_compliance_alert
 
 AGENT_TIMEOUT_SECONDS = int(os.environ.get("AGENT_TIMEOUT_SECONDS", 60))
 _cleanup_task = None
@@ -226,6 +226,10 @@ def get_agent_compliance(agent_id: str):
     if OPA_ENABLED:
         compliance_result = evaluate_agent_compliance(agent)
         AGENT_REGISTRY.update(agent_id, compliance=compliance_result)
+        
+        if compliance_result.get("violations"):
+            send_compliance_alert(agent_id, compliance_result.get("violations", []))
+        
         return compliance_result
     else:
         return {
@@ -245,6 +249,10 @@ def check_compliance(agent_id: str):
     if OPA_ENABLED:
         compliance_result = evaluate_agent_compliance(agent)
         AGENT_REGISTRY.update(agent_id, compliance=compliance_result)
+        
+        if compliance_result.get("violations"):
+            send_compliance_alert(agent_id, compliance_result.get("violations", []))
+        
         return compliance_result
     else:
         raise HTTPException(status_code=503, detail="OPA not enabled")

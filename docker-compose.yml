@@ -45,23 +45,25 @@ services:
     restart: unless-stopped
 
   # Optional: OPA for compliance checking
-  opa:
-    image: openpolicyagent/opa:latest
-    container_name: opamp-opa
-    ports:
-      - "8181:8181"
-    volumes:
-      - ./policies:/policies:ro
-    command:
-      - "run"
-      - "--server"
-      - "--addr=:8181"
-      - "/policies"
-    networks:
-      - opamp-network
-    restart: unless-stopped
-    profiles:
-      - opa
+  # If you enable this, set OPA_ENABLED=true
+  # in .env
+  # opa:
+  #   image: openpolicyagent/opa:latest
+  #   container_name: opamp-opa
+  #   ports:
+  #     - "8181:8181"
+  #   volumes:
+  #     - ./policies:/policies:ro
+  #   command:
+  #     - "run"
+  #     - "--server"
+  #     - "--addr=:8181"
+  #     - "/policies"
+  #   networks:
+  #     - opamp-network
+  #   restart: unless-stopped
+  #   profiles:
+  #     - opa
 
   # Optional: webhook.site for testing webhooks
   # Uncomment the service below to include a built-in webhook testing endpoint

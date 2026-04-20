@@ -1,0 +1,82 @@
+# NOTE: Image tags are auto-updated by GitHub Actions on each release.
+# Current version: latest (will be updated to specific version on release)
+version: '3.8'
+
+services:
+  server:
+    image: ghcr.io/agardnerit/opamp-server-py-server:latest
+    container_name: opamp-server
+    ports:
+      - "4320:4320"
+    environment:
+      - SERVER_HTTP_SCHEME=http
+      - SERVER_ADDRESS=0.0.0.0
+      - SERVER_PORT=4320
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      - OPA_ENABLED=${OPA_ENABLED:-false}
+      - OPA_URL=${OPA_URL:-http://opa:8181}
+      - AGENT_TIMEOUT_SECONDS=${AGENT_TIMEOUT_SECONDS:-60}
+    volumes:
+      - ./data:/app/data
+    networks:
+      - opamp-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:4320/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  ui:
+    image: ghcr.io/agardnerit/opamp-server-py-ui:latest
+    container_name: opamp-ui
+    ports:
+      - "8501:8501"
+    environment:
+      - SERVER_HTTP_SCHEME=http
+      - SERVER_ADDRESS=server
+      - SERVER_PORT=4320
+    depends_on:
+      server:
+        condition: service_healthy
+    networks:
+      - opamp-network
+    restart: unless-stopped
+
+  # Optional: OPA for compliance checking
+  opa:
+    image: openpolicyagent/opa:latest
+    container_name: opamp-opa
+    ports:
+      - "8181:8181"
+    volumes:
+      - ./policies:/policies:ro
+    command:
+      - "run"
+      - "--server"
+      - "--addr=:8181"
+      - "/policies"
+    networks:
+      - opamp-network
+    restart: unless-stopped
+    profiles:
+      - opa
+
+  # Optional: webhook.site for testing webhooks
+  # Uncomment the service below to include a built-in webhook testing endpoint
+  # available on port 8084. Useful for testing alert webhooks without external services.
+  # webhook:
+  #   image: webhooksite/webhook-server:latest
+  #   container_name: opamp-webhook
+  #   ports:
+  #     - "8084:8084"
+  #   environment:
+  #     - WEBHOOK_PORT=8084
+  #   networks:
+  #     - opamp-network
+  #   restart: unless-stopped
+
+networks:
+  opamp-network:
+    driver: bridge

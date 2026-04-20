@@ -9,7 +9,7 @@ extensions:
     agent_description:
       include_resource_attributes: false
       non_identifying_attributes:
-        agent.name: collector1
+        agent.name: collector4
         description: foobar
         environment: development
     capabilities:
@@ -37,12 +37,12 @@ receivers:
   otlp:
     protocols:
       grpc:
-        endpoint: localhost:4317
+        endpoint: localhost:4347
         keepalive: {}
         read_buffer_size: 524288
         transport: tcp
       http:
-        endpoint: localhost:4318
+        endpoint: localhost:4348
         idle_timeout: 0s
         keep_alives_enabled: true
         logs_url_path: /v1/logs

@@ -135,9 +135,9 @@ jobs:
 
       - name: Update docker-compose.yml with new version
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
-          sed -i "s|image: ghcr.io/${{ github.repository }}-server:.*|image: ghcr.io/${{ github.repository }}-server:${GITHUB_REF_NAME}|g" docker-compose.yml
-          sed -i "s|image: ghcr.io/${{ github.repository }}-ui:.*|image: ghcr.io/${{ github.repository }}-ui:${GITHUB_REF_NAME}|g" docker-compose.yml
+          REPO_LOWER=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          sed -i "s|image: ghcr.io/.*-server:.*|image: ghcr.io/${REPO_LOWER}-server:${GITHUB_REF_NAME}|g" docker-compose.yml
+          sed -i "s|image: ghcr.io/.*-ui:.*|image: ghcr.io/${REPO_LOWER}-ui:${GITHUB_REF_NAME}|g" docker-compose.yml
 
       - name: Commit and push changes
         run: |

@@ -193,3 +193,6 @@ memory.md
 .dolt/
 *.db
 .beads-credential-key
+
+.agents
+skills-lock.json

@@ -4,7 +4,7 @@ version: '3.8'
 
 services:
   server:
-    image: ghcr.io/agardnerit/opamp-server-py-server:v0.0.5-test
+    image: ghcr.io/agardnerit/opamp-server-py-server:0.0.5-test
     container_name: opamp-server
     ports:
       - "4320:4320"
@@ -29,7 +29,7 @@ services:
       start_period: 10s
 
   ui:
-    image: ghcr.io/agardnerit/opamp-server-py-ui:v0.0.5-test
+    image: ghcr.io/agardnerit/opamp-server-py-ui:0.0.5-test
     container_name: opamp-ui
     ports:
       - "8501:8501"

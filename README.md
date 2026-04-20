@@ -28,7 +28,31 @@ Want to learn more about OpAMP? [Read the spec](https://opentelemetry.io/docs/sp
 
 ## Quick Start
 
-### Server
+### Docker Compose (Recommended)
+
+Pre-built images are available from GitHub Container Registry:
+- `ghcr.io/agardnerit/opamp-server-py-server:latest`
+- `ghcr.io/agardnerit/opamp-server-py-ui:latest`
+
+```bash
+# Start server and UI
+docker-compose up -d
+
+# With OPA for compliance checking
+docker-compose --profile opa up -d
+
+# View logs
+docker-compose logs -f
+```
+
+Access:
+- UI: http://localhost:8501
+- Server: http://localhost:4320
+- OPA (if enabled): http://localhost:8181
+
+### Manual Setup
+
+#### Server
 ```bash
 python -m venv ./venv
 source venv/bin/activate
@@ -36,7 +60,7 @@ pip install -r requirements.txt
 uvicorn server.main:app --port 4320
 ```
 
-### UI
+#### UI
 ```bash
 pip install -r requirements-ui.txt
 streamlit run ui/app.py

@@ -6,7 +6,8 @@
 
 ## Commit/Issue Protocol
 
-- Always create a GitHub issue BEFORE implementing a new feature
+- "Use 'bd' for task tracking" and open an issue on GitHub
+- When a task is done, close it using 'bd' and write a summary to the Git issue then close it out.
 - Never write sensitive information to Github issues
 - Link issues to commits (use "Closes #XX" or "Refs #XX" in commit message)
 - NEVER close issues until the user confirms they're resolved
@@ -59,28 +60,6 @@
 
 - Always keep dependencies up to date with latest versions
 - Check for updates regularly and update requirements files accordingly
-
-# Completed Work
-
-## Issue #42: Admin Mode Consolidation
-- Consolidated scattered admin operations into a single Admin page/tab with unified password prompt
-- Fixed duplicate form keys, wrong password UX, and broken agent navigation links
-- Committed & closed
-
-## Issue #43: Configurable CloudEvents Alerts
-- Implemented configurable alert headers/body templates with CloudEvents 1.0 defaults
-- Added autosave before test alert, removed global `ALERT_ENABLED` toggle
-- Fixed JSON brace substitution using `str.replace()` instead of `str.format()`
-- Added pretty-printed JSON defaults
-- Committed & closed
-
-## Issue #44: Streamlit Multi-Page UI
-- Restructured UI from tab-based (`st.tabs()`) to Streamlit's native multi-page architecture with pages/ directory
-- Created `ui/shared.py` for shared imports, constants, sidebar navigation
-- Created pages: `1_Agents.py`, `2_Reports.py`, `3_Admin.py`, `4_Help.py`
-- Simplified `app.py` to landing page, hid default "app" sidebar header with CSS
-- Maintained `?agent_id=` query parameter routing for agent detail views
-- Committed & closed
 
 # Technical Discoveries
 

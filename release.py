@@ -11,6 +11,31 @@ import sys
 from datetime import datetime
 from typing import Optional
 
+####################################################################
+# Usage examples:
+# List all existing tags
+# python3 release.py --list
+# Auto-bump patch version (v0.0.5-test → v0.0.6)
+# python3 release.py
+# Bump minor version
+#   python3 release.py --bump minor
+# Specify exact version
+#   python3 release.py --version v0.1.0
+# Create tag without pushing
+#   python3 release.py --no-push
+# Force create even with uncommitted changes
+#   python3 release.py --force
+# Custom tag message
+#   python3 release.py --message "Bug fixes and improvements"
+# Features:
+# - Automatically suggests next version based on existing tags
+# - Validates semantic versioning format
+# - Shows changelog since last tag
+# - Requires confirmation before creating/pushing
+# - Checks for clean working directory
+# - Provides GitHub release URL after pushing
+# To run it interactively: python3 release.py
+####################################################################
 
 def run_git_command(args: list[str], check: bool = True) -> subprocess.CompletedProcess:
     """Run a git command and return the result."""

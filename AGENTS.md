@@ -1,5 +1,17 @@
 # Agent Instructions
 
+## AI Accessibility (driving this project programmatically)
+
+This project is designed to be operated by AI agents. Layers (each wraps the previous):
+
+1. **REST API** — FastAPI at `:4320`, self-documenting: `GET /openapi.json` (machine schema), `/docs` (Swagger). Endpoint table + auth model in README → "API Reference".
+2. **`opamp_client`** (Python) — `from client import OpampClient`; reads `OPAMP_SERVER_URL` / `ADMIN_PASSWORD`. Structured errors: `OpampApiError(.status_code, .detail)`, `OpampConnectionError`.
+3. **`opampctl` CLI** — JSON output by default, `--raw` for markdown/YAML, `--db data/opamp.db` for offline SQLite reads. Config: `--server`/`--password` or env.
+4. **MCP server** — `python -m mcp_server` (stdio; `--transport sse` for remote). 19 typed tools; needs `pip install -e ".[mcp]"`. Client config snippets in README → "MCP Server".
+5. **Agent skill** — `skills/opamp-server/SKILL.md`: when/how guidance, quickstart, gotchas.
+
+When adding API endpoints: add the endpoint (docstring included), extend `client/opamp_client.py`, add an `opampctl` command, add an MCP tool, then add tests for each. All four layers must stay in sync.
+
 ## Non-Interactive Shell Commands
 
 **ALWAYS use non-interactive flags** with file operations to avoid hanging on confirmation prompts.

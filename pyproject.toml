@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "opamp-server-py"
+version = "0.1.0"
+description = "OpenTelemetry OpAMP server with OPA compliance, OCB manifest generation, an opampctl CLI, and an AI-agent-friendly REST API"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Adam Gardner" }]
+keywords = ["opamp", "opentelemetry", "otel", "collector", "compliance", "opa"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Web Environment",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Monitoring",
+]
+
+dependencies = [
+    "fastapi[standard]>=0.116.0",
+    "loguru>=0.7.0",
+    "prometheus_client>=0.22.0",
+    "uvicorn[standard]",
+    "protobuf>=5.0.0",
+    "httpx>=0.27.0",
+    "pyyaml>=6.0",
+    "typer>=0.12.0",
+]
+
+[project.optional-dependencies]
+# MCP server surface (FastMCP) for AI agents — `pip install opamp-server-py[mcp]`
+mcp = ["mcp>=1.27.0"]
+# Streamlit UI — `pip install opamp-server-py[ui]`
+ui = [
+    "streamlit>=1.40.0",
+    "pandas>=2.0.0",
+]
+# Dev/test — `pip install -e .[dev]`
+dev = [
+    "pytest>=8.0.0",
+    "requests>=2.32.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.scripts]
+opampctl = "cli.main:app"
+
+[project.urls]
+Homepage = "https://github.com/agardnerIT/opamp-server-py"
+Issues = "https://github.com/agardnerIT/opamp-server-py/issues"
+
+[tool.setuptools]
+packages = ["client", "cli", "server", "proto"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

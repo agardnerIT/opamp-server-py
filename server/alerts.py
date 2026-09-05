@@ -1,10 +1,14 @@
 import os
 import json
+import sqlite3
 import uuid
 import requests
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 from loguru import logger
+
+from server.state import DB_PATH
 
 ALERT_EVENT_NEW_AGENT = "new_agent"
 ALERT_EVENT_AGENT_DISCONNECTED = "agent_disconnected"
@@ -54,11 +58,70 @@ def get_alert_config():
     return ALERT_CONFIG.copy()
 
 
+def _init_alert_config_table(conn: sqlite3.Connection):
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS alert_config ("
+        "id INTEGER PRIMARY KEY CHECK (id = 1), config TEXT NOT NULL)"
+    )
+
+
+def load_alert_config_from_db(db_path: Path = DB_PATH) -> None:
+    """Load the persisted alert config from SQLite into ALERT_CONFIG (best-effort).
+
+    Defensive against stale/foreign data: unknown events are dropped, missing keys
+    fall back to DEFAULT_EVENT_CONFIG, and corrupt JSON or an unavailable DB just
+    logs a warning and keeps the in-memory defaults.
+    """
+    try:
+        with sqlite3.connect(db_path) as conn:
+            _init_alert_config_table(conn)
+            row = conn.execute(
+                "SELECT config FROM alert_config WHERE id=1"
+            ).fetchone()
+    except sqlite3.Error as exc:
+        logger.warning(f"Could not read alert config from {db_path}: {exc}")
+        return
+
+    if not row:
+        return
+    try:
+        stored = json.loads(row[0])
+    except (json.JSONDecodeError, TypeError) as exc:
+        logger.warning(f"Corrupt persisted alert config, using defaults: {exc}")
+        return
+
+    for event, event_config in (stored.get("events") or {}).items():
+        if event not in ALERT_CONFIG["events"]:
+            continue
+        merged = DEFAULT_EVENT_CONFIG.copy()
+        merged.update(event_config or {})
+        ALERT_CONFIG["events"][event] = merged
+    logger.info(f"Loaded alert config from {db_path}")
+
+
+def save_alert_config_to_db(db_path: Path = None) -> None:
+    """Persist ALERT_CONFIG to SQLite (best-effort; warns on failure)."""
+    db_path = db_path or DB_PATH
+    try:
+        with sqlite3.connect(db_path) as conn:
+            _init_alert_config_table(conn)
+            conn.execute(
+                "INSERT OR REPLACE INTO alert_config (id, config) VALUES (1, ?)",
+                (json.dumps(ALERT_CONFIG),),
+            )
+    except sqlite3.Error as exc:
+        logger.warning(f"Could not persist alert config to {db_path}: {exc}")
+
+
+load_alert_config_from_db()
+
+
 def update_alert_config(config: dict):
     if "events" in config:
         for event, event_config in config["events"].items():
             if event in ALERT_CONFIG["events"]:
                 ALERT_CONFIG["events"][event].update(event_config)
+    save_alert_config_to_db()
     return get_alert_config()
 
 
@@ -95,70 +158,6 @@ def _send_webhook(message: str, config: dict, event_type: str):
     
     try:
         resp = requests.post(url, data=body.encode(), headers=headers, timeout=10)
-        return resp.status_code < 400, f"status: {resp.status_code}"
-    except Exception as e:
-        return False, str(e)
-
-
-def _send_slack(message: str, config: dict):
-    url = config.get("webhook_url", "")
-    if not url:
-        return False, "webhook_url not configured"
-    
-    payload = {"text": message}
-    try:
-        resp = requests.post(url, json=payload, timeout=10)
-        return resp.status_code < 400, f"status: {resp.status_code}"
-    except Exception as e:
-        return False, str(e)
-
-
-def _send_discord(message: str, config: dict):
-    url = config.get("webhook_url", "")
-    if not url:
-        return False, "webhook_url not configured"
-    
-    payload = {"content": message}
-    try:
-        resp = requests.post(url, json=payload, timeout=10)
-        return resp.status_code < 400, f"status: {resp.status_code}"
-    except Exception as e:
-        return False, str(e)
-
-
-def _send_cloudevents(message: str, config: dict):
-    url = config.get("webhook_url", "")
-    if not url:
-        return False, "webhook_url not configured"
-    
-    headers = json.loads(config.get("headers", "{}"))
-    body = config.get("body_template", '{"text": "{message}"}').format(message=message)
-    
-    ce_headers = {
-        "Content-Type": "application/cloudevents+json",
-        "ce-type": os.environ.get("CDEVENT_TYPE", "opamp.agent.event"),
-        "ce-source": "opamp-server",
-    }
-    
-    try:
-        resp = requests.post(url, data=body.encode(), headers={**headers, **ce_headers}, timeout=10)
-        return resp.status_code < 400, f"status: {resp.status_code}"
-    except Exception as e:
-        return False, str(e)
-
-
-def _send_telegram(message: str, config: dict):
-    token = config.get("telegram_bot_token", "")
-    chat_id = config.get("telegram_chat_id", "")
-    
-    if not token or not chat_id:
-        return False, "telegram_bot_token or telegram_chat_id not configured"
-    
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = {"chat_id": chat_id, "text": message}
-    
-    try:
-        resp = requests.post(url, json=payload, timeout=10)
         return resp.status_code < 400, f"status: {resp.status_code}"
     except Exception as e:
         return False, str(e)

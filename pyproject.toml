@@ -49,13 +49,14 @@ dev = [
 
 [project.scripts]
 opampctl = "cli.main:app"
+opamp-mcp = "mcp_server.server:main"
 
 [project.urls]
 Homepage = "https://github.com/agardnerIT/opamp-server-py"
 Issues = "https://github.com/agardnerIT/opamp-server-py/issues"
 
 [tool.setuptools]
-packages = ["client", "cli", "server", "proto"]
+packages = ["client", "cli", "server", "proto", "mcp_server"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

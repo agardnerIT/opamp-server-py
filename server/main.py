@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import Response
+from pydantic import BaseModel
 from google.protobuf.json_format import MessageToDict
 from loguru import logger
 from typing import Optional, Dict, Any
@@ -19,6 +20,12 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 
 from proto.opamp_pb2 import AgentToServer, ServerToAgent, ServerCapabilities, ServerToAgentFlags
 from server.state import AgentRegistry, AgentState, AGENT_REGISTRY, utcnow
+from server.manifest import (
+    generate_manifest,
+    generate_ocb_command,
+    DEFAULT_VERSION,
+    validate_manifest_version,
+)
 from server.opa_client import evaluate_agent_compliance, get_available_policies, get_policy_validation, OPA_ENABLED, OPA_URL
 from server.alerts import get_alert_config, update_alert_config, send_test_alert, send_alert, ALERT_TYPES, ALERT_CONFIG, ALERT_EVENTS, send_new_agent_alert, send_stale_agent_alert, send_compliance_alert
 
@@ -370,11 +377,52 @@ def get_agent(agent_id: str):
     return agent_dict
 
 
+class ManifestRequest(BaseModel):
+    """Optional body for manifest generation."""
+
+    version: str = DEFAULT_VERSION
+
+
 @app.get("/agent/{agent_id}/metrics")
 def get_agent_metrics(agent_id: str):
     if agent_id not in AGENT_REGISTRY._agents:
         raise HTTPException(status_code=404, detail="Agent not found")
     return AGENT_METRICS.get(agent_id, {})
+
+
+@app.post("/agent/{agent_id}/manifest")
+def generate_agent_manifest(agent_id: str, request: ManifestRequest | None = None):
+    """Generate an OCB manifest.yaml for a slim collector build from an agent's used components.
+
+    Read-only and unauthenticated, consistent with the other agent read endpoints.
+    Returns the manifest YAML, the OCB build command, and the resolved distro version.
+    Responds 409 when the agent has no components in use (nothing to build a slim
+    distro from), and 422 when the requested distro version is not semver.
+    """
+    agent = AGENT_REGISTRY.get(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    version = DEFAULT_VERSION if request is None else request.version
+    try:
+        version = validate_manifest_version(version)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    components = agent.components
+    if not components or not any(
+        comp.get("used") for group in components.values() for comp in group
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Agent has no components in use; cannot generate a buildable OCB manifest",
+        )
+
+    return {
+        "manifest_yaml": generate_manifest(components, version),
+        "ocb_command": generate_ocb_command(version),
+        "collector_version": version,
+    }
 
 
 @app.get("/agent/{agent_id}/compliance")

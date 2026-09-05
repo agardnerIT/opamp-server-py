@@ -1,3 +1,17 @@
+"""
+OpenTelemetry Collector Builder (OCB) manifest generation.
+
+Pure module (no Streamlit / server dependencies) shared by the FastAPI server
+and the Streamlit UI so both can never drift.
+
+Generates a minimal `manifest.yaml` for a slim collector build containing ONLY
+the components an agent actually uses. See:
+- OCB: https://opentelemetry.io/docs/collector/extend/ocb/
+- OpAMP: https://opentelemetry.io/docs/specs/opamp/
+"""
+
+import re
+
 COMPONENT_GOMOD_PATHS = {
     "receiver": {
         "otlp": "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/otlpreceiver",
@@ -31,7 +45,7 @@ COMPONENT_GOMOD_PATHS = {
     },
     "exporter": {
         "otlp": "github.com/open-telemetry/opentelemetry-collector/exporter/otlpexporter",
-        "otlphttp": "github.com/open-telemetry/opentelemetry-collector/exporter/otlphttpexporter",
+        "otlphttp": "github.com/open-telemetry/opentelemetry-collector-contrib/exporter/otlphttpexporter",
         "prometheus": "github.com/open-telemetry/opentelemetry-collector-contrib/exporter/prometheusexporter",
         "prometheusremotewrite": "github.com/open-telemetry/opentelemetry-collector-contrib/exporter/prometheusremotewriteexporter",
         "debug": "github.com/open-telemetry/opentelemetry-collector/exporter/debugexporter",
@@ -67,6 +81,25 @@ COMPONENT_GOMOD_PATHS = {
 
 BASE_COLLECTOR_VERSION = "0.98.0"
 DEFAULT_VERSION = "1.0.0"
+
+# Strict semver (with optional -prerelease / +build) so a distro version can
+# never smuggle arbitrary YAML into a generated manifest.
+_SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$")
+
+
+def validate_manifest_version(version: str) -> str:
+    """Validate an OCB distro version string, raising ValueError if not semver.
+
+    The UI previously accepted free-text versions and interpolated them raw into
+    generated YAML (an injection hazard). This is the single gate for user input
+    before it reaches manifest_yaml / the OCB command.
+    """
+    if not isinstance(version, str) or not _SEMVER_RE.match(version):
+        # Do not echo the offending input back.
+        raise ValueError(
+            f"Invalid manifest version: must be semver like '{DEFAULT_VERSION}'"
+        )
+    return version
 
 
 def get_gomod_path(comp_type: str, comp_id: str) -> str:
@@ -109,24 +142,24 @@ def generate_manifest(components: dict, version: str = DEFAULT_VERSION) -> str:
         f"  otel_col_version: {BASE_COLLECTOR_VERSION}",
         f"exporters:",
     ]
-    
+
     for exp in sorted(set(exporters)):
         lines.append(f"  - gomod: {exp}")
-    
-    lines.append(f"extensions:")    
+
+    lines.append(f"extensions:")
     for ext in sorted(set(extensions)):
         lines.append(f"  - gomod: {ext}")
-    
-    lines.append(f"receivers:")    
+
+    lines.append(f"receivers:")
     for rec in sorted(set(receivers)):
         lines.append(f"  - gomod: {rec}")
-    
-    lines.append(f"processors:")    
+
+    lines.append(f"processors:")
     for pro in sorted(set(processors)):
         lines.append(f"  - gomod: {pro}")
-    
+
     if connectors:
-        lines.append(f"connectors:")    
+        lines.append(f"connectors:")
         for con in sorted(set(connectors)):
             lines.append(f"  - gomod: {con}")
 

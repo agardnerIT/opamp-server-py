@@ -69,3 +69,5 @@
 - Duplicate `st.form()` keys cause `StreamlitAPIException`; use unique keys per page/context
 - `st.rerun()` immediately after `st.error()` clears the error; use session state flags or `st.stop()` to persist errors
 - Test alert button should autosave config before sending, otherwise unsaved templates are ignored
+- Generated protobuf code (`proto/opamp_pb2.py`) requires runtime >= the protoc gencode version; if tests die at collection with `google.protobuf.runtime_version.VersionError`, upgrade: `pip install -U 'protobuf>=7.34.1'` (7.36.1 on this machine)
+- Manifest generation lives in `server/manifest.py` (moved from `ui/manifest.py`) — shared by `POST /agent/{id}/manifest` and the UI; user-supplied versions must go through `validate_manifest_version()`

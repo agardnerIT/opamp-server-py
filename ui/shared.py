@@ -10,7 +10,7 @@ import pandas as pd
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from ui.manifest import generate_manifest, generate_ocb_command
+from server.manifest import generate_manifest, generate_ocb_command
 
 SERVER_HTTP_SCHEME = os.environ.get("SERVER_HTTP_SCHEME", "http")
 SERVER_ADDRESS = os.environ.get("SERVER_ADDRESS", "localhost")

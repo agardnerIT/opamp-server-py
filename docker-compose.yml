@@ -16,6 +16,7 @@ services:
       - OPA_ENABLED=${OPA_ENABLED:-false}
       - OPA_URL=${OPA_URL:-http://opa:8181}
       - AGENT_TIMEOUT_SECONDS=${AGENT_TIMEOUT_SECONDS:-60}
+      - CORS_ORIGINS=${CORS_ORIGINS:-*}
     volumes:
       - ./data:/app/data
     networks:

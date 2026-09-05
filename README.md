@@ -87,6 +87,8 @@ extensions:
 | `SERVER_PORT` | `4320` | Server port |
 | `AGENT_TIMEOUT_SECONDS` | `60` | Seconds before stale agent removed |
 | `DATA_DIR` | `data` | SQLite database directory |
+| `ADMIN_PASSWORD` | *(empty)* | Enables HTTP Basic auth on admin endpoints (see [API](#api-reference)) |
+| `CORS_ORIGINS` | `*` | Comma-separated list of allowed CORS origins (browser clients) |
 
 ## Alerts (Webhook)
 
@@ -116,16 +118,59 @@ docker run --rm -it -p 8181:8181 -v $(pwd)/policies:/policies \
 
 Add `package opamp.agent.compliance.<name>` policies to `policies/tags/`.
 
-## Endpoints
+## API Reference
 
-| Endpoint | Method | Description |
-|----------|---------|-------------|
-| `/v1/opamp` | POST | OpAMP connection |
-| `/metrics` | GET | Prometheus metrics |
-| `/agents` | GET | List agents (filter: `healthy=true\|false\|unknown`, `status=` remote config status, or any description attribute e.g. `?environment=prod`) |
-| `/agent/{id}` | GET | Agent details |
-| `/agent/{id}/manifest` | POST | Generate OCB `manifest.yaml` + build command for a slim collector |
-| `/health` | GET | Health check |
+The server is FastAPI-based and self-documenting:
+
+- **Interactive docs:** [`/docs`](http://localhost:4320/docs) (Swagger UI) and [`/redoc`](http://localhost:4320/redoc)
+- **Machine-readable schema:** [`/openapi.json`](http://localhost:4320/openapi.json) — fetch this to call every endpoint programmatically
+
+### Authentication
+
+Auth is controlled by `ADMIN_PASSWORD`:
+
+- **Empty/unset (default): auth is disabled** — all endpoints are open.
+- **Set:** endpoints marked 🔒 below require HTTP Basic auth with any username and the admin password as the password:
+
+```bash
+# any username, ADMIN_PASSWORD as the password
+curl -u admin:changeme http://localhost:4320/alerts
+# or explicitly:
+curl -H "Authorization: Basic $(printf ':changeme' | base64)" http://localhost:4320/alerts
+```
+
+Check the auth mode with `GET /auth/status` (`{"password_required": true|false}`) and validate credentials with `GET /auth/verify`.
+
+### Endpoints
+
+| Method | Endpoint | Auth | Description |
+|--------|----------|:----:|-------------|
+| GET | `/auth/status` | | Whether `ADMIN_PASSWORD` is set (auth required) |
+| GET | `/auth/verify` | 🔒 | Validate Basic credentials (200 or 401) |
+| POST | `/v1/opamp` | | OpAMP protocol endpoint — agents connect here (protobuf) |
+| POST | `/v1/metrics` | | OTLP/HTTP metrics ingestion from collectors (JSON or protobuf) |
+| GET | `/agents` | | List agents. Filters: `healthy=true\|false\|unknown`, `status=` (remote config status, or alias `remote_config_status=`), or any description attribute, e.g. `?environment=prod`. Repeated params are OR |
+| GET | `/agent/{id}` | | Agent details incl. latest OTLP metrics |
+| GET | `/agent/{id}/metrics` | | Latest OTLP metric values for the agent |
+| POST | `/agent/{id}/manifest` | | Generate OCB `manifest.yaml` + build command for a slim collector. Optional body `{"version": "0.123.0"}`. 409 if the agent has no components in use |
+| GET | `/agent/{id}/compliance` | | Evaluate agent against OPA policies (no-op result if OPA disabled) |
+| POST | `/compliance/check/{id}` | 🔒 | Force a compliance check (503 if OPA disabled) |
+| GET | `/compliance/summary` | | Fleet-wide compliance counts |
+| GET | `/compliance/policies` | | Available OPA policies |
+| POST | `/compliance/reload` | 🔒 | Ask OPA to reload policies from disk |
+| GET | `/compliance/validate` | | Validate OPA policy files |
+| GET | `/alerts` | 🔒 | Current alert configuration |
+| PUT | `/alerts` | 🔒 | Update alert configuration |
+| POST | `/alerts/test` | 🔒 | Send a test alert (optionally with a temporary `event_config`) |
+| GET | `/health` | | Health check (server status, agent count, OPA availability) |
+| GET | `/metrics` | | Prometheus metrics |
+
+Example: filter agents by metadata and health
+
+```bash
+curl "http://localhost:4320/agents?healthy=true&environment=prod"
+curl "http://localhost:4320/agents?status=UNSET"
+```
 
 ## Development
 

@@ -7,6 +7,7 @@ import prometheus_client as prom_client
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, Request, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
 from google.protobuf.json_format import MessageToDict
@@ -98,16 +99,58 @@ PROM_OPA_ENABLED = prom_client.Gauge(
 PROM_OPA_ENABLED.set(1 if OPA_ENABLED else 0)
 
 
-app = FastAPI(title="OpAMP Server", lifespan=lifespan)
+def _parse_cors_origins(raw: str) -> list:
+    """Parse the CORS_ORIGINS env var (comma-separated origins; "*" = allow all)."""
+    return [o.strip() for o in raw.split(",") if o.strip()]
 
 
-@app.get("/auth/status")
+CORS_ORIGINS = _parse_cors_origins(os.environ.get("CORS_ORIGINS", "*"))
+
+app = FastAPI(
+    title="OpAMP Server",
+    description=(
+        "OpenTelemetry OpAMP server — inspect connected agents, build OCB collector "
+        "manifests, run OPA compliance checks, and manage alerts.\n\n"
+        "Interactive docs: [`/docs`](/docs) · ReDoc: [`/redoc`](/redoc) · "
+        "Machine-readable schema: [`/openapi.json`](/openapi.json).\n\n"
+        "**Auth:** endpoints marked as requiring auth use HTTP Basic with the admin "
+        "password (`Authorization: Basic base64(':ADMIN_PASSWORD')`). Auth is fully "
+        "disabled when `ADMIN_PASSWORD` is unset/empty — check `GET /auth/status`."
+    ),
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    # Browsers reject "Access-Control-Allow-Origin: *" alongside credentials, so only
+    # send credentials when specific origins are configured.
+    allow_credentials="*" not in CORS_ORIGINS,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+@app.get("/auth/status", tags=["auth"], summary="Check whether admin auth is required")
 def auth_status():
+    """Report whether the server requires admin authentication.
+
+    Returns `{"password_required": bool}`. `true` means `ADMIN_PASSWORD` is set and
+    sensitive endpoints expect HTTP Basic credentials; `false` means auth is disabled
+    (default when `ADMIN_PASSWORD` is unset/empty). Unauthenticated — call this first
+    to discover the auth mode.
+    """
     return {"password_required": bool(ADMIN_PASSWORD)}
 
 
-@app.get("/auth/verify")
+@app.get("/auth/verify", tags=["auth"], summary="Verify admin credentials")
 def verify_auth(request: Request):
+    """Verify admin credentials; returns 200 `{"authenticated": true}` or 401.
+
+    Requires HTTP Basic auth when `ADMIN_PASSWORD` is set (401 otherwise). Useful
+    as a preflight credential check for agents before calling other admin endpoints.
+    Always succeeds when `ADMIN_PASSWORD` is unset (auth disabled).
+    """
     if not require_admin(request):
         raise HTTPException(status_code=401, detail="Invalid credentials")
     return {"authenticated": True}
@@ -121,9 +164,17 @@ metrics_app = prom_client.make_asgi_app()
 app.mount("/metrics", metrics_app)
 
 
-@app.post("/v1/metrics")
+@app.post("/v1/metrics", tags=["telemetry"], summary="OTLP metrics ingestion endpoint for collectors")
 async def receive_metrics(request: Request):
-    """Receive OTLP metrics from collectors (JSON or protobuf format)"""
+    """Receive OTLP metrics from a collector (OTLP/HTTP: JSON or protobuf).
+
+    Accepts `application/json` or `application/x-protobuf` OTLP
+    `ExportMetricsServiceRequest` bodies. Extracts the agent identity from the
+    resource attributes `service.instance.id` (preferred) or `service.name`, and
+    stores the latest gauge values per agent. Unauthenticated. Returns
+    `{"status": "success"}`; on processing failure returns 200 with
+    `{"status": "error", "error": ...}` (ingestion errors are non-fatal by design).
+    """
     try:
         content_type = request.headers.get("content-type", "")
         
@@ -256,8 +307,16 @@ def cleanup_stale_agents():
         update_metrics()
 
 
-@app.post("/v1/opamp")
+@app.post("/v1/opamp", tags=["opamp"], summary="OpAMP protocol endpoint for agents")
 async def opamp_endpoint(request: Request) -> Response:
+    """OpAMP protocol endpoint — agents connect here.
+
+    Accepts protobuf-encoded `AgentToServer` messages and replies with
+    `ServerToAgent` (`application/x-protobuf`). Registers new agents, updates
+    heartbeats, health, description, effective config, package status, and remote
+    config status. Not for human/agent tooling use — pointed at by the collector's
+    `opamp` extension (`endpoint: http://host:4320/v1/opamp`). Unauthenticated.
+    """
     data = await request.body()
     
     response = ServerToAgent()
@@ -389,6 +448,8 @@ def list_agents(
     (identifyingAttributes + nonIdentifyingAttributes), e.g. ``?environment=prod``.
     Repeated params match any value (OR): ``?environment=prod&environment=staging``.
     Agents missing an attribute are excluded.
+
+    Unauthenticated. Returns `{"agents": [...], "count": n, "filters": {...}}`.
     """
     remote_config_status = remote_config_status if remote_config_status is not None else status
     reserved = {"healthy", "status", "remote_config_status"}
@@ -418,8 +479,14 @@ def list_agents(
     return {"agents": agents, "count": len(agents), "filters": filters}
 
 
-@app.get("/agent/{agent_id}")
+@app.get("/agent/{agent_id}", tags=["agents"], summary="Full details for one agent")
 def get_agent(agent_id: str):
+    """Return full details for a single agent, including its latest OTLP metrics.
+
+    Unauthenticated. `agent_id` is the hex instance UID (as returned by `GET /agents`).
+    Responds 404 if the agent is not connected. The `metrics` key holds the last
+    OTLP snapshot (empty dict if none received).
+    """
     agent = AGENT_REGISTRY.get(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -436,14 +503,19 @@ class ManifestRequest(BaseModel):
     version: str = DEFAULT_VERSION
 
 
-@app.get("/agent/{agent_id}/metrics")
+@app.get("/agent/{agent_id}/metrics", tags=["agents"], summary="Latest OTLP metrics for one agent")
 def get_agent_metrics(agent_id: str):
+    """Return the agent's latest ingested OTLP metric values.
+
+    Unauthenticated. `{"<metric_name>": value, ..., "updated_at": iso8601}`; empty
+    object if the agent has sent no metrics. Responds 404 if the agent is unknown.
+    """
     if agent_id not in AGENT_REGISTRY._agents:
         raise HTTPException(status_code=404, detail="Agent not found")
     return AGENT_METRICS.get(agent_id, {})
 
 
-@app.post("/agent/{agent_id}/manifest")
+@app.post("/agent/{agent_id}/manifest", tags=["agents"], summary="Generate an OCB manifest.yaml for a slim collector build")
 def generate_agent_manifest(agent_id: str, request: ManifestRequest | None = None):
     """Generate an OCB manifest.yaml for a slim collector build from an agent's used components.
 
@@ -478,8 +550,15 @@ def generate_agent_manifest(agent_id: str, request: ManifestRequest | None = Non
     }
 
 
-@app.get("/agent/{agent_id}/compliance")
+@app.get("/agent/{agent_id}/compliance", tags=["compliance"], summary="Evaluate one agent against OPA policies")
 def get_agent_compliance(agent_id: str):
+    """Run OPA compliance evaluation for an agent and return the result.
+
+    Unauthenticated (this is an evaluation, not an admin action). When OPA is
+    enabled: `{"compliant": bool, "violations": [...], ...}`. When OPA is disabled:
+    `{"compliant": null, "opa_enabled": false, "message": ...}`. Responds 404 if the
+    agent is unknown.
+    """
     agent = AGENT_REGISTRY.get(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -501,8 +580,13 @@ def get_agent_compliance(agent_id: str):
         }
 
 
-@app.post("/compliance/check/{agent_id}")
+@app.post("/compliance/check/{agent_id}", tags=["compliance"], summary="Trigger a compliance check for one agent (admin)")
 def check_compliance(agent_id: str, request: Request):
+    """Force a compliance evaluation for an agent. Requires admin auth (401 otherwise).
+
+    Unlike `GET /agent/{id}/compliance`, this is a mutating/admin action and fails
+    with 503 when OPA is not enabled. Responds 404 if the agent is unknown.
+    """
     if not require_admin(request):
         raise HTTPException(status_code=401, detail="Authentication required")
     
@@ -522,8 +606,14 @@ def check_compliance(agent_id: str, request: Request):
         raise HTTPException(status_code=503, detail="OPA not enabled")
 
 
-@app.get("/compliance/summary")
+@app.get("/compliance/summary", tags=["compliance"], summary="Fleet-wide compliance summary")
 def compliance_summary():
+    """Fleet-wide compliance counts across all connected agents.
+
+    Unauthenticated. Returns `{"opa_enabled", "compliant", "non_compliant",
+    "not_evaluated", "total"}`. Agents whose `compliance` state is null count as
+    `not_evaluated` (nothing evaluated yet or OPA disabled).
+    """
     compliant_count = 0
     non_compliant_count = 0
     not_evaluated_count = 0
@@ -545,8 +635,13 @@ def compliance_summary():
     }
 
 
-@app.get("/compliance/policies")
+@app.get("/compliance/policies", tags=["compliance"], summary="List available OPA policies")
 def list_policies():
+    """List policy modules available to OPA (loaded from `POLICIES_DIR`).
+
+    Unauthenticated. Returns `{"opa_enabled": bool, "policies": [...]}`; empty list
+    when OPA is disabled.
+    """
     if not OPA_ENABLED:
         return {"opa_enabled": False, "policies": []}
     
@@ -557,9 +652,13 @@ def list_policies():
     }
 
 
-@app.post("/compliance/reload")
+@app.post("/compliance/reload", tags=["compliance"], summary="Ask OPA to reload its policies (admin)")
 def reload_policies(request: Request):
-    """Trigger OPA to reload policies from disk"""
+    """Trigger OPA to reload policies from disk. Requires admin auth (401 otherwise).
+
+    Returns `{"success": true}` on success, or `{"success": false, "error": ...}`
+    when OPA is disabled or the reload failed (still HTTP 200 — inspect the body).
+    """
     if not require_admin(request):
         raise HTTPException(status_code=401, detail="Authentication required")
     
@@ -577,9 +676,13 @@ def reload_policies(request: Request):
         return {"success": False, "error": str(e)}
 
 
-@app.get("/compliance/validate")
+@app.get("/compliance/validate", tags=["compliance"], summary="Validate OPA policy files")
 def validate_policies():
-    """Validate all policy files and return results"""
+    """Validate all OPA policy files and return per-policy results.
+
+    Unauthenticated. Returns `{"opa_enabled": bool, "policies": [...]}`; empty list
+    when OPA is disabled.
+    """
     if not OPA_ENABLED:
         return {"opa_enabled": False, "policies": []}
     
@@ -590,8 +693,14 @@ def validate_policies():
     }
 
 
-@app.get("/alerts")
+@app.get("/alerts", tags=["alerts"], summary="Get alert configuration (admin)")
 def get_alerts(request: Request):
+    """Return the current alert configuration. Requires admin auth (401 otherwise).
+
+    Returns `{"types": [...], "events": {...}, "config": {...}}` — the valid event
+    types, the available dispatcher/event settings, and the live config (webhook
+    URL + per-event enablement/templates).
+    """
     if not require_admin(request):
         raise HTTPException(status_code=401, detail="Authentication required")
     
@@ -603,8 +712,14 @@ def get_alerts(request: Request):
     }
 
 
-@app.put("/alerts")
+@app.put("/alerts", tags=["alerts"], summary="Update alert configuration (admin)")
 def put_alerts(request: Request, body: dict):
+    """Replace/merge the alert configuration. Requires admin auth (401 otherwise).
+
+    Body is the config object (same shape `GET /alerts` returns under `config`);
+    validation happens in `server/alerts.py`. Returns `{"config": {...}}` with the
+    stored result. Note: currently in-memory only — see issue #50 for persistence.
+    """
     if not require_admin(request):
         raise HTTPException(status_code=401, detail="Authentication required")
     
@@ -612,8 +727,15 @@ def put_alerts(request: Request, body: dict):
     return {"config": config}
 
 
-@app.post("/alerts/test")
+@app.post("/alerts/test", tags=["alerts"], summary="Send a test alert (admin)")
 def test_alerts(request: Request, body: dict = None):
+    """Fire a test alert through the configured dispatcher. Requires admin auth.
+
+    Optional body: `{"event_type": "new_agent", "event_config": {...}}`. When
+    `event_config` is supplied it is used for this one send and then reverted
+    (handy for validating unsaved webhook settings). Returns
+    `{"success": bool, "error": str|null}`.
+    """
     if not require_admin(request):
         raise HTTPException(status_code=401, detail="Authentication required")
     
@@ -635,8 +757,14 @@ def test_alerts(request: Request, body: dict = None):
     return {"success": success, "error": error}
 
 
-@app.get("/health")
+@app.get("/health", tags=["ops"], summary="Health check")
 def health_check():
+    """Liveness/readiness probe: server status, agent count, OPA availability.
+
+    Unauthenticated. Returns `{"status": "healthy", "agents_connected": n,
+    "opa_enabled": bool, "opa_url": str|null, "alerts_enabled": true}`.
+    Prometheus metrics are served separately at `GET /metrics`.
+    """
     from server.opa_client import OPAClient
     opa_client = OPAClient()
     opa_available = OPA_ENABLED and opa_client.is_available()

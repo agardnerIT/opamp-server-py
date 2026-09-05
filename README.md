@@ -122,7 +122,7 @@ Add `package opamp.agent.compliance.<name>` policies to `policies/tags/`.
 |----------|---------|-------------|
 | `/v1/opamp` | POST | OpAMP connection |
 | `/metrics` | GET | Prometheus metrics |
-| `/agents` | GET | List agents |
+| `/agents` | GET | List agents (filter: `healthy=true\|false\|unknown`, `status=` remote config status, or any description attribute e.g. `?environment=prod`) |
 | `/agent/{id}` | GET | Agent details |
 | `/agent/{id}/manifest` | POST | Generate OCB `manifest.yaml` + build command for a slim collector |
 | `/health` | GET | Health check |

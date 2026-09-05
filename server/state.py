@@ -14,6 +14,20 @@ def utcnow():
     return datetime.now(timezone.utc)
 
 
+def _stringify_any_value(value: Optional[Dict]) -> Optional[str]:
+    """Stringify an OpAMP AnyValue oneof dict (as produced by MessageToDict).
+
+    e.g. {"stringValue": "prod"} -> "prod", {"intValue": "42"} -> "42",
+    {"boolValue": true} -> "True". Returns None for absent or non-scalar values.
+    """
+    if not value:
+        return None
+    for v in value.values():
+        if isinstance(v, (str, int, float, bool)):
+            return str(v)
+    return None
+
+
 DATA_DIR = Path(os.environ.get("DATA_DIR", "data")).resolve()
 DB_PATH = DATA_DIR / "opamp.db"
 
@@ -351,6 +365,56 @@ class AgentState:
                         used_by_type["extension"].add(comp_id)
         
         return dict(used_by_type)
+
+    def get_attr(self, key: str) -> Optional[str]:
+        """Return the stringified value of a description attribute.
+
+        Looks in both identifyingAttributes and nonIdentifyingAttributes (the
+        same sources the UI "By Property" grouping uses). Returns None when the
+        attribute is absent or its value is not a scalar (e.g. array/kvlist).
+        """
+        attrs = self.description.get("identifyingAttributes", []) + self.description.get(
+            "nonIdentifyingAttributes", []
+        )
+        for attr in attrs:
+            if attr.get("key") == key:
+                return _stringify_any_value(attr.get("value"))
+        return None
+
+    def matches_filters(
+        self,
+        healthy: Optional[str] = None,
+        remote_config_status: Optional[str] = None,
+        attributes: Optional[Dict[str, list]] = None,
+    ) -> bool:
+        """Return True when the agent satisfies all the given filters.
+
+        - ``healthy``: "true" / "false" (strict bool match) or "unknown"
+          (no health reported), mirroring the UI Agents page grouping.
+        - ``remote_config_status``: case-insensitive string match.
+        - ``attributes``: mapping of description attribute key -> acceptable
+          values (any match wins, i.e. OR); agents missing the attribute fail.
+        """
+        if healthy is not None:
+            if healthy == "unknown":
+                if self.healthy is not None:
+                    return False
+            elif self.healthy != (healthy == "true"):
+                return False
+
+        if remote_config_status is not None and (
+            (self.remote_config_status or "").lower() != remote_config_status.lower()
+        ):
+            return False
+
+        for key, values in (attributes or {}).items():
+            actual = self.get_attr(key)
+            if actual is None or not any(
+                value.lower() == actual.lower() for value in values if value is not None
+            ):
+                return False
+
+        return True
 
     def to_dict(self) -> Dict[str, Any]:
         return {

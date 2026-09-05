@@ -6,12 +6,12 @@ from pathlib import Path
 import prometheus_client as prom_client
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, Request, HTTPException, Query
 from fastapi.responses import Response
 from pydantic import BaseModel
 from google.protobuf.json_format import MessageToDict
 from loguru import logger
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Literal
 from functools import wraps
 
 from dotenv import load_dotenv
@@ -358,11 +358,64 @@ async def opamp_endpoint(request: Request) -> Response:
 
 
 @app.get("/agents")
-def list_agents():
-    agents = []
-    for agent in AGENT_REGISTRY.list_all():
-        agents.append(agent.to_dict())
-    return {"agents": agents, "count": len(agents)}
+def list_agents(
+    request: Request,
+    healthy: Optional[Literal["true", "false", "unknown"]] = Query(
+        default=None,
+        description=(
+            "Filter by health: true (healthy), false (unhealthy), or "
+            "unknown (no health reported). Matches the UI Agents page grouping."
+        ),
+    ),
+    status: Optional[str] = Query(
+        default=None,
+        description=(
+            "Filter by remote config status (case-insensitive), e.g. UNSET, "
+            "APPLIED, APPLYING, FAILED."
+        ),
+    ),
+    remote_config_status: Optional[str] = Query(
+        default=None,
+        description=(
+            "Explicit alias for 'status' — filter by remote config status. "
+            "Use this when the agent description has its own 'status' attribute."
+        ),
+    ),
+):
+    """List agents, optionally filtered.
+
+    Reserved query params: ``healthy``, ``status`` (alias ``remote_config_status``).
+    Any other query param filters on the agent's OpAMP description metadata
+    (identifyingAttributes + nonIdentifyingAttributes), e.g. ``?environment=prod``.
+    Repeated params match any value (OR): ``?environment=prod&environment=staging``.
+    Agents missing an attribute are excluded.
+    """
+    remote_config_status = remote_config_status if remote_config_status is not None else status
+    reserved = {"healthy", "status", "remote_config_status"}
+    attr_filters: Dict[str, list] = {}
+    for key, value in request.query_params.multi_items():
+        if key not in reserved:
+            attr_filters.setdefault(key, []).append(value)
+
+    agents = [
+        agent.to_dict()
+        for agent in AGENT_REGISTRY.list_all()
+        if agent.matches_filters(
+            healthy=healthy,
+            remote_config_status=remote_config_status,
+            attributes=attr_filters,
+        )
+    ]
+
+    filters = {}
+    if healthy is not None:
+        filters["healthy"] = healthy
+    if remote_config_status is not None:
+        filters["remote_config_status"] = remote_config_status
+    if attr_filters:
+        filters["attributes"] = attr_filters
+
+    return {"agents": agents, "count": len(agents), "filters": filters}
 
 
 @app.get("/agent/{agent_id}")

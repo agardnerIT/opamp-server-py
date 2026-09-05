@@ -9,6 +9,7 @@ This server also lets you:
 - Filter collectors by metadata (such as `environment: production`)
 - Build minimal OTel Collectors (server generates a new `manifest.yaml` which you build with the [OpenTelemetry Collector Builder [OCB]](https://github.com/open-telemetry/opentelemetry-collector/tree/main/cmd/builder))
 - Validate connected collectors against OPA compliance policies
+- Be driven by **AI agents** — a REST API with a self-documenting OpenAPI schema, an `opampctl` CLI with JSON output, a shared `opamp_client` Python library, and an MCP server with typed tools
 
 Want to learn more about OpAMP? [Read the spec](https://opentelemetry.io/docs/specs/opamp/).
 
@@ -17,11 +18,11 @@ Want to learn more about OpAMP? [Read the spec](https://opentelemetry.io/docs/sp
 ```
 ┌─────────────────────────┐        ┌─────────────────┐        ┌──────────────┐
 │  OTel Collector         │───────▶│  OpAMP Server   │────────│  UI (:8501)  │
-│  (OpAMP Extension)      │        │  (:4320)        │        │              │
-└─────────────────────────┘        └─────────────────┘        └──────────────┘
-                                           │
-                                  ┌────────┴──────────────┐
-                                  │   Open Policy Agent   │ (optional)
+│  (OpAMP Extension)      │        │  (:4320)        │        └──────────────┘
+└─────────────────────────┘        └─────────────────┘        ┌──────────────┐
+                                           │                  │ opampctl CLI │
+                                  ┌────────┴──────────────┐   │ MCP server   │
+                                  │   Open Policy Agent   │   └──────────────┘
                                   │  (:8181)              │
                                   └───────────────────────┘
 ```
@@ -64,6 +65,19 @@ uvicorn server.main:app --port 4320
 ```bash
 pip install -r requirements-ui.txt
 streamlit run ui/app.py
+```
+
+#### CLI + MCP server (for humans and AI agents)
+
+```bash
+pip install -e .            # installs opampctl + opamp-mcp entry points
+opampctl health             # → {"status": "healthy", ...}
+```
+
+For MCP tools (used by Claude Desktop, Claude Code, and other MCP clients):
+
+```bash
+pip install -e ".[mcp]"     # adds the mcp dependency
 ```
 
 ### Connect Agent
@@ -176,6 +190,137 @@ curl "http://localhost:4320/agents?healthy=true&environment=prod"
 curl "http://localhost:4320/agents?status=UNSET"
 ```
 
+## CLI (`opampctl`)
+
+Every documented API call has a CLI equivalent. **Output is JSON by default**;
+use `--raw` to print just the markdown/YAML payload. Install with `pip install -e .`
+
+```bash
+# First three commands to try (all safe, read-only):
+opampctl health
+opampctl agents list
+opampctl reports fleet --raw
+
+# Agents
+opampctl agents list --healthy true --attr environment=prod
+opampctl agents get <agent-id>              # full details incl. metrics
+opampctl agents metrics <agent-id>          # latest OTLP metric values
+opampctl agents manifest <agent-id> --raw   # OCB manifest.yaml for a slim build
+opampctl agents manifest <agent-id> --version 1.2.3
+opampctl agents compliance <agent-id>       # OPA evaluation (no-op if OPA disabled)
+
+# Reports
+opampctl reports fleet --raw
+opampctl reports heavy --threshold 0.8 --raw
+opampctl reports outdated --version 0.100.0 --raw
+
+# Compliance
+opampctl compliance summary
+opampctl compliance policies
+opampctl compliance validate
+opampctl compliance reload                  # admin
+opampctl compliance check <agent-id>        # admin
+
+# Alerts (admin)
+opampctl alerts get
+opampctl alerts set @alerts.json            # JSON from file (or inline JSON)
+opampctl alerts test --event-type new_agent
+```
+
+### CLI configuration
+
+| Source | Flags | Env vars |
+|--------|-------|----------|
+| Server URL | `--server`, `-s` | `OPAMP_SERVER_URL` |
+| Admin password | `--password`, `-p` | `ADMIN_PASSWORD` |
+
+### Offline mode (`--db`)
+
+Read the server's SQLite state file directly — no server needed. Supports the
+read-only surface (agents list/get/metrics, manifests, all reports):
+
+```bash
+opampctl --db data/opamp.db agents list
+opampctl --db data/opamp.db reports fleet --raw
+opampctl --db data/opamp.db agents manifest <agent-id> --raw
+```
+
+Live-only commands (`health`, `alerts`, `compliance`) exit with a structured
+error under `--db`.
+
+### Shell completion
+
+`opampctl` is built with [Typer](https://typer.tiangolo.com/) and ships with
+shell completion:
+
+```bash
+opampctl --install-completion   # install for the current shell
+opampctl --show-completion      # show the install command/instructions
+```
+
+## MCP Server (for AI agents)
+
+An [MCP](https://modelcontextprotocol.io) server (`opamp-mcp` / `python -m mcp_server`)
+exposes 19 typed tools mirroring the API: `list_agents`, `get_agent`,
+`get_agent_metrics`, `generate_manifest`, `fleet_report`, `heavy_collectors_report`,
+`outdated_collectors_report`, `get_compliance`, `check_compliance`,
+`compliance_summary`, `list_policies`, `validate_policies`, `reload_policies`,
+`get_alerts`, `update_alerts`, `test_alerts`, `agent_report`, `health`, `auth_status`.
+
+Transport is **stdio** by default (works with every local MCP client); use
+`--transport sse --port 8765` for remote agents. Configure with the same env vars
+as the CLI (`OPAMP_SERVER_URL`, `ADMIN_PASSWORD`).
+
+### Claude Desktop / generic MCP client config
+
+```json
+{
+  "mcpServers": {
+    "opamp-server": {
+      "command": "python",
+      "args": ["-m", "mcp_server"],
+      "env": {
+        "OPAMP_SERVER_URL": "http://localhost:4320",
+        "ADMIN_PASSWORD": "changeme"
+      }
+    }
+  }
+}
+```
+
+The `command` must point at a Python where the package is installed
+(`pip install -e ".[mcp]"`).
+
+### Claude Code
+
+```bash
+claude mcp add opamp-server \
+  -e OPAMP_SERVER_URL=http://localhost:4320 \
+  -e ADMIN_PASSWORD=changeme \
+  -- python -m mcp_server
+```
+
+## Python client library (`opamp_client`)
+
+The CLI and MCP server both use one shared HTTP client — use it directly when
+embedding OpAMP control into your own tooling:
+
+```python
+from client import OpampClient, OpampApiError
+
+# Reads OPAMP_SERVER_URL / ADMIN_PASSWORD from the environment by default.
+oc = OpampClient(base_url="http://localhost:4320", password="changeme")
+
+agents = oc.list_agents(healthy="true", environment="prod")   # metadata filters
+result = oc.generate_manifest(agents["agents"][0]["id"])
+print(result["manifest_yaml"])
+
+try:
+    oc.get_agent("nope")
+except OpampApiError as e:
+    print(e.status_code, e.detail)     # 404 Agent not found
+```
+
 ## Development
 
 ```bash
@@ -189,9 +334,12 @@ pytest tests/ -v
 ```
 opamp-server-py/
 ├── server/          # FastAPI server
+├── client/          # opamp_client — shared HTTP client library
+├── cli/             # opampctl CLI (typer, JSON output)
+├── mcp_server/      # FastMCP server (stdio/SSE) for AI agents
 ├── ui/              # Streamlit dashboard
 ├── proto/           # Protobuf definitions
 ├── tests/           # Tests
 ├── collector/       # Sample configs
-└── data/           # SQLite DB
+└── data/            # SQLite DB
 ```

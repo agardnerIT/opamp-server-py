@@ -1,7 +1,0 @@
-{
-  "database": "dolt",
-  "backend": "dolt",
-  "dolt_mode": "embedded",
-  "dolt_database": "opamp_server_py",
-  "project_id": "6a0028c3-1162-496b-a357-fba9316d9c99"
-}

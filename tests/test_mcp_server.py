@@ -9,12 +9,12 @@ import base64
 import json
 
 import pytest
-from fastapi.testclient import TestClient
 
 import mcp_server.server as mcp_srv
 from mcp_server.server import mcp
 from server.main import app as server_app
 from server.state import AGENT_REGISTRY, AgentState
+from tests.asgi_transport import InProcessASGITransport
 
 AVAILABLE_COMPONENTS = {
     "components": {
@@ -44,11 +44,12 @@ def effective_config() -> str:
 @pytest.fixture
 def wired(monkeypatch):
     """Route the MCP server's client factory to the in-process FastAPI app."""
-    tc = TestClient(app=server_app)
     from client.opamp_client import OpampClient
 
+    transport = InProcessASGITransport(server_app)
+
     def factory():
-        return OpampClient(base_url="http://testserver", transport=tc._transport)
+        return OpampClient(base_url="http://testserver", transport=transport)
 
     monkeypatch.setattr(mcp_srv, "_client", factory)
     yield
@@ -218,11 +219,11 @@ class TestAdminAuth:
         monkeypatch.setattr("server.main.ADMIN_PASSWORD", "pw123")
         from client.opamp_client import OpampClient
 
-        tc = TestClient(app=server_app)
+        transport = InProcessASGITransport(server_app)
         monkeypatch.setattr(
             mcp_srv, "_client",
             lambda: OpampClient(base_url="http://testserver",
-                                transport=tc._transport, password="pw123"),
+                                transport=transport, password="pw123"),
         )
         data = call(mcp_srv.get_alerts)
         assert "config" in data

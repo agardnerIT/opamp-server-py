@@ -10,12 +10,12 @@ import base64
 import json
 
 import pytest
-from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
 from cli.main import app
 from server.main import app as server_app
 from server.state import AGENT_REGISTRY, AgentState, SQLiteAgentStore, SQLiteMetricsStore
+from tests.asgi_transport import InProcessASGITransport
 
 runner = CliRunner()
 
@@ -56,14 +56,15 @@ def register_agent(agent_id, with_components=False):
 @pytest.fixture
 def live(monkeypatch):
     """Route cli.main's client factory to the in-process app."""
-    tc = TestClient(app=server_app)
     import cli.main as cli_main
     from client.opamp_client import OpampClient
+
+    transport = InProcessASGITransport(server_app)
 
     def factory():
         return OpampClient(
             base_url="http://testserver",
-            transport=tc._transport,
+            transport=transport,
             password=cli_main._settings.password,
         )
 

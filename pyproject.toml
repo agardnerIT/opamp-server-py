@@ -34,7 +34,8 @@ dependencies = [
 
 [project.optional-dependencies]
 # MCP server surface (FastMCP) for AI agents — `pip install opamp-server-py[mcp]`
-mcp = ["mcp>=1.27.0"]
+# Pinned <2: mcp 2.x renamed FastMCP to MCPServer (breaking API change).
+mcp = ["mcp>=1.27.0,<2"]
 # Streamlit UI — `pip install opamp-server-py[ui]`
 ui = [
     "streamlit>=1.40.0",

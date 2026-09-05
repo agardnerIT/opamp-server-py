@@ -11,7 +11,6 @@ import json
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
 
 import client as client_pkg
 from client import (
@@ -24,18 +23,14 @@ from client import (
 from client.opamp_client import _normalize_base_url
 from server.main import app
 from server.state import AGENT_REGISTRY, AgentState
+from tests.asgi_transport import InProcessASGITransport
 
 
 # --- helpers -------------------------------------------------------------------
 
 def make_client(**kwargs) -> OpampClient:
-    """Client wired to the in-process FastAPI app (no network).
-
-    FastAPI's TestClient transport is a sync httpx transport that dispatches
-    to the ASGI app in-process, so OpampClient exercises the real endpoints.
-    """
-    tc = TestClient(app)
-    kwargs.setdefault("transport", tc._transport)
+    """Client wired to the in-process FastAPI app (no network)."""
+    kwargs.setdefault("transport", InProcessASGITransport(app))
     kwargs.setdefault("base_url", "http://testserver")
     return OpampClient(**kwargs)
     kwargs.setdefault("base_url", "http://testserver")

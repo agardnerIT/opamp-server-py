@@ -138,6 +138,61 @@ class SQLiteAgentStore:
             compliance=json.loads(row["compliance"] or "null"),
         )
 
+
+class SQLiteMetricsStore:
+    """Latest OTLP metric snapshot per agent, persisted to SQLite.
+
+    Single row per agent (no history); all operations are best-effort so the
+    server keeps working in-memory if the DB is unavailable.
+    """
+
+    def __init__(self, db_path: Path = DB_PATH):
+        self.db_path = db_path
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS agent_metrics ("
+                    "agent_id TEXT PRIMARY KEY, metrics TEXT NOT NULL, updated_at TEXT NOT NULL)"
+                )
+        except sqlite3.Error as exc:
+            logger.warning(f"Could not init metrics store at {db_path}: {exc}")
+
+    def upsert(self, agent_id: str, entry: Dict[str, Any]) -> None:
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO agent_metrics (agent_id, metrics, updated_at) "
+                    "VALUES (?, ?, ?)",
+                    (agent_id, json.dumps(entry.get("metrics", {})), entry.get("updated_at") or utcnow().isoformat()),
+                )
+        except sqlite3.Error as exc:
+            logger.warning(f"Could not persist metrics for {agent_id}: {exc}")
+
+    def get(self, agent_id: str) -> Optional[Dict[str, Any]]:
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                row = conn.execute(
+                    "SELECT metrics, updated_at FROM agent_metrics WHERE agent_id=?", (agent_id,)
+                ).fetchone()
+        except sqlite3.Error as exc:
+            logger.warning(f"Could not read metrics for {agent_id}: {exc}")
+            return None
+        if not row:
+            return None
+        try:
+            return {"metrics": json.loads(row[0]), "updated_at": row[1]}
+        except (json.JSONDecodeError, TypeError) as exc:
+            logger.warning(f"Corrupt persisted metrics for {agent_id}: {exc}")
+            return None
+
+    def delete(self, agent_id: str) -> None:
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute("DELETE FROM agent_metrics WHERE agent_id=?", (agent_id,))
+        except sqlite3.Error as exc:
+            logger.warning(f"Could not delete metrics for {agent_id}: {exc}")
+
 COMPONENT_TYPES = {
     "receivers/": "receiver",
     "processors/": "processor",

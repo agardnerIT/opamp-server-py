@@ -20,7 +20,7 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent.parent / ".env")
 
 from proto.opamp_pb2 import AgentToServer, ServerToAgent, ServerCapabilities, ServerToAgentFlags
-from server.state import AgentRegistry, AgentState, AGENT_REGISTRY, utcnow
+from server.state import AgentRegistry, AgentState, AGENT_REGISTRY, SQLiteMetricsStore, utcnow
 from server.manifest import (
     generate_manifest,
     generate_ocb_command,
@@ -157,6 +157,22 @@ def verify_auth(request: Request):
 
 
 AGENT_METRICS: Dict[str, Dict[str, Any]] = {}
+_METRICS_STORE = SQLiteMetricsStore()
+
+
+def _record_agent_metrics(agent_id: str, metrics_data: Dict[str, Any]) -> None:
+    """Store the latest metric snapshot in memory (cache) and SQLite (durable)."""
+    entry = {
+        "metrics": metrics_data,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    AGENT_METRICS[agent_id] = entry
+    _METRICS_STORE.upsert(agent_id, entry)
+
+
+def _get_agent_metrics_entry(agent_id: str) -> Dict[str, Any]:
+    """Latest metric snapshot: in-memory cache first, SQLite fallback (lazy)."""
+    return AGENT_METRICS.get(agent_id) or _METRICS_STORE.get(agent_id) or {}
 
 logger.info(f"Loaded {AGENT_REGISTRY.count} agents from persistent store")
 
@@ -203,10 +219,7 @@ async def receive_metrics(request: Request):
                             if val is not None:
                                 metrics_data[metric.get("name", "")] = val
                 
-                AGENT_METRICS[agent_id] = {
-                    "metrics": metrics_data,
-                    "updated_at": datetime.now(timezone.utc).isoformat()
-                }
+                _record_agent_metrics(agent_id, metrics_data)
                 logger.info(f"JSON: Stored metrics for {agent_id}")
         else:
             body = await request.body()
@@ -238,10 +251,7 @@ async def receive_metrics(request: Request):
                             if val is not None:
                                 metrics_data[metric.name] = val
                 
-                AGENT_METRICS[agent_id] = {
-                    "metrics": metrics_data,
-                    "updated_at": datetime.now(timezone.utc).isoformat()
-                }
+                _record_agent_metrics(agent_id, metrics_data)
                 logger.info(f"Protobuf: Stored metrics for {agent_id}, log_records={metrics_data.get('otelcol_receiver_accepted_log_records')}, all={metrics_data}")
         
         return {"status": "success"}
@@ -301,6 +311,8 @@ def cleanup_stale_agents():
         logger.info(f"Removing stale agent: {agent_id}")
         AGENT_REGISTRY.remove(agent_id)
         PROM_AGENT_HEALTH.remove(agent_id)
+        _METRICS_STORE.delete(agent_id)
+        AGENT_METRICS.pop(agent_id, None)
         send_stale_agent_alert(agent_id)
     
     if stale:
@@ -407,6 +419,8 @@ async def opamp_endpoint(request: Request) -> Response:
         logger.info(f"Agent disconnecting: {agent_id}")
         AGENT_REGISTRY.remove(agent_id)
         PROM_AGENT_HEALTH.remove(agent_id)
+        _METRICS_STORE.delete(agent_id)
+        AGENT_METRICS.pop(agent_id, None)
         update_metrics()
     
     return Response(
@@ -492,7 +506,7 @@ def get_agent(agent_id: str):
         raise HTTPException(status_code=404, detail="Agent not found")
     
     agent_dict = agent.to_dict()
-    agent_dict["metrics"] = AGENT_METRICS.get(agent_id, {})
+    agent_dict["metrics"] = _get_agent_metrics_entry(agent_id)
     
     return agent_dict
 
@@ -508,11 +522,12 @@ def get_agent_metrics(agent_id: str):
     """Return the agent's latest ingested OTLP metric values.
 
     Unauthenticated. `{"<metric_name>": value, ..., "updated_at": iso8601}`; empty
-    object if the agent has sent no metrics. Responds 404 if the agent is unknown.
+    object if the agent has sent no metrics. Snapshots persist in SQLite, so they
+    survive server restarts. Responds 404 if the agent is unknown.
     """
     if agent_id not in AGENT_REGISTRY._agents:
         raise HTTPException(status_code=404, detail="Agent not found")
-    return AGENT_METRICS.get(agent_id, {})
+    return _get_agent_metrics_entry(agent_id)
 
 
 @app.post("/agent/{agent_id}/manifest", tags=["agents"], summary="Generate an OCB manifest.yaml for a slim collector build")

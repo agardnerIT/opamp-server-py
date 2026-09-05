@@ -151,7 +151,7 @@ Check the auth mode with `GET /auth/status` (`{"password_required": true|false}`
 | POST | `/v1/metrics` | | OTLP/HTTP metrics ingestion from collectors (JSON or protobuf) |
 | GET | `/agents` | | List agents. Filters: `healthy=true\|false\|unknown`, `status=` (remote config status, or alias `remote_config_status=`), or any description attribute, e.g. `?environment=prod`. Repeated params are OR |
 | GET | `/agent/{id}` | | Agent details incl. latest OTLP metrics |
-| GET | `/agent/{id}/metrics` | | Latest OTLP metric values for the agent |
+| GET | `/agent/{id}/metrics` | | Latest OTLP metric values for the agent (persisted across restarts) |
 | POST | `/agent/{id}/manifest` | | Generate OCB `manifest.yaml` + build command for a slim collector. Optional body `{"version": "0.123.0"}`. 409 if the agent has no components in use |
 | GET | `/agent/{id}/compliance` | | Evaluate agent against OPA policies (no-op result if OPA disabled) |
 | POST | `/compliance/check/{id}` | 🔒 | Force a compliance check (503 if OPA disabled) |

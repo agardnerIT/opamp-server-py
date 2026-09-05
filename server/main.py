@@ -28,6 +28,13 @@ from server.manifest import (
     validate_manifest_version,
 )
 from server.opa_client import evaluate_agent_compliance, get_available_policies, get_policy_validation, OPA_ENABLED, OPA_URL
+from server.reports import (
+    generate_agent_report,
+    generate_heavy_collectors_report,
+    generate_outdated_collectors_report,
+    _count_outdated_collectors,
+    _is_heavy,
+)
 from server.alerts import get_alert_config, update_alert_config, send_test_alert, send_alert, ALERT_TYPES, ALERT_CONFIG, ALERT_EVENTS, send_new_agent_alert, send_stale_agent_alert, send_compliance_alert
 
 AGENT_TIMEOUT_SECONDS = int(os.environ.get("AGENT_TIMEOUT_SECONDS", 60))
@@ -562,6 +569,89 @@ def generate_agent_manifest(agent_id: str, request: ManifestRequest | None = Non
         "manifest_yaml": generate_manifest(components, version),
         "ocb_command": generate_ocb_command(version),
         "collector_version": version,
+    }
+
+
+@app.get("/agent/{agent_id}/report", tags=["reports"], summary="Markdown report for one agent")
+def agent_report(agent_id: str):
+    """Generate a markdown report for a single agent (versions, health, components).
+
+    Unauthenticated, read-only. Same shape/content the UI Reports page renders.
+    Responds 404 if the agent is unknown.
+    """
+    agent = AGENT_REGISTRY.get(agent_id)
+    if not agent:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    return {
+        "report_markdown": generate_agent_report({"agents": [agent.to_dict()]}, "markdown"),
+    }
+
+
+@app.get("/reports/fleet", tags=["reports"], summary="Full fleet summary report (markdown)")
+def fleet_report():
+    """Fleet-wide agent report: component versions, outdated/heavy collectors, per-agent detail.
+
+    Unauthenticated, read-only. Returns `{"report_markdown": str, "agent_count": n}`
+    — markdown identical to what the UI Reports page renders.
+    """
+    agents = [a.to_dict() for a in AGENT_REGISTRY.list_all()]
+    return {
+        "report_markdown": generate_agent_report({"agents": agents}, "markdown"),
+        "agent_count": len(agents),
+    }
+
+
+@app.get("/reports/heavy-collectors", tags=["reports"], summary="Heavy collectors report (many unused components)")
+def heavy_collectors_report(
+    threshold: float = Query(
+        default=0.5,
+        ge=0,
+        le=1,
+        description="Unused-component ratio above which a collector is 'heavy'",
+    ),
+):
+    """Report collectors whose unused-component ratio exceeds `threshold`.
+
+    Unauthenticated, read-only. Returns `{"report_markdown": str, "heavy_count": n,
+    "threshold": float}`. `threshold` must be within [0, 1] (FastAPI 422 otherwise).
+    """
+    agents = [a.to_dict() for a in AGENT_REGISTRY.list_all()]
+    heavy = [a for a in agents if _is_heavy(a, threshold)]
+    return {
+        "report_markdown": generate_heavy_collectors_report({"agents": agents}, threshold),
+        "heavy_count": len(heavy),
+        "threshold": threshold,
+    }
+
+
+@app.get("/reports/outdated-collectors", tags=["reports"], summary="Outdated collectors report (component versions)")
+def outdated_collectors_report(
+    version: str = Query(
+        default="0.149.0",
+        description="Reference collector version (plain semver, e.g. '0.149.0'); "
+        "components older than this are flagged",
+    ),
+):
+    """Report collectors with components older than `version`.
+
+    Unauthenticated, read-only. Returns `{"report_markdown": str,
+    "collectors_count": n, "components_count": n, "version": str}`. Note the
+    endpoint takes the reference version as a parameter — auto-detecting the
+    latest release from GitHub remains a UI concern. Responds 422 if `version`
+    is not plain semver.
+    """
+    try:
+        version = validate_manifest_version(version)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    agents = [a.to_dict() for a in AGENT_REGISTRY.list_all()]
+    collectors_count, components_count = _count_outdated_collectors(agents, version)
+    return {
+        "report_markdown": generate_outdated_collectors_report({"agents": agents}, version),
+        "collectors_count": collectors_count,
+        "components_count": components_count,
+        "version": version,
     }
 
 

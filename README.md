@@ -154,6 +154,10 @@ Check the auth mode with `GET /auth/status` (`{"password_required": true|false}`
 | GET | `/agent/{id}/metrics` | | Latest OTLP metric values for the agent (persisted across restarts) |
 | POST | `/agent/{id}/manifest` | | Generate OCB `manifest.yaml` + build command for a slim collector. Optional body `{"version": "0.123.0"}`. 409 if the agent has no components in use |
 | GET | `/agent/{id}/compliance` | | Evaluate agent against OPA policies (no-op result if OPA disabled) |
+| GET | `/agent/{id}/report` | | Markdown report for one agent (versions, health, components) |
+| GET | `/reports/fleet` | | Full fleet summary report (markdown, same as the UI Reports page) |
+| GET | `/reports/heavy-collectors` | | Collectors with many unused components. Param: `threshold` (0–1, default 0.5) |
+| GET | `/reports/outdated-collectors` | | Collectors with components older than `version` (default `0.149.0`) |
 | POST | `/compliance/check/{id}` | 🔒 | Force a compliance check (503 if OPA disabled) |
 | GET | `/compliance/summary` | | Fleet-wide compliance counts |
 | GET | `/compliance/policies` | | Available OPA policies |

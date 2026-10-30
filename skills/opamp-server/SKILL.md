@@ -21,7 +21,7 @@ Control plane for OpenTelemetry collectors speaking the
 | Layer | When |
 |-------|------|
 | **`opampctl` CLI** | Default choice for shell agents. JSON output by default; `--raw` prints markdown/YAML. |
-| **MCP server** (`opamp-mcp`) | When running as an MCP client (Claude Desktop/Code, etc.). 19 typed tools, stdio by default. |
+| **MCP server** (`opamp-mcp`) | When running as an MCP client (Claude Desktop/Code, etc.). 20 typed tools, stdio by default. |
 | **`opamp_client` Python lib** | Inside Python code. One client for all HTTP/auth/error handling. |
 | **Raw REST API** | Only when the above don't cover it. Self-documenting: `GET /openapi.json`, `/docs`. |
 
@@ -30,8 +30,8 @@ The CLI and MCP tools wrap `opamp_client`, which wraps the REST API — behavior
 ### Configuration (all layers)
 
 - Server URL: `--server` flag / `OPAMP_SERVER_URL` env (default `http://localhost:4320`)
-- Admin password: `--password` flag / `ADMIN_PASSWORD` env. Sent as HTTP Basic (any username, password only). Only admin endpoints need it: `PUT /alerts`, `POST /alerts/test`, `POST /compliance/check/{id}`, `POST /compliance/reload`, `GET /alerts`.
-- Check auth mode first: `opampctl auth status` → `{"password_required": bool}`
+- Admin password: `--password` flag / `ADMIN_PASSWORD` env. Sent as HTTP Basic (any username, password only). Only admin endpoints need it: `PUT /alerts`, `POST /alerts/test`, `POST /compliance/check/{id}`, `POST /compliance/reload`, `GET /alerts`, `GET /config/posture`.
+- Check auth mode first: `opampctl auth status` → `{"password_required": bool, "auth_mode": "password"|"disabled", "roles": [...]}`. `disabled` = read-only mode: no credential is configured and no privileged action is authenticated.
 
 ## Quickstart
 
@@ -89,7 +89,8 @@ opampctl agents compliance <agent-id>
 | Outdated components | `reports outdated [--version]` | `outdated_collectors_report` | `GET /reports/outdated-collectors` |
 | Alerts config (admin) | `alerts get` / `alerts set @f.json` | `get_alerts` / `update_alerts` | `GET`/`PUT /alerts` |
 | Test alert (admin) | `alerts test` | `test_alerts` | `POST /alerts/test` |
-| Health | `health` | `health` | `GET /health` |
+| Health + posture | `health` | `health` | `GET /health` |
+| Config push posture | `config posture` | `config_posture` | `GET /config/posture` |
 | Offline (no server) | `--db data/opamp.db …` | — | — |
 
 ## Gotchas
@@ -102,4 +103,15 @@ opampctl agents compliance <agent-id>
 - **OPA disabled** → compliance endpoints return `compliant: null` with a message; admin `compliance check` returns 503.
 - **Offline mode** (`--db`) is read-only: no health, compliance, or alerts.
 - **MCP config**: `python -m mcp_server` needs a Python where the package is installed (`pip install -e ".[mcp]"`); pass env vars in the client config, not flags.
+- **Config push is off by default and fails closed.** `GET /health` → `config_push`
+  (`{"enabled", "insecure", "agent_auth", "audit", "tls"}`) is the public summary;
+  `opampctl config posture` adds *why* each requirement is unmet. Push routes
+  return **404** when disabled — not 403, so a 404 tells you nothing about whether
+  the endpoint exists. `insecure: true` means the development override
+  (`OPAMP_ALLOW_INSECURE_CONFIG_PUSH`) is on and anyone reaching the server can
+  rewrite the fleet's config: say so loudly instead of proceeding.
+- **There is no default admin password.** Docker generates a random one on first
+  start (`data/admin_password`, also logged once). If `auth status` says
+  `password_required: false`, privileged endpoints are unauthenticated — do not
+  assume your write succeeded securely just because it returned 200.
 - **UI collectors tip**: when taking screenshots for UI work, start the collector first, wait 5s (ignore initial connection errors), then start the UI.

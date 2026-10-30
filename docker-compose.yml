@@ -1,3 +1,9 @@
+# Secure-by-default deployment template.
+#
+# Nothing here ships a usable default credential: with no .env the server starts
+# in read-only mode, generates a random admin password on first boot, and keeps
+# config push off. See README → "Before you expose this server".
+#
 # NOTE: Image tags are auto-updated by GitHub Actions on each release.
 # Current version: latest (will be updated to specific version on release)
 version: '3.8'
@@ -6,17 +12,37 @@ services:
   server:
     image: ghcr.io/agardnerit/opamp-server-py-server:0.0.5-test
     container_name: opamp-server
+    # Bound to loopback on purpose: this port speaks plain HTTP and accepts
+    # unauthenticated OpAMP agents. To expose it, put a TLS terminator in front
+    # of it (docker/nginx.conf or docker/Caddyfile), set PUBLIC_URL=https://<host>
+    # (or TLS_TERMINATED_UPSTREAM=true) and, if you must, change the host side
+    # of this mapping to 0.0.0.0 and firewall 4320 to the proxy only.
     ports:
-      - "4320:4320"
+      - "127.0.0.1:4320:4320"
     environment:
       - SERVER_HTTP_SCHEME=http
       - SERVER_ADDRESS=0.0.0.0
       - SERVER_PORT=4320
+      # Admin auth: never a static placeholder. Set ADMIN_PASSWORD in .env to
+      # choose your own; otherwise a random one is generated on first start,
+      # printed once in the logs, and stored in ./data/admin_password (0600).
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      - OPAMP_ADMIN_AUTOGENERATE_PASSWORD=${OPAMP_ADMIN_AUTOGENERATE_PASSWORD:-true}
+      - ADMIN_PASSWORD_FILE=${ADMIN_PASSWORD_FILE:-}
+      # Config push (#96): off unless the whole posture is secure.
+      - OPAMP_CONFIG_PUSH_ENABLED=${OPAMP_CONFIG_PUSH_ENABLED:-false}
+      - OPAMP_ALLOW_INSECURE_CONFIG_PUSH=${OPAMP_ALLOW_INSECURE_CONFIG_PUSH:-false}
+      - OPAMP_AGENT_AUTH=${OPAMP_AGENT_AUTH:-off}
+      - PUBLIC_URL=${PUBLIC_URL:-}
+      - TLS_TERMINATED_UPSTREAM=${TLS_TERMINATED_UPSTREAM:-false}
       - OPA_ENABLED=${OPA_ENABLED:-false}
       - OPA_URL=${OPA_URL:-http://opa:8181}
       - AGENT_TIMEOUT_SECONDS=${AGENT_TIMEOUT_SECONDS:-60}
       - CORS_ORIGINS=${CORS_ORIGINS:-*}
+      # WebSocket transport (#89)
+      - OPAMP_WS_ENABLED=${OPAMP_WS_ENABLED:-false}
+      - OPAMP_MAX_MESSAGE_BYTES=${OPAMP_MAX_MESSAGE_BYTES:-67108864}
+      - OPAMP_WS_OUTBOUND_QUEUE=${OPAMP_WS_OUTBOUND_QUEUE:-32}
     volumes:
       - ./data:/app/data
     networks:
@@ -32,18 +58,44 @@ services:
   ui:
     image: ghcr.io/agardnerit/opamp-server-py-ui:0.0.5-test
     container_name: opamp-ui
+    # Loopback for the same reason as the server: the UI proxies admin actions
+    # with a password and has no TLS of its own.
     ports:
-      - "8501:8501"
+      - "127.0.0.1:8501:8501"
     environment:
       - SERVER_HTTP_SCHEME=http
       - SERVER_ADDRESS=server
       - SERVER_PORT=4320
+    volumes:
+      # Read-only: lets an operator read ./data/admin_password for the Admin page
+      # instead of sharing the credential through an env var.
+      - ./data:/app/data:ro
     depends_on:
       server:
         condition: service_healthy
     networks:
       - opamp-network
     restart: unless-stopped
+
+  # Optional TLS terminator. Uncomment with a docker/Caddyfile or the nginx
+  # example in docker/nginx.conf, and set PUBLIC_URL=https://<host> for the
+  # server. The WebSocket upgrade (#89) needs Upgrade/Connection passthrough and
+  # a long read timeout — both examples show it.
+  # proxy:
+  #   image: caddy:2-alpine
+  #   container_name: opamp-proxy
+  #   ports:
+  #     - "443:443"
+  #     - "80:80"
+  #   volumes:
+  #     - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+  #     - ./data/caddy:/data
+  #   depends_on:
+  #     server:
+  #       condition: service_healthy
+  #   networks:
+  #     - opamp-network
+  #   restart: unless-stopped
 
   # Optional: OPA for compliance checking
   # If you enable this, set OPA_ENABLED=true
@@ -52,7 +104,7 @@ services:
   #   image: openpolicyagent/opa:latest
   #   container_name: opamp-opa
   #   ports:
-  #     - "8181:8181"
+  #     - "127.0.0.1:8181:8181"
   #   volumes:
   #     - ./policies:/policies:ro
   #   command:
@@ -73,7 +125,7 @@ services:
   #   image: webhooksite/webhook-server:latest
   #   container_name: opamp-webhook
   #   ports:
-  #     - "8084:8084"
+  #     - "127.0.0.1:8084:8084"
   #   environment:
   #     - WEBHOOK_PORT=8084
   #   networks:

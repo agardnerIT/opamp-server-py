@@ -47,12 +47,17 @@ reports_app = typer.Typer(help="Markdown fleet reports", no_args_is_help=True)
 compliance_app = typer.Typer(help="OPA policy compliance", no_args_is_help=True)
 alerts_app = typer.Typer(help="Alert configuration (admin)", no_args_is_help=True)
 auth_app = typer.Typer(help="Admin auth status", no_args_is_help=True)
+config_app = typer.Typer(
+    help="Config push posture (remote config control plane lands in #103)",
+    no_args_is_help=True,
+)
 
 app.add_typer(agents_app, name="agents", help="Agent inspection commands")
 app.add_typer(reports_app, name="reports", help="Markdown fleet reports")
 app.add_typer(compliance_app, name="compliance", help="OPA policy compliance")
 app.add_typer(alerts_app, name="alerts", help="Alert configuration (admin)")
 app.add_typer(auth_app, name="auth", help="Admin auth status")
+app.add_typer(config_app, name="config", help="Config push posture")
 
 
 class _Settings:
@@ -178,6 +183,16 @@ def _offline_get_state(agent_id: str) -> Any:
 def health() -> None:
     """Server health: status, connected agents, OPA availability."""
     _run(lambda oc: oc.health())
+
+
+@config_app.command("posture")
+def config_posture() -> None:
+    """Config push security posture: which requirements are met, and why not.
+
+    Read-only mode servers answer without credentials; when an admin password is
+    configured this needs `--password` / ADMIN_PASSWORD.
+    """
+    _run(lambda oc: oc.config_posture())
 
 
 @auth_app.command("status")

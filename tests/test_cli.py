@@ -94,6 +94,12 @@ class TestLiveOps:
         data = parse(run("auth", "status"))
         assert "password_required" in data
 
+    def test_config_posture(self, live):
+        data = parse(run("config", "posture"))
+        assert data["config_push"]["enabled"] is False
+        assert data["override"] is False
+        assert "unmet" in data and len(data["unmet"]) == 3
+
     def test_agents_list_and_get(self, live):
         register_agent("1111111111111111")
         data = parse(run("agents", "list"))
@@ -176,14 +182,14 @@ class TestLiveOps:
 
 class TestLiveAdmin:
     def test_admin_401_without_password(self, live, monkeypatch):
-        monkeypatch.setattr("server.main.ADMIN_PASSWORD", "pw123")
+        monkeypatch.setattr("server.admin_auth.ADMIN_PASSWORD", "pw123")
         result = run("alerts", "get")
         assert result.exit_code == 1
         payload = json.loads(result.output)
         assert payload["error"].startswith("HTTP 401")
 
     def test_admin_ok_with_password(self, live, monkeypatch):
-        monkeypatch.setattr("server.main.ADMIN_PASSWORD", "pw123")
+        monkeypatch.setattr("server.admin_auth.ADMIN_PASSWORD", "pw123")
         result = run("--password", "pw123", "alerts", "get")
         assert result.exit_code == 0, result.output
 

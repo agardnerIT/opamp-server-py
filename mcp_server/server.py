@@ -82,6 +82,15 @@ def auth_status() -> str:
     return _tool(lambda oc: oc.auth_status())
 
 
+@mcp.tool()
+def config_posture() -> str:
+    """Config push security posture: admin auth, agent auth, TLS, override state.
+
+    Safe to call any time (read-only). Requires ADMIN_PASSWORD when one is set.
+    """
+    return _tool(lambda oc: oc.config_posture())
+
+
 # --------------------------------------------------------------------- agents
 
 @mcp.tool()

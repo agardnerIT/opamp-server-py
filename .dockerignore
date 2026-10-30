@@ -1,0 +1,13 @@
+# Keep build context small and, more importantly, keep secrets out of images.
+.git
+.github
+.pytest_cache
+__pycache__
+*.pyc
+.venv
+venv
+.env
+# Generated admin credential (#96) and the SQLite DB must never be baked into an image.
+data/admin_password
+data/*.db
+docker/data

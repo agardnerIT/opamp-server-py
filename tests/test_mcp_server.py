@@ -76,7 +76,7 @@ class TestRegistry:
     def test_all_tools_registered(self):
         tools = {t.name for t in mcp._tool_manager.list_tools()}
         expected = {
-            "health", "auth_status",
+            "health", "auth_status", "config_posture",
             "list_agents", "get_agent", "get_agent_metrics",
             "generate_manifest",
             "agent_report", "fleet_report", "heavy_collectors_report",
@@ -102,6 +102,11 @@ class TestOpsTools:
     def test_auth_status(self, wired):
         data = call(mcp_srv.auth_status)
         assert "password_required" in data
+
+    def test_config_posture(self, wired):
+        data = call(mcp_srv.config_posture)
+        assert data["config_push"]["enabled"] is False
+        assert "requirements" in data and "unmet" in data
 
 
 class TestAgentTools:
@@ -211,12 +216,12 @@ class TestAlertTools:
 
 class TestAdminAuth:
     def test_admin_tool_401_without_password(self, wired, monkeypatch):
-        monkeypatch.setattr("server.main.ADMIN_PASSWORD", "pw123")
+        monkeypatch.setattr("server.admin_auth.ADMIN_PASSWORD", "pw123")
         data = call(mcp_srv.get_alerts)
         assert data["error"] is True and data["status_code"] == 401
 
     def test_admin_tool_ok_with_password(self, wired, monkeypatch):
-        monkeypatch.setattr("server.main.ADMIN_PASSWORD", "pw123")
+        monkeypatch.setattr("server.admin_auth.ADMIN_PASSWORD", "pw123")
         from client.opamp_client import OpampClient
 
         transport = InProcessASGITransport(server_app)

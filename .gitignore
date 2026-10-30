@@ -187,6 +187,8 @@ pyvenv.cfg
 share/*
 
 data/opamp.db
+# Generated admin credential (#96) — never commit
+data/admin_password
 memory.md
 *.db
 

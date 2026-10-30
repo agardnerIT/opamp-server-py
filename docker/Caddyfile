@@ -1,0 +1,50 @@
+# TLS terminator example for the OpAMP server (#96) — the short version.
+#
+#   browser / agent ──https/wss──▶ Caddy ──http──▶ opamp-server:4320 (loopback)
+#
+# Caddy obtains and renews certificates automatically, which is the whole point of
+# using it here: an operator who has to hand-manage certificates ends up back on
+# plain HTTP.
+#
+# What matters here:
+#   * Caddy passes the WebSocket upgrade through for you (#89) — no
+#     Upgrade/Connection headers to get wrong.
+#   * Origin is forwarded untouched. CORSMiddleware does not apply to WebSocket
+#     upgrades, so server.ws.origin_allowed() is the only Origin check — set
+#     CORS_ORIGINS on the server to the origin users load the UI from.
+#   * read_timeout/write_timeout are disabled on purpose: OpAMP agents hold the
+#     connection open between polls, and an idle WebSocket is normal, not stuck.
+#
+# Pair with, in .env:
+#   PUBLIC_URL=https://opamp.example.com
+#   OPAMP_WS_ENABLED=true
+#   CORS_ORIGINS=https://opamp.example.com
+# and keep the server port bound to 127.0.0.1 (see docker-compose.yml).
+
+{
+	# Email for ACME account registration.
+	email ops@example.com
+}
+
+opamp.example.com {
+	encode zstd gzip
+
+	reverse_proxy server:4320 {
+		transport http {
+			dial_timeout  5s
+			# 0 = no timeout. Do not set a short value here: it tears down idle
+			# OpAMP sockets and makes healthy agents look flaky.
+			read_timeout  0
+			write_timeout 0
+		}
+	}
+
+	log {
+		output file /data/access.log {
+			roll_size 10MiB
+			roll_keep 5
+		}
+		# No request bodies in the log: config push payloads are secrets (#98).
+		format json
+	}
+}

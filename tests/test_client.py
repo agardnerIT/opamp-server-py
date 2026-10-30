@@ -169,9 +169,17 @@ class TestOpsAndAuth:
     def test_auth_status(self, oc):
         data = oc.auth_status()
         assert "password_required" in data
+        assert data["auth_mode"] == "disabled" and data["roles"] == []
+
+    def test_config_posture(self, oc):
+        data = oc.config_posture()
+        assert data["config_push"]["enabled"] is False
+        assert data["allowed"] is False
+        assert set(data["requirements"]) == {"admin_auth", "agent_auth", "tls"}
+        assert len(data["unmet"]) == 3
 
     def test_auth_verify_ok_and_bad(self, monkeypatch):
-        monkeypatch.setattr("server.main.ADMIN_PASSWORD", "pw123")
+        monkeypatch.setattr("server.admin_auth.ADMIN_PASSWORD", "pw123")
         c = make_client(password="pw123")
         try:
             assert c.auth_verify("pw123") == {"verified": True}
@@ -292,7 +300,7 @@ class TestAlerts:
 
 class TestAdminAuthThroughClient:
     def test_admin_endpoints_require_password_when_set(self, monkeypatch):
-        monkeypatch.setattr("server.main.ADMIN_PASSWORD", "pw123")
+        monkeypatch.setattr("server.admin_auth.ADMIN_PASSWORD", "pw123")
         # Right password -> 2xx; wrong/missing -> 401 structured error.
         good = make_client(password="pw123")
         bad = make_client(password="nope")

@@ -1,7 +1,6 @@
 import asyncio
 import binascii
 import os
-import base64
 from pathlib import Path
 import prometheus_client as prom_client
 from contextlib import asynccontextmanager
@@ -36,6 +35,8 @@ from server.reports import (
     _is_heavy,
 )
 from server.alerts import get_alert_config, update_alert_config, send_test_alert, send_alert, ALERT_TYPES, ALERT_CONFIG, ALERT_EVENTS, send_new_agent_alert, send_stale_agent_alert, send_compliance_alert
+from server import admin_auth, posture
+from server.admin_auth import require_admin  # noqa: F401  (privileged routes below)
 from server.framing import message_limit
 from server.ws import (
     CLOSE_POLICY_VIOLATION,
@@ -46,28 +47,7 @@ from server.ws import (
 )
 
 AGENT_TIMEOUT_SECONDS = int(os.environ.get("AGENT_TIMEOUT_SECONDS", 60))
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 _cleanup_task = None
-
-
-def require_admin(request: Request):
-    if not ADMIN_PASSWORD:
-        return True
-    
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Basic "):
-        return False
-    
-    try:
-        encoded = auth_header[6:]
-        decoded = base64.b64decode(encoded).decode("utf-8")
-        if ":" in decoded:
-            password = decoded.split(":", 1)[1]
-        else:
-            password = decoded
-        return password == ADMIN_PASSWORD
-    except Exception:
-        return False
 
 
 async def periodic_cleanup():
@@ -79,6 +59,11 @@ async def periodic_cleanup():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _cleanup_task
+    # Credential first: the posture check needs to know whether admin auth exists.
+    admin_auth.ensure()
+    # Refuses to start (non-zero exit) when config push is enabled on an insecure
+    # posture (#96). Read-only deployments are unaffected.
+    posture.assert_startup_posture()
     _cleanup_task = asyncio.create_task(periodic_cleanup())
     yield
     if _cleanup_task:
@@ -129,8 +114,12 @@ app = FastAPI(
         "Interactive docs: [`/docs`](/docs) · ReDoc: [`/redoc`](/redoc) · "
         "Machine-readable schema: [`/openapi.json`](/openapi.json).\n\n"
         "**Auth:** endpoints marked as requiring auth use HTTP Basic with the admin "
-        "password (`Authorization: Basic base64(':ADMIN_PASSWORD')`). Auth is fully "
-        "disabled when `ADMIN_PASSWORD` is unset/empty — check `GET /auth/status`."
+        "password (`Authorization: Basic base64(':ADMIN_PASSWORD')`). With no admin "
+        "credential configured the server runs in read-only mode — check "
+        "`GET /auth/status`.\n\n"
+        "**Config push:** off by default (`OPAMP_CONFIG_PUSH_ENABLED=false`); its "
+        "routes 404 and no `remote_config` is ever sent until the posture is secure. "
+        "Check `GET /health` → `config_push`."
     ),
     lifespan=lifespan,
 )
@@ -148,23 +137,32 @@ app.add_middleware(
 
 @app.get("/auth/status", tags=["auth"], summary="Check whether admin auth is required")
 def auth_status():
-    """Report whether the server requires admin authentication.
+    """Report the admin auth mode — no secrets.
 
-    Returns `{"password_required": bool}`. `true` means `ADMIN_PASSWORD` is set and
-    sensitive endpoints expect HTTP Basic credentials; `false` means auth is disabled
-    (default when `ADMIN_PASSWORD` is unset/empty). Unauthenticated — call this first
-    to discover the auth mode.
+    Returns `{"password_required": bool, "auth_mode": "password"|"disabled",
+    "roles": [str]}`. `password` means `ADMIN_PASSWORD` (or a stored generated
+    credential) is in effect and sensitive endpoints expect HTTP Basic
+    credentials; `disabled` is **read-only mode**, where no credential exists and
+    privileged endpoints behave as they always have (open — closed by #95).
+    `roles` lists the roles a caller gets after authenticating; empty means no
+    authentication happened. Unauthenticated — call this first to discover the
+    auth mode.
     """
-    return {"password_required": bool(ADMIN_PASSWORD)}
+    required = admin_auth.configured()
+    return {
+        "password_required": required,
+        "auth_mode": "password" if required else "disabled",
+        "roles": ["admin"] if required else [],
+    }
 
 
 @app.get("/auth/verify", tags=["auth"], summary="Verify admin credentials")
 def verify_auth(request: Request):
     """Verify admin credentials; returns 200 `{"authenticated": true}` or 401.
 
-    Requires HTTP Basic auth when `ADMIN_PASSWORD` is set (401 otherwise). Useful
-    as a preflight credential check for agents before calling other admin endpoints.
-    Always succeeds when `ADMIN_PASSWORD` is unset (auth disabled).
+    Requires HTTP Basic auth when an admin credential is configured (401
+    otherwise). Useful as a preflight credential check for agents before calling
+    other admin endpoints. Always succeeds in read-only mode (no credential).
     """
     if not require_admin(request):
         raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -403,6 +401,13 @@ def _handle_agent_message(data: bytes) -> ProcessedMessage:
         ServerCapabilities.ServerCapabilities_OffersConnectionSettings |
         ServerCapabilities.ServerCapabilities_AcceptsConnectionSettingsRequest
     )
+
+    # Only advertise remote config when the server may actually deliver it (#96):
+    # a capability bit is a promise, and an agent supervisor that sees it will
+    # wait for a config that is never coming. `OffersRemoteConfig` is the server
+    # side of the agent's `AcceptsRemoteConfig`.
+    if posture.push_allowed():
+        response.capabilities |= ServerCapabilities.ServerCapabilities_OffersRemoteConfig
     
     if agent_id not in AGENT_REGISTRY._agents:
         logger.info(f"New agent connecting: {agent_id}")
@@ -431,6 +436,10 @@ def _handle_agent_message(data: bytes) -> ProcessedMessage:
         AGENT_METRICS.pop(agent_id, None)
         update_metrics()
     
+    # Last line of defence for #81/#102: nothing may put remote_config on the
+    # wire while the posture says config push is not allowed.
+    posture.scrub_remote_config(response)
+
     return ProcessedMessage(
         response.SerializeToString(),
         instance_uid=bytes(agent_msg.instance_uid),
@@ -910,10 +919,13 @@ def test_alerts(request: Request, body: dict = None):
 
 @app.get("/health", tags=["ops"], summary="Health check")
 def health_check():
-    """Liveness/readiness probe: server status, agent count, OPA availability.
+    """Liveness/readiness probe: server status, agent count, OPA availability, posture.
 
     Unauthenticated. Returns `{"status": "healthy", "agents_connected": n,
-    "opa_enabled": bool, "opa_url": str|null, "alerts_enabled": true}`.
+    "opa_enabled": bool, "opa_url": str|null, "alerts_enabled": true,
+    "config_push": {"enabled", "insecure", "agent_auth", "audit", "tls"}}`.
+    The `config_push` block is the public posture summary — `insecure: true` means
+    config push is on despite an unsafe posture and the UI shows a banner.
     Prometheus metrics are served separately at `GET /metrics`.
     """
     from server.opa_client import OPAClient
@@ -925,11 +937,58 @@ def health_check():
         "opa_enabled": opa_available,
         "opa_url": OPA_URL if OPA_ENABLED else None,
         "alerts_enabled": True,
+        "config_push": posture.posture(),
+    }
+
+
+@app.get("/config/posture", tags=["config"], summary="Full config push security posture")
+def config_posture(request: Request):
+    """Full posture detail for operators and the UI — admin auth required.
+
+    `GET /health` carries the one-line summary a banner needs; this endpoint adds
+    *why*: which requirements are met and which are not, where the admin
+    credential came from, and whether the development override is in force. No
+    secrets are returned (never the password, never a token). 401 without valid
+    credentials whenever an admin credential is configured.
+    """
+    if not require_admin(request):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    reqs = posture.requirements()
+    return {
+        "config_push": posture.posture(),
+        "allowed": posture.push_allowed(),
+        "override": posture.allow_insecure_config_push(),
+        "requirements": {
+            key: {"met": state["met"], "detail": state["detail"]}
+            for key, state in reqs.items()
+        },
+        "unmet": posture.unmet_requirements(),
+        "http": {
+            "public_url": posture.public_url() or None,
+            "tls": posture.tls_enabled(),
+            "tls_terminated_upstream": posture.tls_terminated_upstream(),
+        },
+        "admin_auth": {
+            "mode": "password" if admin_auth.configured() else "disabled",
+            "source": admin_auth.source(),
+        },
     }
 
 
 if __name__ == "__main__":
+    import sys
+
     import uvicorn
+
+    admin_auth.ensure()
+    try:
+        # Fail here with a readable message and a non-zero exit; the lifespan hook
+        # repeats the check for uvicorn/gunicorn startup.
+        posture.assert_startup_posture()
+    except posture.PostureError as exc:
+        logger.error(str(exc))
+        sys.exit(1)
+
     uvicorn.run(
         app,
         host="127.0.0.1",

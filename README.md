@@ -51,6 +51,12 @@ Access:
 - Server: http://localhost:4320
 - OPA (if enabled): http://localhost:8181
 
+There is no default admin password. On first start the server generates a random
+one, prints it once in the logs (`docker-compose logs server | grep -i "admin
+password"`), and stores it in `./data/admin_password` (mode 0600). Set
+`ADMIN_PASSWORD` in `.env` to choose your own. Both ports bind to `127.0.0.1` on
+purpose — see [Before you expose this server](#before-you-expose-this-server).
+
 ### Manual Setup
 
 #### Server
@@ -107,6 +113,56 @@ must be listed in `CORS_ORIGINS` unless that is `*`. If you launch uvicorn
 directly, set `--ws-max-size` to at least `OPAMP_MAX_MESSAGE_BYTES` or uvicorn's
 16 MiB default will close frames before the app limit applies.
 
+## Before you expose this server
+
+This server ships **read-only by default** and is meant to be reachable by
+trusted agents on a trusted network until you finish the checklist below.
+Plain HTTP + no admin credential + agents that claim any `instance_uid` + a port
+published to the world is a fleet takeover, so the defaults are now closed:
+
+| Thing | Default | What that means |
+|---|---|---|
+| `ADMIN_PASSWORD` | *none* | Read-only mode: no privileged action is authenticated. Docker generates a random password on first start and stores it in `data/admin_password`; nothing ships a placeholder |
+| Config push | **off** | Push routes return 404 (not 403 — a stranger does not get to learn the surface exists), the server does not advertise `OffersRemoteConfig`, and no `remote_config` field is ever sent |
+| Agent auth | off | Any client can claim any agent identity. This is #94, not yet implemented |
+| TLS | off | Credentials and configs travel in cleartext |
+| Ports in `docker-compose.yml` | `127.0.0.1` | Reachable from the host only, not from the network |
+
+**To expose it safely**, do all four:
+
+1. **Put TLS in front.** Use `docker/nginx.conf` or `docker/Caddyfile`, then set
+   `PUBLIC_URL=https://opamp.example.com` (or `TLS_TERMINATED_UPSTREAM=true`).
+   Keep port 4320 bound to loopback so nothing can bypass the proxy, forward
+   `Upgrade`/`Connection` and a long read timeout for the WebSocket transport,
+   and leave `Origin` intact — `CORSMiddleware` does not apply to upgrades, so
+   the server's own check is the only one.
+2. **Set an admin password** (`ADMIN_PASSWORD` or a mounted `ADMIN_PASSWORD_FILE`).
+   Don't leave the generated one on a shared volume if several people need access.
+3. **Set `CORS_ORIGINS`** to the origin the UI is served from instead of `*`.
+4. **Keep config push off** until the posture check passes for you. Turning it on
+   is refused at startup unless admin auth, agent auth and TLS are all in place:
+
+```bash
+OPAMP_CONFIG_PUSH_ENABLED=true uvicorn server.main:app --port 4320
+# refusing to start: OPAMP_CONFIG_PUSH_ENABLED=true but the server posture is insecure:
+#   - admin auth is not configured: ...
+#   - agents are not authenticated: ...
+#   - the server is not served over TLS: ...
+```
+
+The only way past that is `OPAMP_ALLOW_INSECURE_CONFIG_PUSH=true`, which is for
+local development: it logs a red warning, reports `insecure: true` in `/health`,
+and puts a permanent banner on every UI page. It is deliberately unpleasant.
+
+Check your posture at any time:
+
+```bash
+curl -s localhost:4320/health | jq .config_push
+# {"enabled": false, "insecure": false, "agent_auth": "off", "audit": false, "tls": false}
+opampctl --password "$ADMIN_PASSWORD" health   # same, plus config_push
+curl -s -u ":$ADMIN_PASSWORD" localhost:4320/config/posture | jq .requirements
+```
+
 ## Environment Variables
 
 | Variable | Default | Description |
@@ -116,11 +172,19 @@ directly, set `--ws-max-size` to at least `OPAMP_MAX_MESSAGE_BYTES` or uvicorn's
 | `SERVER_PORT` | `4320` | Server port |
 | `AGENT_TIMEOUT_SECONDS` | `60` | Seconds before stale agent removed |
 | `DATA_DIR` | `data` | SQLite database directory |
-| `ADMIN_PASSWORD` | *(empty)* | Enables HTTP Basic auth on admin endpoints (see [API](#api-reference)) |
+| `ADMIN_PASSWORD` | *(empty)* | Admin password for privileged endpoints (see [API](#api-reference)). Empty = read-only mode; set `ADMIN_PASSWORD_FILE` or `OPAMP_ADMIN_AUTOGENERATE_PASSWORD` instead if you prefer |
+| `ADMIN_PASSWORD_FILE` | *(empty)* | Read the admin password from a file (secret mount) instead of the environment |
+| `OPAMP_ADMIN_AUTOGENERATE_PASSWORD` | `false` | Generate a random admin password on first start, print it once, store it in `$DATA_DIR/admin_password` (0600). `true` in `docker-compose.yml` |
 | `CORS_ORIGINS` | `*` | Comma-separated list of allowed CORS origins (browser clients) |
 | `OPAMP_WS_ENABLED` | `false` | Enable the WebSocket transport on `/v1/opamp` (see [Transports](#transports)) |
 | `OPAMP_MAX_MESSAGE_BYTES` | `67108864` | Max OpAMP message size (64 MiB), varint header included |
 | `OPAMP_WS_OUTBOUND_QUEUE` | `32` | Per-connection WebSocket send queue depth; oldest is dropped when full |
+| `OPAMP_CONFIG_PUSH_ENABLED` | `false` | Remote config push master switch. Off = push routes 404, no `remote_config` is ever sent. On = the server refuses to start unless the posture below is secure |
+| `OPAMP_AGENT_AUTH` | `off` | Agent authentication mode: `off`, `token`, `mtls`. Required (and enforced) by config push once #94 lands |
+| `PUBLIC_URL` | *(empty)* | Public URL agents/browsers use. `https://` or `wss://` counts as TLS for the posture check |
+| `TLS_TERMINATED_UPSTREAM` | `false` | Assert that a TLS terminator you control sits in front of the server (see `docker/`). Assertion only — keep the server on loopback |
+| `OPAMP_AUDIT_ENABLED` | `false` | Reports audit-log availability for privileged actions (#97); always `false` today |
+| `OPAMP_ALLOW_INSECURE_CONFIG_PUSH` | `false` | **Local development only.** Starts with config push enabled on an insecure posture: red warning, `insecure: true` in `/health`, permanent UI banner. See [Before you expose this server](#before-you-expose-this-server) |
 
 ## Alerts (Webhook)
 
@@ -159,25 +223,32 @@ The server is FastAPI-based and self-documenting:
 
 ### Authentication
 
-Auth is controlled by `ADMIN_PASSWORD`:
+Auth is controlled by the admin credential (`ADMIN_PASSWORD`, `ADMIN_PASSWORD_FILE`, or
+one generated at startup with `OPAMP_ADMIN_AUTOGENERATE_PASSWORD=true`):
 
-- **Empty/unset (default): auth is disabled** — all endpoints are open.
-- **Set:** endpoints marked 🔒 below require HTTP Basic auth with any username and the admin password as the password:
+- **No credential (read-only mode):** endpoints marked 🔒 behave as they always have —
+  open, because there is nothing to authenticate against. Closing that door is #95.
+  Docker deployments generate a random credential, so read-only mode is mostly a
+  local-development state.
+- **Credential present:** endpoints marked 🔒 below require HTTP Basic auth with any
+  username and the admin password as the password:
 
 ```bash
-# any username, ADMIN_PASSWORD as the password
-curl -u admin:changeme http://localhost:4320/alerts
+# any username, the admin password as the password
+curl -u admin:"$ADMIN_PASSWORD" http://localhost:4320/alerts
 # or explicitly:
-curl -H "Authorization: Basic $(printf ':changeme' | base64)" http://localhost:4320/alerts
+curl -H "Authorization: Basic $(printf ":$ADMIN_PASSWORD" | base64)" http://localhost:4320/alerts
 ```
 
-Check the auth mode with `GET /auth/status` (`{"password_required": true|false}`) and validate credentials with `GET /auth/verify`.
+Check the auth mode with `GET /auth/status`
+(`{"password_required": bool, "auth_mode": "password"|"disabled", "roles": [...]}`) and
+validate credentials with `GET /auth/verify`.
 
 ### Endpoints
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|:----:|-------------|
-| GET | `/auth/status` | | Whether `ADMIN_PASSWORD` is set (auth required) |
+| GET | `/auth/status` | | Auth mode: `password_required`, `auth_mode` (`password`\|`disabled`), `roles`. No secrets |
 | GET | `/auth/verify` | 🔒 | Validate Basic credentials (200 or 401) |
 | POST | `/v1/opamp` | | OpAMP protocol endpoint — agents connect here (protobuf) |
 | WS | `/v1/opamp` | | Same endpoint over WebSocket when `OPAMP_WS_ENABLED=true` |
@@ -199,7 +270,8 @@ Check the auth mode with `GET /auth/status` (`{"password_required": true|false}`
 | GET | `/alerts` | 🔒 | Current alert configuration |
 | PUT | `/alerts` | 🔒 | Update alert configuration |
 | POST | `/alerts/test` | 🔒 | Send a test alert (optionally with a temporary `event_config`) |
-| GET | `/health` | | Health check (server status, agent count, OPA availability) |
+| GET | `/health` | | Health check (server status, agent count, OPA availability) plus the public `config_push` posture block |
+| GET | `/config/posture` | 🔒 | Full config push posture: every requirement, what is met, where the admin credential came from, whether the override is on. No secrets |
 | GET | `/metrics` | | Prometheus metrics |
 
 Example: filter agents by metadata and health
@@ -219,6 +291,7 @@ use `--raw` to print just the markdown/YAML payload. Install with `pip install -
 opampctl health
 opampctl agents list
 opampctl reports fleet --raw
+opampctl config posture                     # config push posture + why each requirement fails
 
 # Agents
 opampctl agents list --healthy true --attr environment=prod
@@ -280,11 +353,12 @@ opampctl --show-completion      # show the install command/instructions
 ## MCP Server (for AI agents)
 
 An [MCP](https://modelcontextprotocol.io) server (`opamp-mcp` / `python -m mcp_server`)
-exposes 19 typed tools mirroring the API: `list_agents`, `get_agent`,
+exposes 20 typed tools mirroring the API: `list_agents`, `get_agent`,
 `get_agent_metrics`, `generate_manifest`, `fleet_report`, `heavy_collectors_report`,
 `outdated_collectors_report`, `get_compliance`, `check_compliance`,
 `compliance_summary`, `list_policies`, `validate_policies`, `reload_policies`,
-`get_alerts`, `update_alerts`, `test_alerts`, `agent_report`, `health`, `auth_status`.
+`get_alerts`, `update_alerts`, `test_alerts`, `agent_report`, `health`, `auth_status`,
+`config_posture`.
 
 Transport is **stdio** by default (works with every local MCP client); use
 `--transport sse --port 8765` for remote agents. Configure with the same env vars
@@ -360,5 +434,6 @@ opamp-server-py/
 ├── proto/           # Protobuf definitions
 ├── tests/           # Tests
 ├── collector/       # Sample configs
-└── data/            # SQLite DB
+├── docker/          # TLS terminator examples (nginx, Caddy) for #96
+└── data/            # SQLite DB (+ generated admin_password)
 ```

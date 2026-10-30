@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from server.manifest import generate_manifest, generate_ocb_command
+from server.posture import posture_warning
 from server.reports import (  # re-exported: report logic lives in server/reports.py
     generate_agent_report,
     generate_heavy_collectors_report,
@@ -268,7 +269,8 @@ def render_sidebar():
     
     data = get_agents()
     st.session_state["agents_data"] = data
-    
+
+    health_data = {}
     try:
         health_resp = requests.get(f"{SERVER_URL}/health", timeout=5)
         health_data = health_resp.json() if health_resp.status_code == 200 else {}
@@ -290,3 +292,18 @@ def render_sidebar():
         
         st.markdown("**Agents Connected**")
         st.caption(f"{data.get('count', 0)}")
+
+    render_posture_banner(health_data)
+
+
+def render_posture_banner(health_data):
+    """Permanent, unmissable banner while config push runs on an insecure posture.
+
+    Reads the *public* posture block of `GET /health`, so it renders on every page
+    of the UI without a password and cannot be dismissed (#96). A server that is
+    one flag away from letting anyone rewrite fleet configuration should never
+    look normal. Wording lives in `server/posture.py` so it is testable.
+    """
+    warning = posture_warning((health_data or {}).get("config_push") or {})
+    if warning:
+        st.error(warning)

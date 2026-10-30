@@ -92,6 +92,21 @@ extensions:
         endpoint: http://127.0.0.1:4320/v1/opamp
 ```
 
+### Transports
+
+Plain HTTP is the default and is what the collector's `opamp` extension uses
+(`endpoint: http://host:4320/v1/opamp`). Set `OPAMP_WS_ENABLED=true` to accept a
+WebSocket upgrade on the same path. Frames are a base-128 varint header (must be
+`0`) followed by the protobuf message; messages over `OPAMP_MAX_MESSAGE_BYTES`
+close the socket with `1009`. Both transports run the same message handler, so
+agent state is identical either way.
+
+WebSocket upgrades are not covered by `CORSMiddleware`, so the handshake checks
+`Origin` itself: agents (which send no `Origin`) always pass, and a browser origin
+must be listed in `CORS_ORIGINS` unless that is `*`. If you launch uvicorn
+directly, set `--ws-max-size` to at least `OPAMP_MAX_MESSAGE_BYTES` or uvicorn's
+16 MiB default will close frames before the app limit applies.
+
 ## Environment Variables
 
 | Variable | Default | Description |
@@ -103,6 +118,9 @@ extensions:
 | `DATA_DIR` | `data` | SQLite database directory |
 | `ADMIN_PASSWORD` | *(empty)* | Enables HTTP Basic auth on admin endpoints (see [API](#api-reference)) |
 | `CORS_ORIGINS` | `*` | Comma-separated list of allowed CORS origins (browser clients) |
+| `OPAMP_WS_ENABLED` | `false` | Enable the WebSocket transport on `/v1/opamp` (see [Transports](#transports)) |
+| `OPAMP_MAX_MESSAGE_BYTES` | `67108864` | Max OpAMP message size (64 MiB), varint header included |
+| `OPAMP_WS_OUTBOUND_QUEUE` | `32` | Per-connection WebSocket send queue depth; oldest is dropped when full |
 
 ## Alerts (Webhook)
 
@@ -162,6 +180,7 @@ Check the auth mode with `GET /auth/status` (`{"password_required": true|false}`
 | GET | `/auth/status` | | Whether `ADMIN_PASSWORD` is set (auth required) |
 | GET | `/auth/verify` | 🔒 | Validate Basic credentials (200 or 401) |
 | POST | `/v1/opamp` | | OpAMP protocol endpoint — agents connect here (protobuf) |
+| WS | `/v1/opamp` | | Same endpoint over WebSocket when `OPAMP_WS_ENABLED=true` |
 | POST | `/v1/metrics` | | OTLP/HTTP metrics ingestion from collectors (JSON or protobuf) |
 | GET | `/agents` | | List agents. Filters: `healthy=true\|false\|unknown`, `status=` (remote config status, or alias `remote_config_status=`), or any description attribute, e.g. `?environment=prod`. Repeated params are OR |
 | GET | `/agent/{id}` | | Agent details incl. latest OTLP metrics |

@@ -6,7 +6,7 @@ from pathlib import Path
 import prometheus_client as prom_client
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from fastapi import FastAPI, Request, HTTPException, Query
+from fastapi import FastAPI, Request, HTTPException, Query, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
@@ -36,6 +36,12 @@ from server.reports import (
     _is_heavy,
 )
 from server.alerts import get_alert_config, update_alert_config, send_test_alert, send_alert, ALERT_TYPES, ALERT_CONFIG, ALERT_EVENTS, send_new_agent_alert, send_stale_agent_alert, send_compliance_alert
+from server.ws import (
+    CLOSE_POLICY_VIOLATION,
+    ProcessedMessage,
+    serve as serve_websocket,
+    ws_enabled,
+)
 
 AGENT_TIMEOUT_SECONDS = int(os.environ.get("AGENT_TIMEOUT_SECONDS", 60))
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
@@ -361,28 +367,19 @@ def _apply_status_report(agent_id: str, agent_dict: Dict[str, Any]) -> None:
     PROM_MESSAGES_RECEIVED.labels(message_type="heartbeat").inc()
 
 
-@app.post("/v1/opamp", tags=["opamp"], summary="OpAMP protocol endpoint for agents")
-async def opamp_endpoint(request: Request) -> Response:
-    """OpAMP protocol endpoint — agents connect here.
+def _handle_agent_message(data: bytes) -> ProcessedMessage:
+    """Apply one `AgentToServer` message and build the `ServerToAgent` reply.
 
-    Accepts protobuf-encoded `AgentToServer` messages and replies with
-    `ServerToAgent` (`application/x-protobuf`). Registers new agents, updates
-    heartbeats, health, description, effective config, package status, and remote
-    config status. Not for human/agent tooling use — pointed at by the collector's
-    `opamp` extension (`endpoint: http://host:4320/v1/opamp`). Unauthenticated.
+    Shared by the HTTP and WebSocket transports so the two cannot drift; the
+    transport only differs in framing and connection lifecycle. Returns the
+    serialized reply plus the fields the socket layer needs for its registry.
     """
-    data = await request.body()
-    
     response = ServerToAgent()
     response.capabilities = 0
     
     if not data:
         response.capabilities = ServerCapabilities.ServerCapabilities_AcceptsStatus
-        return Response(
-            content=response.SerializeToString(),
-            media_type="application/x-protobuf",
-            headers={"Connection": "keep-alive"}
-        )
+        return ProcessedMessage(response.SerializeToString())
     
     try:
         agent_msg = AgentToServer()
@@ -390,11 +387,7 @@ async def opamp_endpoint(request: Request) -> Response:
     except Exception as e:
         logger.error(f"Failed to parse OpAMP message: {e}")
         response.capabilities = ServerCapabilities.ServerCapabilities_AcceptsStatus
-        return Response(
-            content=response.SerializeToString(),
-            media_type="application/x-protobuf",
-            headers={"Connection": "keep-alive"}
-        )
+        return ProcessedMessage(response.SerializeToString())
     
     agent_id = binascii.hexlify(agent_msg.instance_uid).decode('utf-8')
     agent_dict = MessageToDict(agent_msg)
@@ -427,7 +420,8 @@ async def opamp_endpoint(request: Request) -> Response:
 
     _apply_status_report(agent_id, agent_dict)
     
-    if 'agentDisconnect' in agent_dict:
+    disconnected = 'agentDisconnect' in agent_dict
+    if disconnected:
         logger.info(f"Agent disconnecting: {agent_id}")
         AGENT_REGISTRY.remove(agent_id)
         PROM_AGENT_HEALTH.remove(agent_id)
@@ -435,11 +429,48 @@ async def opamp_endpoint(request: Request) -> Response:
         AGENT_METRICS.pop(agent_id, None)
         update_metrics()
     
+    return ProcessedMessage(
+        response.SerializeToString(),
+        instance_uid=bytes(agent_msg.instance_uid),
+        disconnected=disconnected,
+    )
+
+
+@app.post("/v1/opamp", tags=["opamp"], summary="OpAMP protocol endpoint for agents")
+async def opamp_endpoint(request: Request) -> Response:
+    """OpAMP protocol endpoint — agents connect here over plain HTTP.
+
+    Accepts protobuf-encoded `AgentToServer` messages and replies with
+    `ServerToAgent` (`application/x-protobuf`). Registers new agents, updates
+    heartbeats, health, description, effective config, package status, and remote
+    config status. Not for human/agent tooling use — pointed at by the collector's
+    `opamp` extension (`endpoint: http://host:4320/v1/opamp`). Unauthenticated.
+
+    The same path also accepts a WebSocket upgrade when `OPAMP_WS_ENABLED=true`.
+    """
+    result = _handle_agent_message(await request.body())
     return Response(
-        content=response.SerializeToString(),
+        content=result.response,
         media_type="application/x-protobuf",
         headers={"Connection": "keep-alive"}
     )
+
+
+@app.websocket("/v1/opamp")
+async def opamp_ws_endpoint(websocket: WebSocket) -> None:
+    """OpAMP WebSocket transport — same path as the HTTP endpoint.
+
+    Disabled by default. When `OPAMP_WS_ENABLED` is false the handshake is
+    refused with close code 1008 and the server behaves exactly as an HTTP-only
+    server. When enabled, each binary frame is a varint header (must be 0)
+    followed by an `AgentToServer` protobuf, per spec §WebSocket Transport.
+    Unauthenticated.
+    """
+    if not ws_enabled():
+        await websocket.close(code=CLOSE_POLICY_VIOLATION)
+        return
+    await websocket.accept()
+    await serve_websocket(websocket, _handle_agent_message)
 
 
 @app.get("/agents")

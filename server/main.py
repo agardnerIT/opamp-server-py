@@ -326,6 +326,41 @@ def cleanup_stale_agents():
         update_metrics()
 
 
+def _apply_status_report(agent_id: str, agent_dict: Dict[str, Any]) -> None:
+    """Apply the status fields present in any valid agent message."""
+    if 'health' in agent_dict and agent_dict['health']:
+        healthy = agent_dict['health'].get('healthy', False)
+        AGENT_REGISTRY.update(agent_id, healthy=healthy)
+        PROM_AGENT_HEALTH.labels(agent_id=agent_id).set(1 if healthy else 0)
+        PROM_MESSAGES_RECEIVED.labels(message_type="health").inc()
+
+    if 'agentDescription' in agent_dict:
+        AGENT_REGISTRY.update(agent_id, description=agent_dict['agentDescription'])
+
+    if 'effectiveConfig' in agent_dict:
+        import json
+        config_str = json.dumps(agent_dict['effectiveConfig'])
+        AGENT_REGISTRY.update(agent_id, effective_config=config_str)
+        PROM_MESSAGES_RECEIVED.labels(message_type="effective_config").inc()
+
+    if 'health' in agent_dict:
+        AGENT_REGISTRY.update(agent_id, health=agent_dict['health'])
+
+    if 'availableComponents' in agent_dict:
+        AGENT_REGISTRY.update(agent_id, available_components=agent_dict['availableComponents'])
+        PROM_MESSAGES_RECEIVED.labels(message_type="available_components").inc()
+
+    if 'packageStatuses' in agent_dict:
+        AGENT_REGISTRY.update(agent_id, package_statuses=agent_dict['packageStatuses'])
+        PROM_MESSAGES_RECEIVED.labels(message_type="package_status").inc()
+
+    if 'remoteConfigStatus' in agent_dict:
+        status = agent_dict['remoteConfigStatus'].get('status', 'UNSET')
+        AGENT_REGISTRY.update(agent_id, remote_config_status=status)
+
+    PROM_MESSAGES_RECEIVED.labels(message_type="heartbeat").inc()
+
+
 @app.post("/v1/opamp", tags=["opamp"], summary="OpAMP protocol endpoint for agents")
 async def opamp_endpoint(request: Request) -> Response:
     """OpAMP protocol endpoint — agents connect here.
@@ -389,38 +424,8 @@ async def opamp_endpoint(request: Request) -> Response:
         send_new_agent_alert(agent_id)
     else:
         AGENT_REGISTRY.update(agent_id, last_heartbeat=utcnow())
-        
-        if 'health' in agent_dict and agent_dict['health']:
-            healthy = agent_dict['health'].get('healthy', False)
-            AGENT_REGISTRY.update(agent_id, healthy=healthy)
-            PROM_AGENT_HEALTH.labels(agent_id=agent_id).set(1 if healthy else 0)
-            PROM_MESSAGES_RECEIVED.labels(message_type="health").inc()
-        
-        if 'agentDescription' in agent_dict:
-            AGENT_REGISTRY.update(agent_id, description=agent_dict['agentDescription'])
-        
-        if 'effectiveConfig' in agent_dict:
-            import json
-            config_str = json.dumps(agent_dict['effectiveConfig'])
-            AGENT_REGISTRY.update(agent_id, effective_config=config_str)
-            PROM_MESSAGES_RECEIVED.labels(message_type="effective_config").inc()
-        
-        if 'health' in agent_dict:
-            AGENT_REGISTRY.update(agent_id, health=agent_dict['health'])
-        
-        if 'availableComponents' in agent_dict:
-            AGENT_REGISTRY.update(agent_id, available_components=agent_dict['availableComponents'])
-            PROM_MESSAGES_RECEIVED.labels(message_type="available_components").inc()
-        
-        if 'packageStatuses' in agent_dict:
-            AGENT_REGISTRY.update(agent_id, package_statuses=agent_dict['packageStatuses'])
-            PROM_MESSAGES_RECEIVED.labels(message_type="package_status").inc()
-        
-        if 'remoteConfigStatus' in agent_dict:
-            status = agent_dict['remoteConfigStatus'].get('status', 'UNSET')
-            AGENT_REGISTRY.update(agent_id, remote_config_status=status)
-        
-        PROM_MESSAGES_RECEIVED.labels(message_type="heartbeat").inc()
+
+    _apply_status_report(agent_id, agent_dict)
     
     if 'agentDisconnect' in agent_dict:
         logger.info(f"Agent disconnecting: {agent_id}")

@@ -14,9 +14,12 @@ from server.ws import (
     CLOSE_MESSAGE_TOO_BIG,
     CLOSE_POLICY_VIOLATION,
     CLOSE_PROTOCOL_ERROR,
+    DEFAULT_OUTBOUND_QUEUE_DEPTH,
     REGISTRY,
     ConnectionRegistry,
     _enqueue,
+    origin_allowed,
+    outbound_queue_depth,
 )
 
 
@@ -90,6 +93,52 @@ class TestConnectionRegistry:
         registry.bind(7, b"b")
         assert registry.unbind_connection(7) == frozenset({b"a", b"b"})
         assert registry.agents_on(7) == frozenset()
+
+
+class TestQueueDepthConfig:
+    def test_default(self, monkeypatch):
+        monkeypatch.delenv("OPAMP_WS_OUTBOUND_QUEUE", raising=False)
+        assert outbound_queue_depth() == DEFAULT_OUTBOUND_QUEUE_DEPTH
+
+    def test_env_override(self, monkeypatch):
+        monkeypatch.setenv("OPAMP_WS_OUTBOUND_QUEUE", "4")
+        assert outbound_queue_depth() == 4
+
+    @pytest.mark.parametrize("raw", ["", "nope", "0", "-2"])
+    def test_invalid_falls_back_to_default(self, monkeypatch, raw):
+        monkeypatch.setenv("OPAMP_WS_OUTBOUND_QUEUE", raw)
+        assert outbound_queue_depth() == DEFAULT_OUTBOUND_QUEUE_DEPTH
+
+
+class TestOriginCheck:
+    """WebSocket upgrades bypass CORSMiddleware, so the transport checks Origin."""
+
+    def test_agent_without_origin_is_allowed(self):
+        assert origin_allowed(None, ["https://ui.example"]) is True
+
+    def test_wildcard_allows_any_origin(self):
+        assert origin_allowed("http://evil.example", ["*"]) is True
+
+    def test_listed_origin_is_allowed(self):
+        assert origin_allowed("https://ui.example", ["https://ui.example"]) is True
+
+    def test_unlisted_origin_is_refused(self):
+        assert origin_allowed("http://evil.example", ["https://ui.example"]) is False
+
+    def test_restrictive_cors_refuses_cross_origin_handshake(self, client, ws_on, monkeypatch):
+        monkeypatch.setattr("server.main.CORS_ORIGINS", ["https://ui.example"])
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with client.websocket_connect(
+                "/v1/opamp", headers={"origin": "http://evil.example"}
+            ):
+                pass
+        assert exc.value.code == CLOSE_POLICY_VIOLATION
+
+    def test_restrictive_cors_still_allows_agent_without_origin(self, client, ws_on, monkeypatch):
+        monkeypatch.setattr("server.main.CORS_ORIGINS", ["https://ui.example"])
+        with client.websocket_connect("/v1/opamp") as ws:
+            ws.send_bytes(frame(agent_message(b"ws-noorigin-001")))
+            assert recv(ws).instance_uid == b"ws-noorigin-001"
 
 
 class TestOutboundQueue:

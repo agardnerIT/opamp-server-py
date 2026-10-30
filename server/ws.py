@@ -34,9 +34,38 @@ CLOSE_POLICY_VIOLATION = 1008
 CLOSE_MESSAGE_TOO_BIG = 1009
 
 # Bounded per-connection outbound queue: a slow reader must not pin memory.
-OUTBOUND_QUEUE_DEPTH = max(1, int(os.environ.get("OPAMP_WS_OUTBOUND_QUEUE", "32")))
+DEFAULT_OUTBOUND_QUEUE_DEPTH = 32
 
-_STOP = object()
+
+def outbound_queue_depth() -> int:
+    """Per-connection send queue depth from `OPAMP_WS_OUTBOUND_QUEUE`.
+
+    Invalid or non-positive values fall back to the default rather than raising
+    at import time, matching `framing.message_limit()`: a config typo should not
+    stop the server from booting.
+    """
+    raw = os.environ.get("OPAMP_WS_OUTBOUND_QUEUE")
+    if not raw:
+        return DEFAULT_OUTBOUND_QUEUE_DEPTH
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_OUTBOUND_QUEUE_DEPTH
+    return value if value > 0 else DEFAULT_OUTBOUND_QUEUE_DEPTH
+
+
+def origin_allowed(origin: str | None, allowed: list) -> bool:
+    """May a WebSocket upgrade with this `Origin` header proceed?
+
+    `CORSMiddleware` does not apply to WebSocket upgrades, so without this check
+    setting a restrictive `CORS_ORIGINS` would still leave a page on any origin
+    able to open the socket. Agents are not browsers and send no `Origin` header
+    at all, so a missing header is allowed; a present one must match
+    `CORS_ORIGINS` unless that is `*` (the default).
+    """
+    if origin is None or "*" in allowed:
+        return True
+    return origin in allowed
 
 OPAMP_WS_CONNECTIONS = prom_client.Gauge(
     "opamp_ws_connections",
@@ -157,8 +186,6 @@ async def _writer(websocket: WebSocket, queue: asyncio.Queue) -> None:
     """Single writer task per connection, so send order matches receive order."""
     while True:
         item = await queue.get()
-        if item is _STOP:
-            return
         try:
             await websocket.send_bytes(item)
             OPAMP_WS_MESSAGES.labels(direction="sent", outcome="ok").inc()
@@ -179,7 +206,7 @@ async def serve(
     """
     registry = REGISTRY if registry is None else registry
     conn_id = registry.new_id()
-    queue: asyncio.Queue = asyncio.Queue(maxsize=OUTBOUND_QUEUE_DEPTH)
+    queue: asyncio.Queue = asyncio.Queue(maxsize=outbound_queue_depth())
     writer = asyncio.create_task(_writer(websocket, queue))
     OPAMP_WS_CONNECTIONS.inc()
     logger.info(f"OpAMP WebSocket connection {conn_id} opened")

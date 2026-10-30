@@ -36,9 +36,11 @@ from server.reports import (
     _is_heavy,
 )
 from server.alerts import get_alert_config, update_alert_config, send_test_alert, send_alert, ALERT_TYPES, ALERT_CONFIG, ALERT_EVENTS, send_new_agent_alert, send_stale_agent_alert, send_compliance_alert
+from server.framing import message_limit
 from server.ws import (
     CLOSE_POLICY_VIOLATION,
     ProcessedMessage,
+    origin_allowed,
     serve as serve_websocket,
     ws_enabled,
 )
@@ -464,11 +466,19 @@ async def opamp_ws_endpoint(websocket: WebSocket) -> None:
     refused with close code 1008 and the server behaves exactly as an HTTP-only
     server. When enabled, each binary frame is a varint header (must be 0)
     followed by an `AgentToServer` protobuf, per spec §WebSocket Transport.
-    Unauthenticated.
+    Unauthenticated, but a browser `Origin` must satisfy `CORS_ORIGINS` because
+    WebSocket upgrades are not covered by `CORSMiddleware`.
     """
     if not ws_enabled():
         await websocket.close(code=CLOSE_POLICY_VIOLATION)
         return
+
+    origin = websocket.headers.get("origin")
+    if not origin_allowed(origin, CORS_ORIGINS):
+        logger.warning(f"Refusing OpAMP WebSocket upgrade from origin {origin}")
+        await websocket.close(code=CLOSE_POLICY_VIOLATION)
+        return
+
     await websocket.accept()
     await serve_websocket(websocket, _handle_agent_message)
 
@@ -928,4 +938,7 @@ if __name__ == "__main__":
         timeout_keep_alive=300,
         limit_concurrency=1000,
         backlog=1024,
+        # uvicorn's own default (16 MiB) is lower than OPAMP_MAX_MESSAGE_BYTES,
+        # which would pre-empt the app-level limit; keep the app authoritative.
+        ws_max_size=message_limit(),
     )

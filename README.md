@@ -101,6 +101,12 @@ WebSocket upgrade on the same path. Frames are a base-128 varint header (must be
 close the socket with `1009`. Both transports run the same message handler, so
 agent state is identical either way.
 
+WebSocket upgrades are not covered by `CORSMiddleware`, so the handshake checks
+`Origin` itself: agents (which send no `Origin`) always pass, and a browser origin
+must be listed in `CORS_ORIGINS` unless that is `*`. If you launch uvicorn
+directly, set `--ws-max-size` to at least `OPAMP_MAX_MESSAGE_BYTES` or uvicorn's
+16 MiB default will close frames before the app limit applies.
+
 ## Environment Variables
 
 | Variable | Default | Description |

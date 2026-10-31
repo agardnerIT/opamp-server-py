@@ -329,3 +329,42 @@ class TestPackaging:
             (oc.list_policies, ()),
         ]:
             assert isinstance(method(*args), dict)
+
+
+# --- agent credentials (#94) ----------------------------------------------------
+
+@pytest.fixture
+def credentials(monkeypatch, tmp_path):
+    """Isolated credential DB + an admin credential, so minting is allowed."""
+    from server import admin_auth, agent_auth
+    from server.state import SQLiteCredentialStore
+
+    monkeypatch.setattr(admin_auth, "ADMIN_PASSWORD", "client-pw-123456")
+    monkeypatch.setattr(admin_auth, "PASSWORD_SOURCE", "env")
+    monkeypatch.setattr(agent_auth, "CREDENTIALS", SQLiteCredentialStore(tmp_path / "creds.db"))
+
+
+class TestAgentCredentials:
+    def test_create_and_revoke(self, credentials):
+        agent_id = "ab" * 16
+        with make_client(password="client-pw-123456") as c:
+            created = c.create_agent_token(agent_id, label="host-1")
+            assert created["agent_id"] == agent_id
+            assert created["token"].startswith("opamp_agent_")
+            assert created["label"] == "host-1"
+            assert "Authorization" in created["collector_snippet"]
+
+            assert c.revoke_agent_token(agent_id) == {"agent_id": agent_id, "revoked": 1}
+            assert c.revoke_agent_token(agent_id)["revoked"] == 0  # idempotent
+
+    def test_requires_admin(self, credentials):
+        with make_client() as c:  # no password
+            with pytest.raises(OpampApiError) as exc:
+                c.create_agent_token("cd" * 16)
+            assert exc.value.status_code == 401
+
+    def test_bad_uid_is_422(self, credentials):
+        with make_client(password="client-pw-123456") as c:
+            with pytest.raises(OpampApiError) as exc:
+                c.create_agent_token("not-a-uid")
+            assert exc.value.status_code == 422

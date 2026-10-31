@@ -125,11 +125,26 @@ def test_requirements_met_gives_empty_list(monkeypatch, tmp_path):
 
 
 def test_configured_but_unenforced_agent_auth_does_not_count(monkeypatch, tmp_path):
-    """Setting an env var no code reads must not open the gate (until #94)."""
+    """Setting an env var no code reads must not open the gate."""
     _secure_env(monkeypatch, tmp_path)
     monkeypatch.setattr(posture, "ENFORCED_AGENT_AUTH_MODES", frozenset())
     assert posture.push_allowed() is False
-    assert any("#94" in m for m in posture.unmet_requirements())
+    assert any("not enforced by this build" in m for m in posture.unmet_requirements())
+
+
+def test_token_mode_is_enforced_and_mtls_is_not():
+    """#94: only the mode this build actually implements may open the gate."""
+    assert "token" in posture.ENFORCED_AGENT_AUTH_MODES
+    assert "mtls" not in posture.ENFORCED_AGENT_AUTH_MODES
+    assert "off" not in posture.ENFORCED_AGENT_AUTH_MODES
+
+
+def test_mtls_mode_is_reported_but_refused(monkeypatch, tmp_path):
+    _secure_env(monkeypatch, tmp_path, agent_auth="mtls")
+    monkeypatch.setattr(posture, "ENFORCED_AGENT_AUTH_MODES", frozenset({"token"}))
+    assert posture.push_allowed() is False
+    unmet = "\n".join(posture.unmet_requirements())
+    assert "not enforced by this build" in unmet and "#83" in unmet
 
 
 def test_override_allows_push_but_reports_insecure(monkeypatch):
@@ -282,7 +297,7 @@ def test_posture_warning_reports_tls_and_audit_when_present():
     warning = posture.posture_warning(
         {"insecure": True, "agent_auth": "token", "tls": True, "audit": True}
     )
-    assert "token (configured, not yet enforced)" in warning
+    assert "token (enforced)" in warning
     assert "TLS: **yes**" in warning
     assert "Audit log: **on**" in warning
 

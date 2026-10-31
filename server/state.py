@@ -5,7 +5,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Optional, Dict, Any, Set
+from typing import Optional, Dict, Any, List, Set
 import yaml
 from loguru import logger
 
@@ -192,6 +192,160 @@ class SQLiteMetricsStore:
                 conn.execute("DELETE FROM agent_metrics WHERE agent_id=?", (agent_id,))
         except sqlite3.Error as exc:
             logger.warning(f"Could not delete metrics for {agent_id}: {exc}")
+
+class SQLiteCredentialStore:
+    """Per-agent OpAMP credentials (#94): one row per issued token.
+
+    Only the SHA-256 of a token is stored — the token itself exists in the API
+    response that created it and nowhere else. Rows are never deleted, so
+    `revoked_at`/`last_seen_at` stay available as the audit trail an operator
+    needs to watch a fleet finish a cutover.
+
+    Rotation uses `retire_on_use`: the outgoing row is retired automatically the
+    first time its replacement authenticates, which is what makes rotation
+    zero-downtime without a timer (a timer would either cut too early, breaking a
+    collector that has not reloaded yet, or leave the old token alive forever).
+
+    Timestamps are ISO-8601 UTC strings, like every other table here.
+    """
+
+    def __init__(self, db_path: Path = DB_PATH):
+        self.db_path = db_path
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._connect() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS agent_credentials (
+                    token_hash TEXT PRIMARY KEY,
+                    agent_id TEXT NOT NULL,
+                    label TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    last_seen_at TEXT,
+                    revoked_at TEXT,
+                    retire_on_use TEXT
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS agent_credentials_agent_idx "
+                "ON agent_credentials(agent_id)"
+            )
+            # WAL is a database-level setting, so it also benefits the agent and
+            # metrics writes sharing this file, and keeps an offline reader
+            # (`opampctl --db`) from blocking the auth path.
+            conn.execute("PRAGMA journal_mode=WAL")
+
+    def _connect(self) -> sqlite3.Connection:
+        # A short timeout + busy timeout instead of the default 5s exception:
+        # auth runs on every agent message, so a lock held by a metrics write
+        # must wait, not fail the request.
+        conn = sqlite3.connect(self.db_path, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=5000")
+        return conn
+
+    @staticmethod
+    def _row(row) -> Dict[str, Any]:
+        return {key: row[key] for key in row.keys()}
+
+    def add(
+        self,
+        token_hash: str,
+        agent_id: str,
+        label: str = "",
+        retire_on_use: Optional[str] = None,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO agent_credentials "
+                "(token_hash, agent_id, label, created_at, retire_on_use) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (token_hash, agent_id, label, utcnow().isoformat(), retire_on_use),
+            )
+
+    def get(self, token_hash: str) -> Optional[Dict[str, Any]]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM agent_credentials WHERE token_hash=?", (token_hash,)
+            ).fetchone()
+        return self._row(row) if row else None
+
+    def touch(self, token_hash: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE agent_credentials SET last_seen_at=? WHERE token_hash=?",
+                (utcnow().isoformat(), token_hash),
+            )
+
+    def set_retire_on_use(self, token_hash: str, replacement: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE agent_credentials SET retire_on_use=? WHERE token_hash=?",
+                (replacement, token_hash),
+            )
+
+    def supersede(self, agent_id: str, replacement: str) -> int:
+        """Retire every credential that this replacement was rotated in for."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE agent_credentials SET revoked_at=? "
+                "WHERE agent_id=? AND retire_on_use=? AND revoked_at IS NULL",
+                (utcnow().isoformat(), agent_id, replacement),
+            )
+            return cursor.rowcount or 0
+
+    def revoke(self, token_hash: str) -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE agent_credentials SET revoked_at=? "
+                "WHERE token_hash=? AND revoked_at IS NULL",
+                (utcnow().isoformat(), token_hash),
+            )
+            return bool(cursor.rowcount)
+
+    def revoke_agent(self, agent_id: str) -> int:
+        """Revoke every live credential for one agent. Rows are kept."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE agent_credentials SET revoked_at=? "
+                "WHERE agent_id=? AND revoked_at IS NULL",
+                (utcnow().isoformat(), agent_id),
+            )
+            return cursor.rowcount or 0
+
+    def active(self, agent_id: str) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM agent_credentials "
+                "WHERE agent_id=? AND revoked_at IS NULL ORDER BY created_at",
+                (agent_id,),
+            ).fetchall()
+        return [self._row(row) for row in rows]
+
+    def history(self, agent_id: str) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM agent_credentials WHERE agent_id=? ORDER BY created_at",
+                (agent_id,),
+            ).fetchall()
+        return [self._row(row) for row in rows]
+
+    def all_history(self, agent_ids: Optional[List[str]] = None) -> Dict[str, List[Dict[str, Any]]]:
+        """Every credential row grouped by agent, optionally restricted to `agent_ids`."""
+        if agent_ids is not None and not agent_ids:
+            return {}
+        sql = "SELECT * FROM agent_credentials"
+        params: tuple = ()
+        if agent_ids is not None:
+            placeholders = ",".join("?" for _ in agent_ids)
+            sql += f" WHERE agent_id IN ({placeholders})"
+            params = tuple(agent_ids)
+        sql += " ORDER BY created_at"
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for row in rows:
+            grouped[row["agent_id"]].append(self._row(row))
+        return dict(grouped)
+
 
 COMPONENT_TYPES = {
     "receivers/": "receiver",

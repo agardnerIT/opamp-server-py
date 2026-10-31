@@ -295,3 +295,58 @@ class TestOffline:
         result = run("--db", str(db), "agents", "list")
         assert result.exit_code == 1
         assert "No agents found" in json.loads(result.output)["error"]
+
+
+# ------------------------------------------------------------ agent credentials
+
+class TestTokenCommands:
+    @pytest.fixture(autouse=True)
+    def _credentials(self, monkeypatch, tmp_path):
+        from server import admin_auth, agent_auth
+        from server.state import SQLiteCredentialStore
+
+        monkeypatch.setattr(admin_auth, "ADMIN_PASSWORD", "cli-pw-123456")
+        monkeypatch.setattr(admin_auth, "PASSWORD_SOURCE", "env")
+        monkeypatch.setattr(agent_auth, "CREDENTIALS", SQLiteCredentialStore(tmp_path / "creds.db"))
+
+    def test_create_prints_token_and_snippet(self, live):
+        data = parse(run("--password", "cli-pw-123456", "agents", "token", "create",
+                         "abcd" * 8, "--label", "host-1"))
+        assert data["token"].startswith("opamp_agent_")
+        assert data["label"] == "host-1"
+        assert "collector_snippet" in data and "Authorization" in data["collector_snippet"]
+
+    def test_create_raw_prints_only_the_token(self, live):
+        result = run("--password", "cli-pw-123456", "agents", "token", "create",
+                     "abce" * 8, "--raw")
+        assert result.exit_code == 0, result.output
+        assert result.output.strip().startswith("opamp_agent_")
+        assert "{" not in result.output
+
+    def test_revoke_is_idempotent(self, live):
+        run("--password", "cli-pw-123456", "agents", "token", "create", "abcf" * 8)
+        assert parse(run("--password", "cli-pw-123456", "agents", "token", "revoke",
+                         "abcf" * 8))["revoked"] == 1
+        assert parse(run("--password", "cli-pw-123456", "agents", "token", "revoke",
+                         "abcf" * 8))["revoked"] == 0
+
+    def test_requires_admin(self, live, monkeypatch):
+        monkeypatch.setattr("server.admin_auth.ADMIN_PASSWORD", "cli-pw-123456")
+        result = run("agents", "token", "create", "abcd" * 8)
+        assert result.exit_code == 1
+        assert json.loads(result.output)["error"].startswith("HTTP 401")
+
+
+class TestOfflineCredentials:
+    def test_agents_get_reports_credential_state_offline(self, offline_db):
+        """Operators watching a cutover are often doing it with the server down."""
+        from server.agent_auth import hash_token
+        from server.state import SQLiteCredentialStore
+
+        SQLiteCredentialStore(offline_db).add(hash_token("opamp_agent_x"), "aaaa1111aaaa1111")
+        data = parse(run("--db", str(offline_db), "agents", "get", "aaaa1111aaaa1111"))
+        assert data["credential"]["enrolled"] is True
+        assert data["credential"]["active"] == 1
+
+        listed = parse(run("--db", str(offline_db), "agents", "list"))
+        assert all("credential" in agent for agent in listed["agents"])

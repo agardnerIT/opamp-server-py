@@ -98,6 +98,19 @@ extensions:
         endpoint: http://127.0.0.1:4320/v1/opamp
 ```
 
+With `OPAMP_AGENT_AUTH=token` (see [Agent authentication](#agent-authentication-agent--server))
+the same block also carries the agent's credential:
+
+```yaml
+extensions:
+  opamp:
+    server:
+      http:
+        endpoint: http://127.0.0.1:4320/v1/opamp
+        headers:
+          Authorization: "Bearer ${env:OPAMP_AGENT_TOKEN}"
+```
+
 ### Transports
 
 Plain HTTP is the default and is what the collector's `opamp` extension uses
@@ -113,6 +126,82 @@ must be listed in `CORS_ORIGINS` unless that is `*`. If you launch uvicorn
 directly, set `--ws-max-size` to at least `OPAMP_MAX_MESSAGE_BYTES` or uvicorn's
 16 MiB default will close frames before the app limit applies.
 
+Both transports accept credential headers, which is what makes per-agent
+authentication possible without a wire extension: `extension/opampextension`
+supports `server.http.headers` **and** `server.ws.headers` (verified against
+v0.140.0 — the values are `configopaque`, so the agent's own effective-config
+report redacts them), and `opamp-go` sends them on every HTTP request and on the
+WebSocket upgrade. The supervisor supports the same `headers` block.
+
+## Agent authentication (agent → server)
+
+`OPAMP_AGENT_AUTH` decides whether the OpAMP endpoint believes the `instance_uid`
+in the message body:
+
+| Mode | Behaviour |
+|---|---|
+| `off` (default) | Unauthenticated: any client that can reach the port can claim any agent identity. Logs a startup warning |
+| `token` | Each agent presents `Authorization: Bearer <token>`; the credential **is** the identity and must match the claimed `instance_uid` |
+| `mtls` | Reported by the posture but **not enforced by this build** — certificates are terminated by your proxy, so the server would only be trusting a forgeable header. Use `token`; mTLS arrives with the CA work in #83 |
+
+With `token`:
+
+- a missing, unknown or revoked token gets **401** (HTTP) or **1008** (WebSocket)
+  with **no** `ServerToAgent` body — an unauthenticated client learns nothing,
+  not even which capabilities exist;
+- a valid token claiming a *different* agent's `instance_uid` gets **403** / 1008,
+  rejected before any state is applied, so the real agent's record is untouched;
+- every rejection is counted in `opamp_agent_auth_failures_total{reason}` —
+  `missing`, `malformed`, `unknown`, `revoked`, `uid_mismatch`,
+  `binding_conflict` — and written through the audit seam (#97 replaces it with
+  the append-only log);
+- a live WebSocket binding may only move to the **same** principal, so a second
+  connection cannot take over an agent (a legitimate reconnect moves cleanly).
+
+Tokens are `opamp_agent_…`, stored as SHA-256 only, and returned exactly once at
+creation. They never appear in `/agents`, logs, audit entries or error bodies.
+`GET /agents` and `GET /agent/{id}` report each agent's credential state as
+`{"enrolled", "active", "last_seen_at", "revoked_at"}` so you can watch a cutover.
+
+### Cutover runbook (`off` → `token`)
+
+```bash
+# 1. While the server is open, let the fleet connect and note each agent id
+opampctl agents list --pretty | jq '.agents[] | {id, name: .description}'
+
+# 2. Mint a token per agent — the response carries a paste-ready snippet
+opampctl --password "$ADMIN_PASSWORD" agents token create <agent-id> --label prod-1
+
+# 3. Put the headers block in that agent's config and reload the collector
+#      extensions.opamp.server.http.headers:
+#        Authorization: "Bearer opamp_agent_..."
+#    (server.ws.headers instead, if that agent speaks WebSocket)
+
+# 4. Confirm each agent authenticates before closing the door
+opampctl agents get <agent-id> | jq .credential     # last_seen_at must move
+
+# 5. Flip the server and restart it
+OPAMP_AGENT_AUTH=token uvicorn server.main:app --port 4320
+
+# 6. Watch for stragglers
+curl -s localhost:4320/metrics | grep opamp_agent_auth_failures_total
+```
+
+Rotation needs no downtime: mint a new token, deploy it, and the old one retires
+on the *first successful use* of the new one (`--retire-previous` cuts over
+immediately instead). Revocation (`opampctl agents token revoke <id>`) blocks
+delivery but **keeps** the agent's record, state and desired config — revocation
+is not a wipe, deliberately: you need that config to restore the agent later.
+
+An agent with a revoked or broken credential retries forever with backoff, because
+opamp-go cannot tell 401 from 403 — watch the failure metric, not the agent log.
+
+Why the token lives in the config file instead of being handed down the wire:
+`extension/opampextension` registers no `OnOpampConnectionSettings` callback, so
+an in-band "here is your token" reply is ignored. The supervisor can consume
+connection settings; the collector extension cannot. Registration-on-first-use
+and CSR/TOFU stay in #83.
+
 ## Before you expose this server
 
 This server ships **read-only by default** and is meant to be reachable by
@@ -124,11 +213,11 @@ published to the world is a fleet takeover, so the defaults are now closed:
 |---|---|---|
 | `ADMIN_PASSWORD` | *none* | Read-only mode: no privileged action is authenticated. Docker generates a random password on first start and stores it in `data/admin_password`; nothing ships a placeholder |
 | Config push | **off** | Push routes return 404 (not 403 — a stranger does not get to learn the surface exists), the server does not advertise `OffersRemoteConfig`, and no `remote_config` field is ever sent |
-| Agent auth | off | Any client can claim any agent identity. This is #94, not yet implemented |
+| Agent auth | off | Any client can claim any agent identity. Set `OPAMP_AGENT_AUTH=token` and give each agent a credential — see [Agent authentication](#agent-authentication-agent--server) |
 | TLS | off | Credentials and configs travel in cleartext |
 | Ports in `docker-compose.yml` | `127.0.0.1` | Reachable from the host only, not from the network |
 
-**To expose it safely**, do all four:
+**To expose it safely**, do all five:
 
 1. **Put TLS in front.** Use `docker/nginx.conf` or `docker/Caddyfile`, then set
    `PUBLIC_URL=https://opamp.example.com` (or `TLS_TERMINATED_UPSTREAM=true`).
@@ -138,8 +227,11 @@ published to the world is a fleet takeover, so the defaults are now closed:
    the server's own check is the only one.
 2. **Set an admin password** (`ADMIN_PASSWORD` or a mounted `ADMIN_PASSWORD_FILE`).
    Don't leave the generated one on a shared volume if several people need access.
-3. **Set `CORS_ORIGINS`** to the origin the UI is served from instead of `*`.
-4. **Keep config push off** until the posture check passes for you. Turning it on
+3. **Authenticate your agents** (`OPAMP_AGENT_AUTH=token`) and mint a credential
+   per agent. The token travels in the agent's config, so TLS is not optional
+   once you turn this on.
+4. **Set `CORS_ORIGINS`** to the origin the UI is served from instead of `*`.
+5. **Keep config push off** until the posture check passes for you. Turning it on
    is refused at startup unless admin auth, agent auth and TLS are all in place:
 
 ```bash
@@ -180,7 +272,7 @@ curl -s -u ":$ADMIN_PASSWORD" localhost:4320/config/posture | jq .requirements
 | `OPAMP_MAX_MESSAGE_BYTES` | `67108864` | Max OpAMP message size (64 MiB), varint header included |
 | `OPAMP_WS_OUTBOUND_QUEUE` | `32` | Per-connection WebSocket send queue depth; oldest is dropped when full |
 | `OPAMP_CONFIG_PUSH_ENABLED` | `false` | Remote config push master switch. Off = push routes 404, no `remote_config` is ever sent. On = the server refuses to start unless the posture below is secure |
-| `OPAMP_AGENT_AUTH` | `off` | Agent authentication mode: `off`, `token`, `mtls`. Required (and enforced) by config push once #94 lands |
+| `OPAMP_AGENT_AUTH` | `off` | Agent authentication on `/v1/opamp`: `off` \| `token` \| `mtls`. `token` requires `Authorization: Bearer <token>` per agent (see [Agent authentication](#agent-authentication-agent--server)); `mtls` is reported but not enforced by this build. `off` logs a startup warning, and config push refuses to start without `token` |
 | `PUBLIC_URL` | *(empty)* | Public URL agents/browsers use. `https://` or `wss://` counts as TLS for the posture check |
 | `TLS_TERMINATED_UPSTREAM` | `false` | Assert that a TLS terminator you control sits in front of the server (see `docker/`). Assertion only — keep the server on loopback |
 | `OPAMP_AUDIT_ENABLED` | `false` | Reports audit-log availability for privileged actions (#97); always `false` today |
@@ -226,6 +318,11 @@ The server is FastAPI-based and self-documenting:
 Auth is controlled by the admin credential (`ADMIN_PASSWORD`, `ADMIN_PASSWORD_FILE`, or
 one generated at startup with `OPAMP_ADMIN_AUTOGENERATE_PASSWORD=true`):
 
+- Agents are authenticated **separately**, on `POST /v1/opamp` only, with
+  `Authorization: Bearer <token>` when `OPAMP_AGENT_AUTH=token` — see
+  [Agent authentication](#agent-authentication-agent--server). Admin endpoints
+  take HTTP Basic, so the two never collide.
+
 - **No credential (read-only mode):** endpoints marked 🔒 behave as they always have —
   open, because there is nothing to authenticate against. Closing that door is #95.
   Docker deployments generate a random credential, so read-only mode is mostly a
@@ -250,12 +347,14 @@ validate credentials with `GET /auth/verify`.
 |--------|----------|:----:|-------------|
 | GET | `/auth/status` | | Auth mode: `password_required`, `auth_mode` (`password`\|`disabled`), `roles`. No secrets |
 | GET | `/auth/verify` | 🔒 | Validate Basic credentials (200 or 401) |
-| POST | `/v1/opamp` | | OpAMP protocol endpoint — agents connect here (protobuf) |
-| WS | `/v1/opamp` | | Same endpoint over WebSocket when `OPAMP_WS_ENABLED=true` |
+| POST | `/v1/opamp` | 🔑 | OpAMP protocol endpoint — agents connect here (protobuf). With `OPAMP_AGENT_AUTH=token` the agent must send `Authorization: Bearer <token>`: 401 without a valid one, 403 when the token is for another `instance_uid` |
+| WS | `/v1/opamp` | 🔑 | Same endpoint over WebSocket when `OPAMP_WS_ENABLED=true`; credential checked before `accept()`, refusals close `1008` |
 | POST | `/v1/metrics` | | OTLP/HTTP metrics ingestion from collectors (JSON or protobuf) |
-| GET | `/agents` | | List agents. Filters: `healthy=true\|false\|unknown`, `status=` (remote config status, or alias `remote_config_status=`), or any description attribute, e.g. `?environment=prod`. Repeated params are OR |
-| GET | `/agent/{id}` | | Agent details incl. latest OTLP metrics |
+| GET | `/agents` | | List agents. Filters: `healthy=true\|false\|unknown`, `status=` (remote config status, or alias `remote_config_status=`), or any description attribute, e.g. `?environment=prod`. Repeated params are OR. Each agent carries a `credential` block |
+| GET | `/agent/{id}` | | Agent details incl. latest OTLP metrics and `credential` state (`enrolled`, `active`, `last_seen_at`, `revoked_at` — never a token) |
 | GET | `/agent/{id}/metrics` | | Latest OTLP metric values for the agent (persisted across restarts) |
+| POST | `/agents/{id}/token` | 🔒 | Mint/rotate an agent credential. Returns the token **once** plus a paste-ready collector snippet. Optional body `{"label", "retire_previous"}`. 422 if `id` is not a hex instance UID |
+| DELETE | `/agents/{id}/token` | 🔒 | Revoke every live credential for the agent (idempotent). Blocks delivery, keeps the agent's state |
 | POST | `/agent/{id}/manifest` | | Generate OCB `manifest.yaml` + build command for a slim collector. Optional body `{"version": "0.123.0"}`. 409 if the agent has no components in use |
 | GET | `/agent/{id}/compliance` | | Evaluate agent against OPA policies (no-op result if OPA disabled) |
 | GET | `/agent/{id}/report` | | Markdown report for one agent (versions, health, components) |
@@ -300,6 +399,12 @@ opampctl agents metrics <agent-id>          # latest OTLP metric values
 opampctl agents manifest <agent-id> --raw   # OCB manifest.yaml for a slim build
 opampctl agents manifest <agent-id> --version 1.2.3
 opampctl agents compliance <agent-id>       # OPA evaluation (no-op if OPA disabled)
+
+# Agent credentials (admin; OPAMP_AGENT_AUTH=token)
+opampctl agents token create <agent-id> --label prod-1   # token (once) + collector snippet
+opampctl agents token create <agent-id> --raw            # just the token, for $(...)
+opampctl agents token create <agent-id> --retire-previous  # rotate with an immediate cutover
+opampctl agents token revoke <agent-id>                  # blocks delivery, keeps agent state
 
 # Reports
 opampctl reports fleet --raw
@@ -360,9 +465,16 @@ exposes 20 typed tools mirroring the API: `list_agents`, `get_agent`,
 `get_alerts`, `update_alerts`, `test_alerts`, `agent_report`, `health`, `auth_status`,
 `config_posture`.
 
+**Write tools are absent, not failing.** `create_agent_token` and
+`revoke_agent_token` only exist when the MCP process is started with
+`OPAMP_MCP_ALLOW_WRITES=true` (#94 introduced this gate for credential minting;
+#106 applies it to every write tool). An agent that cannot see a tool will not
+try to use it.
+
 Transport is **stdio** by default (works with every local MCP client); use
 `--transport sse --port 8765` for remote agents. Configure with the same env vars
-as the CLI (`OPAMP_SERVER_URL`, `ADMIN_PASSWORD`).
+as the CLI (`OPAMP_SERVER_URL`, `ADMIN_PASSWORD`), plus
+`OPAMP_MCP_ALLOW_WRITES` if you really want credential minting exposed to an AI client.
 
 ### Claude Desktop / generic MCP client config
 
@@ -407,6 +519,11 @@ oc = OpampClient(base_url="http://localhost:4320", password="changeme")
 agents = oc.list_agents(healthy="true", environment="prod")   # metadata filters
 result = oc.generate_manifest(agents["agents"][0]["id"])
 print(result["manifest_yaml"])
+
+# Agent credentials (admin) — the token is returned once
+token = oc.create_agent_token("4f3c2b1a...", label="prod-1")["token"]
+print(oc.get_agent("4f3c2b1a...")["credential"])
+print(oc.revoke_agent_token("4f3c2b1a..."))   # {"revoked": 1}
 
 try:
     oc.get_agent("nope")

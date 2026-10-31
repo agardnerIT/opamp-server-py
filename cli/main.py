@@ -43,6 +43,9 @@ app = typer.Typer(
 )
 
 agents_app = typer.Typer(help="Agent inspection commands", no_args_is_help=True)
+token_app = typer.Typer(
+    help="Agent credentials for OPAMP_AGENT_AUTH=token (#94)", no_args_is_help=True
+)
 reports_app = typer.Typer(help="Markdown fleet reports", no_args_is_help=True)
 compliance_app = typer.Typer(help="OPA policy compliance", no_args_is_help=True)
 alerts_app = typer.Typer(help="Alert configuration (admin)", no_args_is_help=True)
@@ -53,6 +56,7 @@ config_app = typer.Typer(
 )
 
 app.add_typer(agents_app, name="agents", help="Agent inspection commands")
+agents_app.add_typer(token_app, name="token", help="Agent credentials (admin)")
 app.add_typer(reports_app, name="reports", help="Markdown fleet reports")
 app.add_typer(compliance_app, name="compliance", help="OPA policy compliance")
 app.add_typer(alerts_app, name="alerts", help="Alert configuration (admin)")
@@ -232,17 +236,25 @@ def agents_list(
 ) -> None:
     """List agents with optional health/status/metadata filters."""
     if _settings.offline:
-        from server.state import AgentState
+        from server.agent_auth import credential_summaries
+        from server.state import SQLiteCredentialStore
 
         attr_filters: Dict[str, list] = {}
         for item in attr:
             key, _, value = item.partition("=")
             attr_filters.setdefault(key, []).append(value)
-        dicts = [
-            s.to_dict() for s in _offline_states()
-            if s.matches_filters(healthy=healthy, remote_config_status=status,
-                                 attributes=attr_filters)
-        ]
+        states = _offline_states()
+        credentials = credential_summaries(
+            [state.agent_id for state in states], store=SQLiteCredentialStore(_settings.db)
+        )
+        dicts = []
+        for state in states:
+            if not state.matches_filters(healthy=healthy, remote_config_status=status,
+                                        attributes=attr_filters):
+                continue
+            entry = state.to_dict()
+            entry["credential"] = credentials.get(state.agent_id)
+            dicts.append(entry)
         _emit({"agents": dicts, "count": len(dicts),
                "filters": {"offline_db": str(_settings.db)}})
         return
@@ -257,9 +269,15 @@ def agents_list(
 def agents_get(agent_id: str = typer.Argument(..., help="Agent instance UID (hex)")) -> None:
     """Full details for one agent, including latest metrics."""
     if _settings.offline:
+        from server.agent_auth import credential_summary
+        from server.state import SQLiteCredentialStore
+
         state = _offline_get_state(agent_id)
         data = state.to_dict()
         data["metrics"] = _offline_metrics(agent_id)
+        data["credential"] = credential_summary(
+            agent_id, store=SQLiteCredentialStore(_settings.db)
+        )
         _emit(data)
         return
     _run(lambda oc: oc.get_agent(agent_id))
@@ -306,6 +324,43 @@ def agents_manifest(
 def agents_compliance(agent_id: str = typer.Argument(..., help="Agent instance UID (hex)")) -> None:
     """Evaluate one agent against OPA policies (live server only)."""
     _run(lambda oc: oc.get_compliance(agent_id))
+
+
+# ------------------------------------------------------------------- tokens
+
+@token_app.command("create")
+def agents_token_create(
+    agent_id: str = typer.Argument(..., help="Agent instance UID (hex) the token is bound to"),
+    label: str = typer.Option("", "--label", "-l", help="Free-form label, e.g. the hostname"),
+    retire_previous: bool = typer.Option(
+        False, "--retire-previous",
+        help="Revoke the agent's older credentials now instead of on first use of the new one",
+    ),
+    raw: bool = typer.Option(False, "--raw", help="Print just the token (for $(...) use)"),
+) -> None:
+    """Mint (or rotate) a per-agent credential — admin, live server only.
+
+    The token is shown once and only its hash is stored. The JSON response carries
+    a `collector_snippet`: paste it into the agent's `extensions.opamp` block.
+    """
+    _run(
+        lambda oc: oc.create_agent_token(
+            agent_id, label=label, retire_previous=retire_previous
+        ),
+        raw_field="token" if raw else None,
+    )
+
+
+@token_app.command("revoke")
+def agents_token_revoke(
+    agent_id: str = typer.Argument(..., help="Agent instance UID (hex)"),
+) -> None:
+    """Revoke every live credential for an agent — admin, live server only.
+
+    Blocks OpAMP delivery but keeps the agent's record and state (revocation is
+    not a wipe). Idempotent: `revoked: 0` means there was nothing live.
+    """
+    _run(lambda oc: oc.revoke_agent_token(agent_id))
 
 
 @agents_app.command("report")

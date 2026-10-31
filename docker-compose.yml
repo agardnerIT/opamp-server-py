@@ -32,6 +32,10 @@ services:
       # Config push (#96): off unless the whole posture is secure.
       - OPAMP_CONFIG_PUSH_ENABLED=${OPAMP_CONFIG_PUSH_ENABLED:-false}
       - OPAMP_ALLOW_INSECURE_CONFIG_PUSH=${OPAMP_ALLOW_INSECURE_CONFIG_PUSH:-false}
+      # Agent auth (#94): off by default. Set to token and mint a credential per
+      # agent (`opampctl agents token create <agent-id>`, then paste the returned
+      # headers block into the collector config). Config push refuses to start
+      # while this is off.
       - OPAMP_AGENT_AUTH=${OPAMP_AGENT_AUTH:-off}
       - PUBLIC_URL=${PUBLIC_URL:-}
       - TLS_TERMINATED_UPSTREAM=${TLS_TERMINATED_UPSTREAM:-false}

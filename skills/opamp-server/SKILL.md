@@ -91,7 +91,39 @@ opampctl agents compliance <agent-id>
 | Test alert (admin) | `alerts test` | `test_alerts` | `POST /alerts/test` |
 | Health + posture | `health` | `health` | `GET /health` |
 | Config push posture | `config posture` | `config_posture` | `GET /config/posture` |
+| Mint agent credential (admin) | `agents token create <id> [--raw]` | `create_agent_token` (write-gated) | `POST /agents/{id}/token` |
+| Revoke agent credentials (admin) | `agents token revoke <id>` | `revoke_agent_token` (write-gated) | `DELETE /agents/{id}/token` |
 | Offline (no server) | `--db data/opamp.db …` | — | — |
+
+## Agent credentials (`OPAMP_AGENT_AUTH=token`)
+
+When the server authenticates agents, each one sends `Authorization: Bearer <token>`
+in its collector config (`extensions.opamp.server.http.headers`, or `server.ws.headers`).
+The token **is** the agent's identity: `instance_uid` must match it, and a token for
+one agent claiming another's uid is refused (403 / WS 1008).
+
+```bash
+opampctl agents list                                   # note the id
+opampctl --password "$ADMIN_PASSWORD" agents token create <id> --label prod-1
+#   -> {"token": "opamp_agent_...", "collector_snippet": "extensions:\n  opamp: ..."}
+opampctl agents get <id> | jq .credential              # enrolled/active/last_seen_at
+opampctl --password "$ADMIN_PASSWORD" agents token revoke <id>   # blocks delivery, keeps state
+```
+
+Rules that matter when acting on this:
+
+- The token is returned **once**; only its SHA-256 is stored. If you lose it, mint a
+  new one (rotation is zero-downtime: the old token retires on the first successful
+  use of the new one; `--retire-previous` cuts over immediately).
+- Never print a token into a report, issue, commit or chat transcript. `--raw` exists
+  for `TOKEN=$(opampctl ... --raw)` pipelines, not for display.
+- `401` on `/v1/opamp` = no/bad/revoked credential. `403` = valid credential, wrong
+  agent. Both are counted in `opamp_agent_auth_failures_total{reason}`.
+- Revocation is not a wipe: the agent's record, state and (later) desired config stay.
+  Don't "clean up" by deleting agents you revoked.
+- Minting needs the admin password, and the MCP tools for it are **absent** unless
+  the MCP process runs with `OPAMP_MCP_ALLOW_WRITES=true`. That is intentional.
+
 
 ## Gotchas
 

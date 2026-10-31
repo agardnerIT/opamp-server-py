@@ -4,6 +4,14 @@ extensions:
       http:
         endpoint: http://127.0.0.1:4320/v1/opamp
         polling_interval: 5s
+        # Agent authentication (#94). Required when the server runs with
+        # OPAMP_AGENT_AUTH=token. Mint one with
+        #   opampctl agents token create <agent-id>
+        # and paste the snippet it returns. Keep the token out of git: read it
+        # from the environment, which configopaque keeps out of the agent's own
+        # effective-config report.
+        # headers:
+        #   Authorization: "Bearer ${env:OPAMP_AGENT_TOKEN}"
     agent_description:
       non_identifying_attributes:
         "agent.name": "collector1"

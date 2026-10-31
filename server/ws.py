@@ -28,6 +28,7 @@ from server.framing import (
     encode_message,
     message_limit,
 )
+from server import agent_auth
 
 CLOSE_PROTOCOL_ERROR = 1002
 CLOSE_POLICY_VIOLATION = 1008
@@ -102,39 +103,55 @@ def ws_enabled() -> bool:
 
 
 class ConnectionRegistry:
-    """Tracks which `instance_uid`s are bound to which live socket."""
+    """Tracks which `instance_uid`s are bound to which live socket, and by whom.
+
+    The principal is the authenticated agent id from the credential (#94) — `None`
+    in `off` mode, where identity is whatever the message claims. Binding is
+    per-uid because one socket may carry several agents; the principal lets the
+    message handler refuse a takeover instead of silently moving the binding.
+    """
 
     def __init__(self) -> None:
         self._ids = itertools.count(1)
         self._by_uid: Dict[bytes, int] = {}
+        self._principal_by_uid: Dict[bytes, str | None] = {}
         self._by_conn: Dict[int, Set[bytes]] = {}
 
     def new_id(self) -> int:
         return next(self._ids)
 
-    def bind(self, conn_id: int, instance_uid: bytes) -> None:
+    def bind(self, conn_id: int, instance_uid: bytes, principal: str | None = None) -> None:
         previous = self._by_uid.get(instance_uid)
         if previous is not None and previous != conn_id:
-            # Spec §Duplicate WebSocket Connections: MAY disconnect. We keep the
-            # newest binding and log; replacement semantics belong to #75.
+            # Spec §Duplicate WebSocket Connections: MAY disconnect. Duplicate-uid
+            # semantics for *legitimate* agents belong to #75; a binding may only
+            # move here when the principal allows it, which the message handler
+            # has already checked (#94).
             logger.warning(
                 f"instance_uid {instance_uid.hex()} moved from connection "
                 f"{previous} to {conn_id}"
             )
             self._by_conn.get(previous, set()).discard(instance_uid)
         self._by_uid[instance_uid] = conn_id
+        self._principal_by_uid[instance_uid] = principal
         self._by_conn.setdefault(conn_id, set()).add(instance_uid)
+
+    def principal_for(self, instance_uid: bytes) -> str | None:
+        """Who holds the current binding (`None` = unauthenticated binding)."""
+        return self._principal_by_uid.get(instance_uid)
 
     def unbind(self, conn_id: int, instance_uid: bytes) -> None:
         self._by_conn.get(conn_id, set()).discard(instance_uid)
         if self._by_uid.get(instance_uid) == conn_id:
             del self._by_uid[instance_uid]
+            self._principal_by_uid.pop(instance_uid, None)
 
     def unbind_connection(self, conn_id: int) -> FrozenSet[bytes]:
         uids = frozenset(self._by_conn.pop(conn_id, set()))
         for uid in uids:
             if self._by_uid.get(uid) == conn_id:
                 del self._by_uid[uid]
+                self._principal_by_uid.pop(uid, None)
         return uids
 
     def connection_for(self, instance_uid: bytes) -> int | None:
@@ -145,6 +162,7 @@ class ConnectionRegistry:
 
     def reset(self) -> None:
         self._by_uid.clear()
+        self._principal_by_uid.clear()
         self._by_conn.clear()
 
 
@@ -196,15 +214,19 @@ async def _writer(websocket: WebSocket, queue: asyncio.Queue) -> None:
 
 async def serve(
     websocket: WebSocket,
-    process: Callable[[bytes], ProcessedMessage],
+    process: Callable[..., ProcessedMessage],
     registry: ConnectionRegistry | None = None,
+    principal: object | None = None,
 ) -> None:
     """Serve one accepted WebSocket connection until it closes.
 
-    `process` is the shared AgentToServer handler. Importing the FastAPI app here
-    would create a cycle, so it is injected.
+    `process` is the shared AgentToServer handler, called as
+    `process(payload, principal)`. Importing the FastAPI app here would create a
+    cycle, so it is injected. `principal` is the authenticated identity from the
+    handshake (#94); it is `None` in `off` mode, where behaviour is unchanged.
     """
     registry = REGISTRY if registry is None else registry
+    principal_id = getattr(principal, "agent_id", None)
     conn_id = registry.new_id()
     queue: asyncio.Queue = asyncio.Queue(maxsize=outbound_queue_depth())
     writer = asyncio.create_task(_writer(websocket, queue))
@@ -243,13 +265,30 @@ async def serve(
                 break
 
             OPAMP_WS_MESSAGES.labels(direction="received", outcome="ok").inc()
-            result = process(payload)
+            try:
+                result = process(payload, principal)
+            except agent_auth.AgentAuthError as exc:
+                # #94: identity, not the message body, decides who may speak. The
+                # handler refused before applying anything, so state is untouched.
+                logger.warning(
+                    f"Connection {conn_id}: refused message ({exc.reason}): {exc.detail}"
+                )
+                OPAMP_WS_MESSAGES.labels(direction="received", outcome="unauthorized").inc()
+                agent_auth.record_failure(
+                    exc.reason,
+                    principal=exc.principal,
+                    claimed=exc.claimed,
+                    transport="ws",
+                    client=websocket.client.host if websocket.client else "",
+                )
+                await _close(websocket, CLOSE_POLICY_VIOLATION)
+                break
 
             if result.instance_uid:
                 if result.disconnected:
                     registry.unbind(conn_id, result.instance_uid)
                 else:
-                    registry.bind(conn_id, result.instance_uid)
+                    registry.bind(conn_id, result.instance_uid, principal_id)
 
             try:
                 frame_out = encode_message(result.response, max_bytes=message_limit())

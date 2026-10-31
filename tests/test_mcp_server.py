@@ -245,3 +245,54 @@ class TestConnectionError:
         data = call(mcp_srv.health)
         assert data["error"] is True
         assert "connection" in data
+
+
+# ------------------------------------------------ credential tools (#94, #106)
+
+class TestCredentialTools:
+    """Write tools are absent unless OPAMP_MCP_ALLOW_WRITES=true."""
+
+    @pytest.fixture(autouse=True)
+    def _credentials(self, monkeypatch, tmp_path):
+        from server import admin_auth, agent_auth
+        from server.state import SQLiteCredentialStore
+
+        monkeypatch.setattr(admin_auth, "ADMIN_PASSWORD", "mcp-pw-123456")
+        monkeypatch.setattr(admin_auth, "PASSWORD_SOURCE", "env")
+        monkeypatch.setattr(agent_auth, "CREDENTIALS", SQLiteCredentialStore(tmp_path / "creds.db"))
+
+    def _wire(self, monkeypatch):
+        from client.opamp_client import OpampClient
+
+        transport = InProcessASGITransport(server_app)
+        monkeypatch.setattr(
+            mcp_srv, "_client",
+            lambda: OpampClient(base_url="http://testserver", transport=transport,
+                                password="mcp-pw-123456"),
+        )
+
+    def test_absent_by_default(self):
+        tools = {t.name for t in mcp._tool_manager.list_tools()}
+        assert "create_agent_token" not in tools
+        assert "revoke_agent_token" not in tools
+
+    def test_register_when_writes_allowed(self, monkeypatch):
+        monkeypatch.setenv("OPAMP_MCP_ALLOW_WRITES", "true")
+        mcp_srv._register_write_tools()
+        try:
+            tools = {t.name for t in mcp._tool_manager.list_tools()}
+            assert {"create_agent_token", "revoke_agent_token"} <= tools
+
+            self._wire(monkeypatch)
+            created = call(mcp_srv.create_agent_token, "abcd" * 8, label="mcp")
+            assert created["token"].startswith("opamp_agent_")
+            assert call(mcp_srv.revoke_agent_token, "abcd" * 8)["revoked"] == 1
+        finally:
+            mcp._tool_manager.remove_tool("create_agent_token")
+            mcp._tool_manager.remove_tool("revoke_agent_token")
+
+    def test_disabled_flag_keeps_tools_absent(self, monkeypatch):
+        monkeypatch.setenv("OPAMP_MCP_ALLOW_WRITES", "false")
+        mcp_srv._register_write_tools()
+        tools = {t.name for t in mcp._tool_manager.list_tools()}
+        assert "create_agent_token" not in tools

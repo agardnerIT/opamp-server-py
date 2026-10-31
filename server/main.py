@@ -35,11 +35,12 @@ from server.reports import (
     _is_heavy,
 )
 from server.alerts import get_alert_config, update_alert_config, send_test_alert, send_alert, ALERT_TYPES, ALERT_CONFIG, ALERT_EVENTS, send_new_agent_alert, send_stale_agent_alert, send_compliance_alert
-from server import admin_auth, posture
+from server import admin_auth, agent_auth, posture
 from server.admin_auth import require_admin  # noqa: F401  (privileged routes below)
 from server.framing import message_limit
 from server.ws import (
     CLOSE_POLICY_VIOLATION,
+    REGISTRY as WS_REGISTRY,
     ProcessedMessage,
     origin_allowed,
     serve as serve_websocket,
@@ -61,6 +62,9 @@ async def lifespan(app: FastAPI):
     global _cleanup_task
     # Credential first: the posture check needs to know whether admin auth exists.
     admin_auth.ensure()
+    # Agents are unauthenticated by default (#94) — say so once, loudly, rather
+    # than letting an operator discover it from an incident.
+    agent_auth.warn_if_unenforced()
     # Refuses to start (non-zero exit) when config push is enabled on an insecure
     # posture (#96). Read-only deployments are unaffected.
     posture.assert_startup_posture()
@@ -117,6 +121,10 @@ app = FastAPI(
         "password (`Authorization: Basic base64(':ADMIN_PASSWORD')`). With no admin "
         "credential configured the server runs in read-only mode — check "
         "`GET /auth/status`.\n\n"
+        "**Agent auth:** off by default. With `OPAMP_AGENT_AUTH=token` every agent "
+        "message must carry `Authorization: Bearer <token>`; mint one with "
+        "`POST /agents/{id}/token` (or `opampctl agents token create`). "
+        "`GET /agents` reports each agent's credential state.\n\n"
         "**Config push:** off by default (`OPAMP_CONFIG_PUSH_ENABLED=false`); its "
         "routes 404 and no `remote_config` is ever sent until the posture is secure. "
         "Check `GET /health` → `config_push`."
@@ -367,12 +375,20 @@ def _apply_status_report(agent_id: str, agent_dict: Dict[str, Any]) -> None:
     PROM_MESSAGES_RECEIVED.labels(message_type="heartbeat").inc()
 
 
-def _handle_agent_message(data: bytes) -> ProcessedMessage:
+def _handle_agent_message(
+    data: bytes,
+    principal: "agent_auth.Principal | None" = None,
+) -> ProcessedMessage:
     """Apply one `AgentToServer` message and build the `ServerToAgent` reply.
 
     Shared by the HTTP and WebSocket transports so the two cannot drift; the
     transport only differs in framing and connection lifecycle. Returns the
     serialized reply plus the fields the socket layer needs for its registry.
+
+    `principal` is who presented the credential (#94); `None` in `off` mode. A
+    credential that does not match the claimed `instance_uid`, or a uid already
+    bound to a different principal, raises `AgentAuthError` — before any state is
+    read or written, so a refusal can never leave a half-applied report behind.
     """
     response = ServerToAgent()
     response.capabilities = 0
@@ -391,6 +407,19 @@ def _handle_agent_message(data: bytes) -> ProcessedMessage:
     
     agent_id = binascii.hexlify(agent_msg.instance_uid).decode('utf-8')
     agent_dict = MessageToDict(agent_msg)
+
+    if principal is not None:
+        # Identity comes from the credential, never from the body (D1). Reject
+        # before `_apply_status_report`, so an impostor cannot mutate even briefly.
+        agent_auth.authorize_uid(principal, agent_id)
+        bound = WS_REGISTRY.principal_for(agent_msg.instance_uid)
+        if bound is not None and bound != principal.agent_id:
+            raise agent_auth.AgentAuthError(
+                agent_auth.REASON_BINDING_CONFLICT,
+                "instance_uid is bound to a different principal",
+                principal=principal.agent_id,
+                claimed=agent_id,
+            )
     
     response.instance_uid = agent_msg.instance_uid
     
@@ -455,11 +484,41 @@ async def opamp_endpoint(request: Request) -> Response:
     `ServerToAgent` (`application/x-protobuf`). Registers new agents, updates
     heartbeats, health, description, effective config, package status, and remote
     config status. Not for human/agent tooling use — pointed at by the collector's
-    `opamp` extension (`endpoint: http://host:4320/v1/opamp`). Unauthenticated.
+    `opamp` extension (`endpoint: http://host:4320/v1/opamp`).
+
+    **Authentication** depends on `OPAMP_AGENT_AUTH`. With `token` the agent must
+    send `Authorization: Bearer <token>` (minted by `POST /agents/{id}/token`):
+    a missing, unknown or revoked token is **401 with no `ServerToAgent` body**, so
+    an unauthenticated client never learns the server's capabilities; a valid
+    token claiming another agent's `instance_uid` is **403** and the real agent's
+    state is untouched. Every rejection is audited and counted in
+    `opamp_agent_auth_failures_total{reason}`. The default (`off`) is
+    unauthenticated, exactly as before.
 
     The same path also accepts a WebSocket upgrade when `OPAMP_WS_ENABLED=true`.
     """
-    result = _handle_agent_message(await request.body())
+    client = request.client.host if request.client else ""
+    principal, reason = agent_auth.authenticate(request.headers)
+    if reason is not None:
+        agent_auth.record_failure(reason, transport="http", client=client)
+        raise HTTPException(
+            status_code=401,
+            detail="invalid agent credential",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    try:
+        result = _handle_agent_message(await request.body(), principal)
+    except agent_auth.AgentAuthError as exc:
+        agent_auth.record_failure(
+            exc.reason,
+            principal=exc.principal,
+            claimed=exc.claimed,
+            transport="http",
+            client=client,
+        )
+        raise HTTPException(status_code=403, detail=exc.detail)
+
     return Response(
         content=result.response,
         media_type="application/x-protobuf",
@@ -475,8 +534,13 @@ async def opamp_ws_endpoint(websocket: WebSocket) -> None:
     refused with close code 1008 and the server behaves exactly as an HTTP-only
     server. When enabled, each binary frame is a varint header (must be 0)
     followed by an `AgentToServer` protobuf, per spec §WebSocket Transport.
-    Unauthenticated, but a browser `Origin` must satisfy `CORS_ORIGINS` because
-    WebSocket upgrades are not covered by `CORSMiddleware`.
+
+    Authentication runs **before** `accept()` (#94): with `OPAMP_AGENT_AUTH=token`
+    a missing/unknown/revoked token fails the handshake (close 1008, which a
+    client sees as a rejected upgrade), and a message claiming a uid that belongs
+    to a different credential closes the socket with 1008 mid-stream. A browser
+    `Origin` must also satisfy `CORS_ORIGINS`, because WebSocket upgrades are not
+    covered by `CORSMiddleware`.
     """
     if not ws_enabled():
         await websocket.close(code=CLOSE_POLICY_VIOLATION)
@@ -488,8 +552,19 @@ async def opamp_ws_endpoint(websocket: WebSocket) -> None:
         await websocket.close(code=CLOSE_POLICY_VIOLATION)
         return
 
+    principal, reason = agent_auth.authenticate(websocket.headers)
+    if reason is not None:
+        agent_auth.record_failure(
+            reason,
+            transport="ws",
+            client=websocket.client.host if websocket.client else "",
+        )
+        logger.warning(f"Refusing OpAMP WebSocket upgrade: {reason}")
+        await websocket.close(code=CLOSE_POLICY_VIOLATION)
+        return
+
     await websocket.accept()
-    await serve_websocket(websocket, _handle_agent_message)
+    await serve_websocket(websocket, _handle_agent_message, principal=principal)
 
 
 @app.get("/agents")
@@ -526,6 +601,9 @@ def list_agents(
     Agents missing an attribute are excluded.
 
     Unauthenticated. Returns `{"agents": [...], "count": n, "filters": {...}}`.
+    Each entry carries a `credential` block (#94) — `enrolled`, `active`,
+    `last_seen_at`, `revoked_at` — so an operator can watch a fleet finish the
+    token cutover. It never contains a token or a token hash.
     """
     remote_config_status = remote_config_status if remote_config_status is not None else status
     reserved = {"healthy", "status", "remote_config_status"}
@@ -534,8 +612,8 @@ def list_agents(
         if key not in reserved:
             attr_filters.setdefault(key, []).append(value)
 
-    agents = [
-        agent.to_dict()
+    selected = [
+        agent
         for agent in AGENT_REGISTRY.list_all()
         if agent.matches_filters(
             healthy=healthy,
@@ -543,6 +621,12 @@ def list_agents(
             attributes=attr_filters,
         )
     ]
+    credentials = agent_auth.credential_summaries([agent.agent_id for agent in selected])
+    agents = []
+    for agent in selected:
+        entry = agent.to_dict()
+        entry["credential"] = credentials.get(agent.agent_id)
+        agents.append(entry)
 
     filters = {}
     if healthy is not None:
@@ -561,7 +645,8 @@ def get_agent(agent_id: str):
 
     Unauthenticated. `agent_id` is the hex instance UID (as returned by `GET /agents`).
     Responds 404 if the agent is not connected. The `metrics` key holds the last
-    OTLP snapshot (empty dict if none received).
+    OTLP snapshot (empty dict if none received); `credential` reports the agent's
+    auth state (`enrolled`, `active`, `last_seen_at`, `revoked_at` — never a token).
     """
     agent = AGENT_REGISTRY.get(agent_id)
     if not agent:
@@ -569,8 +654,92 @@ def get_agent(agent_id: str):
     
     agent_dict = agent.to_dict()
     agent_dict["metrics"] = _get_agent_metrics_entry(agent_id)
+    agent_dict["credential"] = agent_auth.credential_summary(agent_id)
     
     return agent_dict
+
+
+class AgentTokenRequest(BaseModel):
+    """Optional body for credential issuance."""
+
+    label: str = ""
+    retire_previous: bool = False
+
+
+@app.post(
+    "/agents/{agent_id}/token",
+    tags=["agents"],
+    summary="Issue (or rotate) an agent credential (admin)",
+    status_code=201,
+)
+def create_agent_token(
+    agent_id: str,
+    request: Request,
+    response: Response,
+    body: AgentTokenRequest | None = None,
+):
+    """Mint a per-agent token for `OPAMP_AGENT_AUTH=token`. Requires admin auth.
+
+    `agent_id` is the hex `instance_uid` the token is bound to — the credential
+    *is* the identity, so a token may only ever speak for that one agent. The
+    plaintext token is returned **once**, is stored only as a SHA-256 hash, and
+    never appears in logs, listings or audit entries.
+
+    Body (optional): `{"label": "prod-1", "retire_previous": false}`.
+    `retire_previous` revokes the agent's existing credentials immediately;
+    the default retires them on the first successful use of the new token, so a
+    rotation needs no downtime. `collector_snippet` is a paste-ready headers block
+    for the collector config (the out-of-band bootstrap — `extension/opampextension`
+    cannot accept a credential in-band).
+
+    Responds 422 if `agent_id` is not a 16-byte hex instance UID, 401 without
+    valid admin credentials, and with `Cache-Control: no-store`.
+    """
+    if not require_admin(request):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    body = body or AgentTokenRequest()
+    try:
+        token, record = agent_auth.issue_token(
+            agent_id, label=body.label, retire_previous=body.retire_previous
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    response.headers["Cache-Control"] = "no-store"
+    return {
+        "agent_id": record.get("agent_id", agent_id),
+        "token": token,
+        "label": record.get("label", ""),
+        "created_at": record.get("created_at"),
+        "collector_snippet": agent_auth.collector_snippet(token),
+        "note": (
+            "Shown once and not recoverable: put it in the agent's config now. "
+            "The token's hash is all this server keeps."
+        ),
+    }
+
+
+@app.delete("/agents/{agent_id}/token", tags=["agents"], summary="Revoke an agent's credentials (admin)")
+def revoke_agent_token(agent_id: str, request: Request):
+    """Revoke every live credential for one agent. Requires admin auth.
+
+    Idempotent: returns `{"agent_id", "revoked": n}` where `revoked` is the number
+    of live credentials that were just revoked (0 if the agent had none).
+
+    Revocation **blocks delivery, it does not wipe state**: the agent's record,
+    its inventory and (once #99 lands) its desired config are retained — the pit
+    this avoids is an operator revoking a compromised agent and accidentally
+    deleting the config they need to restore it. Responds 422 if `agent_id` is not
+    a 16-byte hex instance UID.
+    """
+    if not require_admin(request):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    try:
+        agent_id = agent_auth.normalize_agent_id(agent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return {"agent_id": agent_id, "revoked": agent_auth.revoke_tokens(agent_id)}
 
 
 class ManifestRequest(BaseModel):
@@ -981,6 +1150,7 @@ if __name__ == "__main__":
     import uvicorn
 
     admin_auth.ensure()
+    agent_auth.warn_if_unenforced()
     try:
         # Fail here with a readable message and a non-zero exit; the lifespan hook
         # repeats the check for uvicorn/gunicorn startup.

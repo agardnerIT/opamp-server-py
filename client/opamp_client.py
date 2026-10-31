@@ -225,6 +225,38 @@ class OpampClient:
         """``GET /agent/{id}/metrics`` — latest ingested OTLP metric values."""
         return self._get(f"/agent/{agent_id}/metrics")
 
+    # ------------------------------------------------------------- credentials
+
+    def create_agent_token(
+        self,
+        agent_id: str,
+        label: str = "",
+        retire_previous: bool = False,
+    ) -> Dict[str, Any]:
+        """``POST /agents/{id}/token`` — mint a per-agent credential (admin).
+
+        For ``OPAMP_AGENT_AUTH=token``. ``agent_id`` is the hex ``instance_uid`` the
+        credential is bound to, so the credential may only ever speak for that one
+        agent. Returns ``{"agent_id", "token", "label", "created_at",
+        "collector_snippet", "note"}`` — the token is shown **once** and only its
+        SHA-256 is stored, so keep it. ``collector_snippet`` is a paste-ready
+        ``extensions.opamp.server.<http|ws>.headers`` block.
+
+        ``retire_previous=True`` revokes the agent's older credentials immediately;
+        the default retires them on the first successful use of the new token, which
+        is what makes rotation zero-downtime.
+        """
+        body = {"label": label, "retire_previous": retire_previous}
+        return self._post(f"/agents/{agent_id}/token", json=body)
+
+    def revoke_agent_token(self, agent_id: str) -> Dict[str, Any]:
+        """``DELETE /agents/{id}/token`` — revoke every live credential (admin).
+
+        Returns ``{"agent_id", "revoked": n}``; idempotent (0 when none were live).
+        Revocation blocks delivery and keeps the agent's state and desired config.
+        """
+        return self._request("DELETE", f"/agents/{agent_id}/token")
+
     # ------------------------------------------------------------------ manifests
 
     def generate_manifest(self, agent_id: str, version: Optional[str] = None) -> Dict[str, Any]:

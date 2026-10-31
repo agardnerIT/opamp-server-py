@@ -7,8 +7,11 @@ method (single implementation of HTTP logic). Runs over **stdio** by default:
     python -m mcp_server --transport sse --port 8765   # SSE for remote agents
 
 Configuration (env or flags):
-    OPAMP_SERVER_URL   server base URL (default http://localhost:4320)
-    ADMIN_PASSWORD     admin password for admin tools (alerts, compliance check/reload)
+    OPAMP_SERVER_URL       server base URL (default http://localhost:4320)
+    ADMIN_PASSWORD         admin password for admin tools (alerts, compliance check/reload)
+    OPAMP_MCP_ALLOW_WRITES "true" exposes privileged write tools (credential minting,
+                           #94). Absent by default — #106 extends this gate to every
+                           write tool.
 
 MCP client config (Claude Desktop / Claude Code / etc.)::
 
@@ -27,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from typing import Any, Dict, List, Optional
 
 from mcp.server.fastmcp import FastMCP
@@ -91,6 +95,25 @@ def config_posture() -> str:
     return _tool(lambda oc: oc.config_posture())
 
 
+# ------------------------------------------------------------------ write gate
+
+
+def writes_enabled() -> bool:
+    """`OPAMP_MCP_ALLOW_WRITES` — privileged write tools exist only when true.
+
+    Absent, not failing: an agent that cannot see a tool will not try to use it.
+    #106 applies this gate to every write tool; #94 introduces it for credential
+    minting, which is the most dangerous write in the system — it hands out a
+    fleet identity.
+    """
+    return (os.environ.get("OPAMP_MCP_ALLOW_WRITES") or "").strip().lower() in (
+        "true",
+        "1",
+        "yes",
+        "on",
+    )
+
+
 # --------------------------------------------------------------------- agents
 
 @mcp.tool()
@@ -126,6 +149,39 @@ def get_agent(agent_id: str) -> str:
 def get_agent_metrics(agent_id: str) -> str:
     """Latest ingested OTLP metric values for one agent (survives restarts)."""
     return _tool(lambda oc: oc.get_agent_metrics(agent_id))
+
+
+# ---------------------------------------------------------------- credentials
+
+
+def create_agent_token(agent_id: str, label: str = "", retire_previous: bool = False) -> str:
+    """Mint a per-agent OpAMP credential (admin; write-gated, requires ADMIN_PASSWORD).
+
+    The token is returned once — only its hash is stored. The response includes a
+    paste-ready `collector_snippet` for the agent's config. `retire_previous`
+    revokes older credentials immediately instead of on first use of the new one.
+    """
+    return _tool(
+        lambda oc: oc.create_agent_token(
+            agent_id, label=label, retire_previous=retire_previous
+        )
+    )
+
+
+def revoke_agent_token(agent_id: str) -> str:
+    """Revoke every live credential for one agent (admin; write-gated).
+
+    Blocks OpAMP delivery but keeps the agent's state — revocation is not a wipe.
+    """
+    return _tool(lambda oc: oc.revoke_agent_token(agent_id))
+
+
+def _register_write_tools() -> None:
+    """Expose the write tools only with OPAMP_MCP_ALLOW_WRITES=true (#94, #106)."""
+    if not writes_enabled():
+        return
+    mcp.tool()(create_agent_token)
+    mcp.tool()(revoke_agent_token)
 
 
 # ------------------------------------------------------------------ manifests
@@ -222,6 +278,9 @@ def update_alerts(config: Dict[str, Any]) -> str:
 def test_alerts(event_type: str = "new_agent", event_config: Optional[Dict[str, Any]] = None) -> str:
     """Send a test alert through the dispatcher (admin). event_config is used once, not saved."""
     return _tool(lambda oc: oc.test_alerts(event_type=event_type, event_config=event_config))
+
+
+_register_write_tools()
 
 
 def main() -> None:

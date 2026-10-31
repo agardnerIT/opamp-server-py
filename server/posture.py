@@ -14,8 +14,11 @@ Requirements when `OPAMP_CONFIG_PUSH_ENABLED=true`:
 ===========================  ===================================================
 Admin auth is configured     `ADMIN_PASSWORD`, `ADMIN_PASSWORD_FILE`, a stored
                              generated password, or an `admin_principals` row (#95)
-Agents are authenticated     `OPAMP_AGENT_AUTH=token|mtls`, *and* the mode is in
-                             `ENFORCED_AGENT_AUTH_MODES` (empty until #94 lands)
+Agents are authenticated     `OPAMP_AGENT_AUTH=token` and each agent has a
+                             credential (#94). `mtls` is reported but **not**
+                             enforced by this build, because certificates are
+                             terminated by the proxy — see
+                             `server/agent_auth.py`
 The server speaks TLS        `PUBLIC_URL` is `https://`/`wss://`, or
                              `TLS_TERMINATED_UPSTREAM=true`
 ===========================  ===================================================
@@ -41,10 +44,11 @@ GATE_DETAIL = "config push is disabled"
 
 VALID_AGENT_AUTH_MODES = ("off", "token", "mtls")
 
-# Agent auth modes this build actually *enforces*. #94 adds the real enforcement;
-# until then a configured mode is reported but never counted as satisfied, so the
-# gate cannot be opened by setting an env var that no code reads.
-ENFORCED_AGENT_AUTH_MODES: frozenset = frozenset()
+# Agent auth modes this build actually *enforces*. #94 added token enforcement;
+# "mtls" is reported (and warned about at startup) but deliberately excluded, so
+# the gate cannot be opened by an env var that no code reads. mTLS belongs with
+# the CA work in #83.
+ENFORCED_AGENT_AUTH_MODES: frozenset = frozenset({"token"})
 
 TLS_URL_PREFIXES = ("https://", "wss://")
 
@@ -140,11 +144,18 @@ def requirements() -> Dict[str, Dict[str, object]]:
             "met": agent_ok,
             "mode": mode,
             "detail": (
-                "set OPAMP_AGENT_AUTH=token (or mtls) and give each agent a "
-                "credential (see #94)"
+                "set OPAMP_AGENT_AUTH=token and give each agent a credential "
+                "(`opampctl agents token create <agent-id>`; see README → "
+                "Agent authentication)"
                 if mode == "off"
-                else f"OPAMP_AGENT_AUTH={mode} is not enforced by this build yet "
-                "(agent auth lands in #94); treat agent identity as unauthenticated"
+                else (
+                    "OPAMP_AGENT_AUTH=mtls is not enforced by this build: client "
+                    "certificates are terminated upstream and trusting a forwarded "
+                    "header would be forgeable. Use OPAMP_AGENT_AUTH=token until "
+                    "mTLS lands with #83"
+                    if mode == "mtls"
+                    else f"OPAMP_AGENT_AUTH={mode} is not enforced by this build"
+                )
             ),
         },
         "tls": {
@@ -225,8 +236,10 @@ def posture_warning(push: Dict[str, object] | None = None) -> str | None:
     agent_auth = push.get("agent_auth", "off")
     if agent_auth == "off":
         agent_auth_label = "off — any client can claim any agent identity"
+    elif agent_auth in ENFORCED_AGENT_AUTH_MODES:
+        agent_auth_label = f"{agent_auth} (enforced)"
     else:
-        agent_auth_label = f"{agent_auth} (configured, not yet enforced)"
+        agent_auth_label = f"{agent_auth} (configured, not enforced by this build)"
     tls_label = "yes" if push.get("tls") else "no — config travels in cleartext"
 
     return (

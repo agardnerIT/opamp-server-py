@@ -29,6 +29,16 @@ services:
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
       - OPAMP_ADMIN_AUTOGENERATE_PASSWORD=${OPAMP_ADMIN_AUTOGENERATE_PASSWORD:-true}
       - ADMIN_PASSWORD_FILE=${ADMIN_PASSWORD_FILE:-}
+      # Sessions, lockout and proxy trust (#95). Named principals with roles are
+      # created with `opampctl auth principals create ...` and live in the data
+      # volume; the generated password above only bootstraps the first one.
+      - ADMIN_SESSION_TTL_SECONDS=${ADMIN_SESSION_TTL_SECONDS:-3600}
+      - ADMIN_SESSION_IDLE_SECONDS=${ADMIN_SESSION_IDLE_SECONDS:-900}
+      - ADMIN_LOGIN_MAX_ATTEMPTS=${ADMIN_LOGIN_MAX_ATTEMPTS:-5}
+      - ADMIN_LOGIN_MAX_BACKOFF_SECONDS=${ADMIN_LOGIN_MAX_BACKOFF_SECONDS:-900}
+      # true only when the nginx/caddy profile terminates the connection: it is
+      # what makes the real client IP visible to the login lockout (#95).
+      - TRUST_PROXY_HEADERS=${TRUST_PROXY_HEADERS:-false}
       # Config push (#96): off unless the whole posture is secure.
       - OPAMP_CONFIG_PUSH_ENABLED=${OPAMP_CONFIG_PUSH_ENABLED:-false}
       - OPAMP_ALLOW_INSECURE_CONFIG_PUSH=${OPAMP_ALLOW_INSECURE_CONFIG_PUSH:-false}

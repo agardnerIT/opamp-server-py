@@ -87,8 +87,13 @@ opampctl agents compliance <agent-id>
 | Fleet report | `reports fleet --raw` | `fleet_report` | `GET /reports/fleet` |
 | Heavy collectors | `reports heavy [--threshold]` | `heavy_collectors_report` | `GET /reports/heavy-collectors` |
 | Outdated components | `reports outdated [--version]` | `outdated_collectors_report` | `GET /reports/outdated-collectors` |
-| Alerts config (admin) | `alerts get` / `alerts set @f.json` | `get_alerts` / `update_alerts` | `GET`/`PUT /alerts` |
-| Test alert (admin) | `alerts test` | `test_alerts` | `POST /alerts/test` |
+| Alerts config (redacted read / operator write) | `alerts get` / `alerts set @f.json` | `get_alerts` / `update_alerts` | `GET`/`PUT /alerts` |
+| Test alert (operator) | `alerts test` | `test_alerts` | `POST /alerts/test` |
+| Who am I + role | `auth whoami` | `whoami` | `GET /auth/me` |
+| Auth mode (no secrets) | `auth status` | `auth_status` | `GET /auth/status` |
+| Log in for a session token (admin role holder) | `auth login --name <n> --raw` | — (never exposed to MCP) | `POST /auth/session` |
+| Identities / roles (admin) | `auth principals list\|create\|revoke` | — | `GET`/`POST`/`DELETE /auth/principals` |
+| Live sessions (admin) | `auth sessions list\|revoke` | — | `GET`/`DELETE /auth/sessions` |
 | Health + posture | `health` | `health` | `GET /health` |
 | Config push posture | `config posture` | `config_posture` | `GET /config/posture` |
 | Mint agent credential (admin) | `agents token create <id> [--raw]` | `create_agent_token` (write-gated) | `POST /agents/{id}/token` |
@@ -124,6 +129,37 @@ Rules that matter when acting on this:
 - Minting needs the admin password, and the MCP tools for it are **absent** unless
   the MCP process runs with `OPAMP_MCP_ALLOW_WRITES=true`. That is intentional.
 
+
+## Admin auth and roles (`OPAMP_ADMIN_AUTH`, #95)
+
+Every privileged endpoint takes a role, ordered `viewer` < `operator` < `approver` <
+`admin` (a role implies the ones below it). Approval is deliberately a **different
+role** from operator: #103's two-phase push only means something if one person
+proposes and another approves.
+
+- **Read-only mode** (no credential configured at all) is read-open and
+  **write-closed**: reads succeed, writes answer `403` "admin auth is not
+  configured". Do not report a 403 as "broken auth" — check `auth status` first.
+- `401` = no/bad credential; `403` = valid credential, insufficient role (or a
+  revoked principal); `429` = lockout (on `POST /auth/session` **and** on repeated
+  failed Basic auth). Honour `Retry-After` and stop — retrying extends the backoff,
+  and the lockout is per `(name, client IP)`, so a loop will keep you out.
+- Credentials you can use, in order of preference: `--token` / `OPAMP_ADMIN_TOKEN`
+  (a session token: carries an identity and role, revocable), `--password` /
+  `ADMIN_PASSWORD` (Basic, legacy shared secret).
+- Session tokens expire (`ADMIN_SESSION_TTL_SECONDS`, default 1 h) and idle out
+  (`ADMIN_SESSION_IDLE_SECONDS`, default 15 min). A `401` mid-session usually means
+  expired, not wrong: log in again.
+- `GET /alerts` is **redacted**: `webhook_url` comes back as
+  `scheme://host/***REDACTED***` and `headers` as `***REDACTED***`. Send those values
+  back unchanged on `PUT` to keep the stored secret; do not "fix" them.
+- Identity administration (principals, sessions, logins) has **no MCP tools** on
+  purpose. If a task needs a new identity or a role change, hand it to a human
+  (`opampctl auth principals create …`) rather than trying to do it through the API
+  with an AI's credential.
+- Never put a password, a session token or an agent token in a report, an issue, a
+  commit or a chat transcript. Use `--raw` into a shell variable, and
+  `auth whoami` to confirm which role you are acting as before a privileged call.
 
 ## Gotchas
 

@@ -58,6 +58,71 @@ def get_alert_config():
     return ALERT_CONFIG.copy()
 
 
+# ---------------------------------------------------------------- redaction
+
+# The webhook URL and the custom headers *are* credentials in practice: a Slack or
+# Teams webhook path is a bearer secret, and `headers` usually carries an
+# Authorization value. So `GET /alerts` never returns them, and `PUT /alerts`
+# treats the sentinel as "keep what is stored" — a UI that round-trips a fetched
+# config cannot silently wipe the webhook, which is the failure mode #98 exists to
+# prevent one layer down.
+REDACTED = "***REDACTED***"
+_SECRET_FIELDS = ("webhook_url", "headers")
+
+
+def redact_url(url: str) -> str:
+    """`scheme://host[:port]/…***` — enough to recognise the target, not to use it."""
+    value = (url or "").strip()
+    if not value:
+        return ""
+    scheme, sep, rest = value.partition("://")
+    if not sep:
+        return REDACTED if len(value) > 8 else value
+    host, slash, _path = rest.partition("/")
+    return f"{scheme}://{host}/{REDACTED}" if _path else f"{scheme}://{host}"
+
+
+def redact_config(config: dict) -> dict:
+    """Deep copy of an alert config with webhook URLs and headers masked."""
+    redacted = json.loads(json.dumps(config or {}))
+    for event_config in (redacted.get("events") or {}).values():
+        if not isinstance(event_config, dict):
+            continue
+        if event_config.get("webhook_url"):
+            event_config["webhook_url"] = redact_url(event_config["webhook_url"])
+        if event_config.get("headers"):
+            event_config["headers"] = REDACTED
+    return redacted
+
+
+def merge_redacted(incoming: dict, stored: Optional[dict] = None) -> dict:
+    """Replace `***REDACTED***` values in an incoming config with the stored ones.
+
+    Only the fields `redact_config` masks are inspected; everything else passes
+    through untouched. A redacted value with nothing stored is dropped rather than
+    persisted as the literal sentinel — storing it would make the webhook "look"
+    configured while nothing could ever be delivered.
+    """
+    stored = stored if stored is not None else ALERT_CONFIG
+    merged = json.loads(json.dumps(incoming or {}))
+    for event, event_config in (merged.get("events") or {}).items():
+        if not isinstance(event_config, dict):
+            continue
+        stored_event = (stored.get("events") or {}).get(event) or {}
+        for field in _SECRET_FIELDS:
+            # `webhook_url` round-trips as `scheme://host/***REDACTED***`, so match
+            # the sentinel as a suffix as well as exactly.
+            current = event_config.get(field)
+            if current == REDACTED or (
+                isinstance(current, str) and current.endswith(REDACTED)
+            ):
+                if stored_event.get(field):
+                    event_config[field] = stored_event[field]
+                else:
+                    event_config.pop(field, None)
+    return merged
+
+
 def _init_alert_config_table(conn: sqlite3.Connection):
     conn.execute(
         "CREATE TABLE IF NOT EXISTS alert_config ("

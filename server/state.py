@@ -347,6 +347,250 @@ class SQLiteCredentialStore:
         return dict(grouped)
 
 
+class SQLitePrincipalStore:
+    """Admin identities and their roles (#95): one row per human/automation principal.
+
+    `secret_hash` is always a slow hash (`server.auth.hash_password`, scrypt) —
+    unlike an agent token, a human password has little entropy, so a fast hash
+    would turn one database copy into a wordlist run.
+
+    Rows are never deleted: revocation sets `revoked_at`, which keeps the name
+    reserved (a revoked `alice` cannot be silently re-created by someone else)
+    and keeps the audit trail intelligible after the fact.
+    """
+
+    def __init__(self, db_path: Path = DB_PATH):
+        self.db_path = db_path
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._connect() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS admin_principals (
+                    principal_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    role TEXT NOT NULL,
+                    secret_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT,
+                    revoked_at TEXT,
+                    last_seen_at TEXT
+                )
+            """)
+            conn.execute("PRAGMA journal_mode=WAL")
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=5000")
+        return conn
+
+    @staticmethod
+    def _row(row) -> Dict[str, Any]:
+        return {key: row[key] for key in row.keys()}
+
+    def create(
+        self,
+        principal_id: str,
+        name: str,
+        role: str,
+        secret_hash: str,
+        expires_at: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    "INSERT INTO admin_principals "
+                    "(principal_id, name, role, secret_hash, created_at, expires_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        principal_id,
+                        name,
+                        role,
+                        secret_hash,
+                        utcnow().isoformat(),
+                        expires_at,
+                    ),
+                )
+        except sqlite3.IntegrityError as exc:
+            raise ValueError(f"principal name {name!r} is already taken") from exc
+        return self.get(principal_id) or {}
+
+    def get(self, principal_id: str) -> Optional[Dict[str, Any]]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM admin_principals WHERE principal_id=?", (principal_id,)
+            ).fetchone()
+        return self._row(row) if row else None
+
+    def by_name(self, name: str) -> Optional[Dict[str, Any]]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM admin_principals WHERE name=?", (name,)
+            ).fetchone()
+        return self._row(row) if row else None
+
+    def list_all(self) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM admin_principals ORDER BY created_at"
+            ).fetchall()
+        return [self._row(row) for row in rows]
+
+    def revoke(self, principal_id: str) -> bool:
+        """Revoke a principal. Returns False if it was already revoked/absent."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE admin_principals SET revoked_at=? "
+                "WHERE principal_id=? AND revoked_at IS NULL",
+                (utcnow().isoformat(), principal_id),
+            )
+            return bool(cursor.rowcount)
+
+    def touch(self, principal_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE admin_principals SET last_seen_at=? WHERE principal_id=?",
+                (utcnow().isoformat(), principal_id),
+            )
+
+    def count_live(self) -> int:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM admin_principals WHERE revoked_at IS NULL"
+            ).fetchone()
+        return int(row["n"]) if row else 0
+
+
+class SQLiteSessionStore:
+    """Admin sessions (#95): opaque bearer tokens, SHA-256 at rest.
+
+    Sessions live in SQLite rather than process memory because uvicorn runs
+    multiple workers: an in-memory session works only if the load balancer is
+    sticky, which turns "add a replica" into "log everyone out at random".
+
+    Both `expires_at` (absolute TTL) and `last_seen_at` (idle timeout) are checked
+    on every use; `revoked_at` makes logout and "revoke that device" the same
+    operation.
+    """
+
+    def __init__(self, db_path: Path = DB_PATH):
+        self.db_path = db_path
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._connect() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS admin_sessions (
+                    session_hash TEXT PRIMARY KEY,
+                    principal_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    last_seen_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    revoked_at TEXT,
+                    client_ip TEXT NOT NULL DEFAULT '',
+                    user_agent TEXT NOT NULL DEFAULT ''
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS admin_sessions_principal_idx "
+                "ON admin_sessions(principal_id)"
+            )
+            conn.execute("PRAGMA journal_mode=WAL")
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=5000")
+        return conn
+
+    @staticmethod
+    def _row(row) -> Dict[str, Any]:
+        return {key: row[key] for key in row.keys()}
+
+    def create(
+        self,
+        session_hash: str,
+        principal_id: str,
+        expires_at: str,
+        client_ip: str = "",
+        user_agent: str = "",
+    ) -> Dict[str, Any]:
+        now = utcnow().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO admin_sessions "
+                "(session_hash, principal_id, created_at, last_seen_at, expires_at, "
+                "client_ip, user_agent) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    session_hash,
+                    principal_id,
+                    now,
+                    now,
+                    expires_at,
+                    client_ip[:64],
+                    user_agent[:256],
+                ),
+            )
+        return self.get(session_hash) or {}
+
+    def get(self, session_hash: str) -> Optional[Dict[str, Any]]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM admin_sessions WHERE session_hash=?", (session_hash,)
+            ).fetchone()
+        return self._row(row) if row else None
+
+    def touch(self, session_hash: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE admin_sessions SET last_seen_at=? WHERE session_hash=?",
+                (utcnow().isoformat(), session_hash),
+            )
+
+    def revoke(self, session_hash: str) -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE admin_sessions SET revoked_at=? "
+                "WHERE session_hash=? AND revoked_at IS NULL",
+                (utcnow().isoformat(), session_hash),
+            )
+            return bool(cursor.rowcount)
+
+    def revoke_principal(self, principal_id: str) -> int:
+        """Revoke every live session for a principal (called when it is revoked)."""
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE admin_sessions SET revoked_at=? "
+                "WHERE principal_id=? AND revoked_at IS NULL",
+                (utcnow().isoformat(), principal_id),
+            )
+            return cursor.rowcount or 0
+
+    def list_all(self) -> List[Dict[str, Any]]:
+        """Every live session, regardless of principal (admin listing)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM admin_sessions WHERE revoked_at IS NULL "
+                "ORDER BY created_at DESC"
+            ).fetchall()
+        return [self._row(row) for row in rows]
+
+    def list_for_principal(self, principal_id: str) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM admin_sessions WHERE principal_id=? "
+                "AND revoked_at IS NULL ORDER BY created_at DESC",
+                (principal_id,),
+            ).fetchall()
+        return [self._row(row) for row in rows]
+
+    def delete_expired(self, now: Optional[str] = None) -> int:
+        """Drop sessions whose absolute TTL has passed. Returns how many went."""
+        cutoff = now or utcnow().isoformat()
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "DELETE FROM admin_sessions WHERE expires_at < ?", (cutoff,)
+            )
+            return cursor.rowcount or 0
+
+
 COMPONENT_TYPES = {
     "receivers/": "receiver",
     "processors/": "processor",

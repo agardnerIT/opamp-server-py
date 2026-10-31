@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import json
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -278,20 +277,10 @@ def authorize_uid(principal: Principal, claimed_agent_id: str) -> None:
 
 # ---------------------------------------------------------------- audit + metrics
 
-
-def audit_event(event: str, **fields: Any) -> None:
-    """Structured audit line for a security-relevant decision.
-
-    This is the seam #97 replaces with the append-only, hash-chained log. Until
-    then it is one greppable JSON line, and it never carries a token or a token
-    hash. It must not raise: an audit bug may not take the OpAMP endpoint down.
-    """
-    payload: Dict[str, Any] = {"event": event}
-    payload.update({key: value for key, value in fields.items() if value not in (None, "")})
-    try:
-        logger.warning("AUDIT " + json.dumps(payload, default=str, sort_keys=True))
-    except Exception:  # pragma: no cover - defensive
-        logger.warning(f"AUDIT {event}")
+# One audited seam for the whole server (#95, #97). Imported rather than
+# re-implemented so `AUDIT {json}` lines have a single shape; `agent_auth.audit_event`
+# stays importable because #94's call sites and tests use it by name.
+from server.audit import audit_event  # noqa: E402  (kept next to its only helpers)
 
 
 def record_failure(

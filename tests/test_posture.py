@@ -328,13 +328,27 @@ def test_health_reports_insecure_override(client, monkeypatch):
 
 def test_auth_status_read_only_mode(client):
     body = client.get("/auth/status").json()
-    assert body == {"password_required": False, "auth_mode": "disabled", "roles": []}
+    assert body == {
+        "password_required": False,
+        "auth_mode": "disabled",
+        "roles": [],
+        "sessions": False,
+        "principals": 0,
+        "legacy_password": False,
+    }
 
 
 def test_auth_status_password_mode(client, monkeypatch):
     monkeypatch.setattr(admin_auth, "ADMIN_PASSWORD", "pw123")
     body = client.get("/auth/status").json()
-    assert body == {"password_required": True, "auth_mode": "password", "roles": ["admin"]}
+    assert body == {
+        "password_required": True,
+        "auth_mode": "password",
+        "roles": ["viewer", "operator", "approver", "admin"],
+        "sessions": True,
+        "principals": 0,
+        "legacy_password": True,
+    }
 
 
 # --------------------------------------------------------------------------- /config/posture

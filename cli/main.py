@@ -6,7 +6,8 @@ markdown/YAML payload to print just that text.
 
 Configuration (flags beat env vars):
 - ``--server URL`` / ``OPAMP_SERVER_URL``       server base URL (default http://localhost:4320)
-- ``--password PW`` / ``ADMIN_PASSWORD``        admin password (Basic auth)
+- ``--password PW`` / ``ADMIN_PASSWORD``        admin password (Basic auth, legacy)
+- ``--token TOK`` / ``OPAMP_ADMIN_TOKEN``       admin session token (``opampctl auth login``)
 - ``--db PATH``                                 offline mode: read SQLite state directly,
                                                 no server required (read-only commands only)
 
@@ -49,7 +50,9 @@ token_app = typer.Typer(
 reports_app = typer.Typer(help="Markdown fleet reports", no_args_is_help=True)
 compliance_app = typer.Typer(help="OPA policy compliance", no_args_is_help=True)
 alerts_app = typer.Typer(help="Alert configuration (admin)", no_args_is_help=True)
-auth_app = typer.Typer(help="Admin auth status", no_args_is_help=True)
+auth_app = typer.Typer(
+    help="Admin auth: mode, sessions and identities (#95)", no_args_is_help=True
+)
 config_app = typer.Typer(
     help="Config push posture (remote config control plane lands in #103)",
     no_args_is_help=True,
@@ -60,7 +63,7 @@ agents_app.add_typer(token_app, name="token", help="Agent credentials (admin)")
 app.add_typer(reports_app, name="reports", help="Markdown fleet reports")
 app.add_typer(compliance_app, name="compliance", help="OPA policy compliance")
 app.add_typer(alerts_app, name="alerts", help="Alert configuration (admin)")
-app.add_typer(auth_app, name="auth", help="Admin auth status")
+app.add_typer(auth_app, name="auth", help="Admin auth: mode, sessions, identities")
 app.add_typer(config_app, name="config", help="Config push posture")
 
 
@@ -69,6 +72,7 @@ class _Settings:
 
     server: Optional[str] = None
     password: Optional[str] = None
+    token: Optional[str] = None
     db: Optional[Path] = None
     pretty: bool = False
 
@@ -88,7 +92,12 @@ def _main(
     ),
     password: Optional[str] = typer.Option(
         None, "--password", "-p", envvar="ADMIN_PASSWORD",
-        help="Admin password [default: ADMIN_PASSWORD]",
+        help="Admin password (Basic auth, legacy) [default: ADMIN_PASSWORD]",
+    ),
+    token: Optional[str] = typer.Option(
+        None, "--token", "-t", envvar="OPAMP_ADMIN_TOKEN",
+        help="Admin session token from `opampctl auth login` [default: OPAMP_ADMIN_TOKEN]. "
+        "Wins over --password when both are set.",
     ),
     db: Optional[Path] = typer.Option(
         None, "--db",
@@ -102,6 +111,7 @@ def _main(
 ) -> None:
     _settings.server = server
     _settings.password = password
+    _settings.token = token
     _settings.db = db
     _settings.pretty = pretty
 
@@ -137,7 +147,11 @@ def _client() -> OpampClient:
             "drop --db to talk to the server."
         )
     try:
-        return OpampClient(base_url=_settings.server, password=_settings.password)
+        return OpampClient(
+            base_url=_settings.server,
+            password=_settings.password,
+            token=_settings.token,
+        )
     except OpampClientError as exc:
         _fail(str(exc))
 
@@ -193,21 +207,40 @@ def health() -> None:
 def config_posture() -> None:
     """Config push security posture: which requirements are met, and why not.
 
-    Read-only mode servers answer without credentials; when an admin password is
-    configured this needs `--password` / ADMIN_PASSWORD.
+    Any role may read it (`viewer`); the anonymous viewer of a read-only server
+    (no credential configured) can read it too.
     """
     _run(lambda oc: oc.config_posture())
 
 
+# ------------------------------------------------------------------- admin auth
+
+principals_app = typer.Typer(
+    help="Admin identities and roles (admin role)", no_args_is_help=True
+)
+sessions_app = typer.Typer(
+    help="Live admin sessions (admin role)", no_args_is_help=True
+)
+auth_app.add_typer(principals_app, name="principals")
+auth_app.add_typer(sessions_app, name="sessions")
+
+
 @auth_app.command("status")
 def auth_status() -> None:
-    """Whether the server requires an admin password."""
+    """How this server authenticates admin callers (no secrets)."""
     _run(lambda oc: oc.auth_status())
 
 
 @auth_app.command("verify")
 def auth_verify() -> None:
-    """Verify the configured admin password against the server (exit 0 = ok)."""
+    """Verify the configured credential against the server (exit 0 = ok).
+
+    Works with `--password` or `--token`; any role passes. Repeated failures feed
+    the server's login lockout, so do not loop on this.
+    """
+    if _settings.token:
+        _run(lambda oc: oc.whoami())
+        return
     try:
         with _client() as oc:
             result = oc.auth_verify(oc.password or "")
@@ -218,6 +251,101 @@ def auth_verify() -> None:
         _fail(f"HTTP {exc.status_code}", data={"detail": exc.detail})
     except OpampConnectionError as exc:
         _fail(str(exc))
+
+
+@auth_app.command("login")
+def auth_login(
+    name: Optional[str] = typer.Option(
+        None, "--name", "-n", help="Principal name (omit for the legacy ADMIN_PASSWORD)"
+    ),
+    password: Optional[str] = typer.Option(
+        None, "--password", "-p", envvar="ADMIN_PASSWORD",
+        help="Password to log in with [default: ADMIN_PASSWORD]",
+    ),
+    raw: bool = typer.Option(
+        False, "--raw", help="Print just the token (for `export OPAMP_ADMIN_TOKEN=$(...)`)"
+    ),
+) -> None:
+    """Log in and print a session token — the token IS a credential, treat it as one.
+
+    Print it into an env var (`export OPAMP_ADMIN_TOKEN=$(opampctl auth login --raw)`)
+    rather than into a chat, an issue or a commit. Sessions expire after
+    `ADMIN_SESSION_TTL_SECONDS` and after `ADMIN_SESSION_IDLE_SECONDS` idle; revoke
+    with `opampctl auth logout`. Use `--raw` only in a pipeline.
+    """
+    secret = password if password is not None else (_settings.password or "")
+    _run(
+        lambda oc: oc.login(name or "", secret),
+        raw_field="token" if raw else None,
+    )
+
+
+@auth_app.command("logout")
+def auth_logout() -> None:
+    """Revoke the session token this command is using (`--token`)."""
+    _run(lambda oc: oc.logout())
+
+
+@auth_app.command("whoami")
+def auth_whoami() -> None:
+    """Who am I: principal name, role and session expiry."""
+    _run(lambda oc: oc.whoami())
+
+
+@sessions_app.command("list")
+def auth_sessions_list() -> None:
+    """Live sessions with their principal, client IP and expiry (admin role)."""
+    _run(lambda oc: oc.list_sessions())
+
+
+@sessions_app.command("revoke")
+def auth_sessions_revoke(
+    session_id: str = typer.Argument(..., help="Short session id from `auth sessions list`"),
+) -> None:
+    """Revoke one session — "sign that device out" (admin role)."""
+    _run(lambda oc: oc.revoke_session(session_id))
+
+
+@principals_app.command("list")
+def auth_principals_list() -> None:
+    """Admin identities and their roles (admin role)."""
+    _run(lambda oc: oc.list_principals())
+
+
+@principals_app.command("create")
+def auth_principals_create(
+    name: str = typer.Argument(..., help="Principal name (used as the HTTP Basic username)"),
+    role: str = typer.Option(
+        "viewer", "--role", "-r",
+        help="viewer | operator | approver | admin (a role satisfies the ones below it)",
+    ),
+    password: str = typer.Option(
+        ..., "--password", "-p", prompt=False,
+        help="Password for the new principal (min 8 chars; scrypt-hashed server-side)",
+    ),
+    expires_at: Optional[str] = typer.Option(
+        None, "--expires-at", help="Optional ISO-8601 expiry, e.g. 2026-12-31T00:00:00Z"
+    ),
+) -> None:
+    """Create an identity with a role (admin role).
+
+    `operator` proposes/applies approved revisions, `approver` approves/rejects/
+    rolls back; keeping them as different people is the point of the two-phase
+    push (#99, #103). The password is never returned or logged.
+    """
+    _run(lambda oc: oc.create_principal(name, role, password, expires_at=expires_at))
+
+
+@principals_app.command("revoke")
+def auth_principals_revoke(
+    principal_id: str = typer.Argument(..., help="principal_id from `auth principals list`"),
+) -> None:
+    """Revoke an identity and close its sessions (admin role).
+
+    The row is kept so the name stays reserved — "remove alice, re-add alice" must
+    not silently hand her identity to someone else.
+    """
+    _run(lambda oc: oc.revoke_principal(principal_id))
 
 
 # --------------------------------------------------------------------- agents

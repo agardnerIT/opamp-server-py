@@ -43,13 +43,22 @@ def effective_config() -> str:
 
 @pytest.fixture
 def wired(monkeypatch):
-    """Route the MCP server's client factory to the in-process FastAPI app."""
-    from client.opamp_client import OpampClient
+    """Route the MCP server's client factory to the in-process FastAPI app.
 
+    Also configures an admin credential: since #95 privileged endpoints are closed
+    in read-only mode, and these tests exercise the tool shapes, not the auth mode.
+    """
+    from client.opamp_client import OpampClient
+    from server import admin_auth
+
+    monkeypatch.setattr(admin_auth, "ADMIN_PASSWORD", "mcp-pw-123456")
+    monkeypatch.setattr(admin_auth, "PASSWORD_SOURCE", "env")
     transport = InProcessASGITransport(server_app)
 
     def factory():
-        return OpampClient(base_url="http://testserver", transport=transport)
+        return OpampClient(
+            base_url="http://testserver", transport=transport, password="mcp-pw-123456"
+        )
 
     monkeypatch.setattr(mcp_srv, "_client", factory)
     yield
@@ -245,6 +254,35 @@ class TestConnectionError:
         data = call(mcp_srv.health)
         assert data["error"] is True
         assert "connection" in data
+
+
+# ------------------------------------------------------- identity tools (#95)
+
+class TestAuthTools:
+    def test_auth_status_reports_the_modes(self, wired):
+        data = call(mcp_srv.auth_status)
+        assert data["auth_mode"] in ("password", "principals", "disabled")
+        assert data["roles"] == ["viewer", "operator", "approver", "admin"]
+
+    def test_whoami_names_the_role(self, wired):
+        data = call(mcp_srv.whoami)
+        assert data["authenticated"] is True
+        assert data["role"] == "admin"
+        assert data["method"] == "legacy"
+
+    def test_identity_admin_is_not_exposed_to_mcp(self):
+        """Logins, principals and sessions must never be AI-callable tools."""
+        tools = {tool.name for tool in mcp._tool_manager.list_tools()}
+        assert not tools & {
+            "login",
+            "logout",
+            "create_principal",
+            "revoke_principal",
+            "list_principals",
+            "list_sessions",
+            "revoke_session",
+        }
+        assert {"auth_status", "whoami"} <= tools
 
 
 # ------------------------------------------------ credential tools (#94, #106)

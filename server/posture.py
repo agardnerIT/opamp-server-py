@@ -36,7 +36,7 @@ from typing import Dict, List
 from fastapi import HTTPException
 from loguru import logger
 
-from server import admin_auth
+from server import admin_auth, auth
 
 # Detail used by every gated push route. 404, not 403: a server with config push
 # off should not confirm to a stranger that the surface exists at all.
@@ -127,7 +127,9 @@ def unmet_requirements() -> List[str]:
 
 def requirements() -> Dict[str, Dict[str, object]]:
     """Each posture requirement, whether it is met, and what to do when it is not."""
-    admin_ok = admin_auth.configured()
+    # A named principal counts exactly like the legacy shared password (#95): the
+    # gate asks "can we tell who is asking", not "which mechanism is in use".
+    admin_ok = auth.configured()
     mode = agent_auth_mode()
     agent_ok = mode in ENFORCED_AGENT_AUTH_MODES
     tls_ok = tls_enabled()
@@ -136,8 +138,9 @@ def requirements() -> Dict[str, Dict[str, object]]:
         "admin_auth": {
             "label": "admin auth is not configured",
             "met": admin_ok,
-            "detail": "set ADMIN_PASSWORD, ADMIN_PASSWORD_FILE, or "
-            "OPAMP_ADMIN_AUTOGENERATE_PASSWORD=true",
+            "detail": "create a principal (POST /auth/principals, or "
+            "`opampctl auth principals create`) or set ADMIN_PASSWORD / "
+            "ADMIN_PASSWORD_FILE / OPAMP_ADMIN_AUTOGENERATE_PASSWORD=true",
         },
         "agent_auth": {
             "label": "agents are not authenticated",

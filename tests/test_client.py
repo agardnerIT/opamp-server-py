@@ -68,8 +68,12 @@ AVAILABLE_COMPONENTS = {
 
 
 @pytest.fixture
-def oc():
-    c = make_client()
+def oc(monkeypatch):
+    # #95: with no admin credential the server is read-open / write-closed, so the
+    # admin-surface tests authenticate. Behaviour in read-only mode has its own
+    # tests in tests/test_auth.py.
+    monkeypatch.setattr("server.admin_auth.ADMIN_PASSWORD", "client-pw-123456")
+    c = make_client(password="client-pw-123456")
     yield c
     c.close()
     for agent_id in list(AGENT_REGISTRY._agents.keys()):
@@ -168,15 +172,21 @@ class TestOpsAndAuth:
 
     def test_auth_status(self, oc):
         data = oc.auth_status()
-        assert "password_required" in data
-        assert data["auth_mode"] == "disabled" and data["roles"] == []
+        # The `oc` fixture configures the legacy shared password (#95 read-only mode
+        # would report auth_mode "disabled" with no roles).
+        assert data["password_required"] is True
+        assert data["auth_mode"] == "password"
+        assert data["roles"] == ["viewer", "operator", "approver", "admin"]
+        assert data["legacy_password"] is True
 
     def test_config_posture(self, oc):
         data = oc.config_posture()
         assert data["config_push"]["enabled"] is False
         assert data["allowed"] is False
         assert set(data["requirements"]) == {"admin_auth", "agent_auth", "tls"}
-        assert len(data["unmet"]) == 3
+        assert data["requirements"]["admin_auth"]["met"] is True
+        # admin auth is met here, so agent auth + TLS are the two remaining gaps.
+        assert len(data["unmet"]) == 2
 
     def test_auth_verify_ok_and_bad(self, monkeypatch):
         monkeypatch.setattr("server.admin_auth.ADMIN_PASSWORD", "pw123")
@@ -312,6 +322,93 @@ class TestAdminAuthThroughClient:
         finally:
             good.close()
             bad.close()
+
+
+class TestIdentityAndSessions:
+    """The #95 surface, through the shipped client (no HTTP shapes drift)."""
+
+    def test_legacy_login_whoami_logout(self, oc):
+        session = oc.login("", oc.password)
+        assert session["token"].startswith("opamp_admin_")
+        assert session["principal"]["role"] == "admin"
+
+        scoped = make_client(token=session["token"])
+        try:
+            me = scoped.whoami()
+            assert me["name"] == "admin" and me["method"] == "session"
+            assert scoped.logout()["logged_out"] is True
+            with pytest.raises(OpampApiError) as exc:
+                scoped.whoami()
+            assert exc.value.status_code == 401
+        finally:
+            scoped.close()
+
+    def test_bearer_token_beats_the_basic_password(self, oc):
+        session = oc.login("", oc.password)
+        scoped = make_client(password="wrong-on-purpose", token=session["token"])
+        try:
+            assert scoped.whoami()["authenticated"] is True
+        finally:
+            scoped.close()
+
+    def test_whoami_in_read_only_mode_is_anonymous(self, monkeypatch):
+        monkeypatch.setattr("server.admin_auth.ADMIN_PASSWORD", "")
+        anonymous = make_client()
+        try:
+            me = anonymous.whoami()
+            assert me["method"] == "anonymous" and me["authenticated"] is False
+        finally:
+            anonymous.close()
+
+    def test_principal_lifecycle(self, oc, monkeypatch):
+        created = oc.create_principal("dana", "operator", "dana-pw-123456")
+        assert created["role"] == "operator" and created["active"] is True
+        assert "secret_hash" not in json.dumps(created)
+
+        listed = oc.list_principals()
+        assert [p["name"] for p in listed["principals"]] == ["dana"]
+        assert listed["roles"] == ["viewer", "operator", "approver", "admin"]
+
+        # The new principal can authenticate with Basic...
+        scoped = make_client(password="dana-pw-123456")
+        scoped._client.headers["Authorization"] = "Basic " + base64.b64encode(
+            b"dana:dana-pw-123456"
+        ).decode()
+        try:
+            assert scoped.whoami()["role"] == "operator"
+            # ...but cannot mint identities.
+            with pytest.raises(OpampApiError) as exc:
+                scoped.create_principal("eve", "admin", "eve-pw-1234567")
+            assert exc.value.status_code == 403
+        finally:
+            scoped.close()
+
+        revoked = oc.revoke_principal(created["principal_id"])
+        assert revoked["revoked"] is True
+
+    def test_session_listing_and_revocation(self, oc):
+        session = oc.login("", oc.password)
+        sessions = oc.list_sessions()["sessions"]
+        assert sessions, "the login above must be listed"
+        target = sessions[0]
+        assert "session_hash" not in json.dumps(sessions)
+        revoked = oc.revoke_session(target["session_id"])
+        assert revoked["revoked"] is True
+        scoped = make_client(token=session["token"])
+        try:
+            with pytest.raises(OpampApiError) as exc:
+                scoped.whoami()
+            assert exc.value.status_code == 401
+        finally:
+            scoped.close()
+
+    def test_bad_role_and_short_password_are_structured_errors(self, oc):
+        with pytest.raises(OpampApiError) as bad_role:
+            oc.create_principal("x", "root", "pw-123456789")
+        assert bad_role.value.status_code == 422
+        with pytest.raises(OpampApiError) as short:
+            oc.create_principal("y", "viewer", "short")
+        assert short.value.status_code == 422
 
 
 class TestPackaging:

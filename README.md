@@ -211,7 +211,7 @@ published to the world is a fleet takeover, so the defaults are now closed:
 
 | Thing | Default | What that means |
 |---|---|---|
-| `ADMIN_PASSWORD` | *none* | Read-only mode: no privileged action is authenticated. Docker generates a random password on first start and stores it in `data/admin_password`; nothing ships a placeholder |
+| `ADMIN_PASSWORD` | *none* | Read-only mode: reads are open, **every privileged write answers 403** (#95). Prefer named principals with roles — see [Roles](#roles). Docker generates a random password on first start and stores it in `data/admin_password`; nothing ships a placeholder |
 | Config push | **off** | Push routes return 404 (not 403 — a stranger does not get to learn the surface exists), the server does not advertise `OffersRemoteConfig`, and no `remote_config` field is ever sent |
 | Agent auth | off | Any client can claim any agent identity. Set `OPAMP_AGENT_AUTH=token` and give each agent a credential — see [Agent authentication](#agent-authentication-agent--server) |
 | TLS | off | Credentials and configs travel in cleartext |
@@ -225,8 +225,10 @@ published to the world is a fleet takeover, so the defaults are now closed:
    `Upgrade`/`Connection` and a long read timeout for the WebSocket transport,
    and leave `Origin` intact — `CORSMiddleware` does not apply to upgrades, so
    the server's own check is the only one.
-2. **Set an admin password** (`ADMIN_PASSWORD` or a mounted `ADMIN_PASSWORD_FILE`).
-   Don't leave the generated one on a shared volume if several people need access.
+2. **Give each person an identity** (`opampctl auth principals create … --role admin|approver|operator|viewer`) — the
+   generated `data/admin_password` is a bootstrap credential, not a way to run a team:
+   with one shared secret there is no `approver` distinct from `operator`, and no way
+   to revoke one person without logging everyone out.
 3. **Authenticate your agents** (`OPAMP_AGENT_AUTH=token`) and mint a credential
    per agent. The token travels in the agent's config, so TLS is not optional
    once you turn this on.
@@ -267,6 +269,12 @@ curl -s -u ":$ADMIN_PASSWORD" localhost:4320/config/posture | jq .requirements
 | `ADMIN_PASSWORD` | *(empty)* | Admin password for privileged endpoints (see [API](#api-reference)). Empty = read-only mode; set `ADMIN_PASSWORD_FILE` or `OPAMP_ADMIN_AUTOGENERATE_PASSWORD` instead if you prefer |
 | `ADMIN_PASSWORD_FILE` | *(empty)* | Read the admin password from a file (secret mount) instead of the environment |
 | `OPAMP_ADMIN_AUTOGENERATE_PASSWORD` | `false` | Generate a random admin password on first start, print it once, store it in `$DATA_DIR/admin_password` (0600). `true` in `docker-compose.yml` |
+| `ADMIN_SESSION_TTL_SECONDS` | `3600` | Absolute lifetime of a session issued by `POST /auth/session` (#95) |
+| `ADMIN_SESSION_IDLE_SECONDS` | `900` | Idle timeout for a session; every use refreshes it (at most one write a minute) |
+| `ADMIN_LOGIN_MAX_ATTEMPTS` | `5` | Failed logins per `(name, client IP)` before lockout starts |
+| `ADMIN_LOGIN_BACKOFF_SECONDS` | `30` | First lockout wait; doubles per further failure |
+| `ADMIN_LOGIN_MAX_BACKOFF_SECONDS` | `900` | Cap on the exponential lockout backoff |
+| `TRUST_PROXY_HEADERS` | `false` | Believe `X-Forwarded-For` for the lockout key and audit client. Only behind a proxy you control — otherwise it is forgeable |
 | `CORS_ORIGINS` | `*` | Comma-separated list of allowed CORS origins (browser clients) |
 | `OPAMP_WS_ENABLED` | `false` | Enable the WebSocket transport on `/v1/opamp` (see [Transports](#transports)) |
 | `OPAMP_MAX_MESSAGE_BYTES` | `67108864` | Max OpAMP message size (64 MiB), varint header included |
@@ -315,63 +323,146 @@ The server is FastAPI-based and self-documenting:
 
 ### Authentication
 
-Auth is controlled by the admin credential (`ADMIN_PASSWORD`, `ADMIN_PASSWORD_FILE`, or
-one generated at startup with `OPAMP_ADMIN_AUTOGENERATE_PASSWORD=true`):
+Two separate credential systems, deliberately:
 
-- Agents are authenticated **separately**, on `POST /v1/opamp` only, with
-  `Authorization: Bearer <token>` when `OPAMP_AGENT_AUTH=token` — see
-  [Agent authentication](#agent-authentication-agent--server). Admin endpoints
-  take HTTP Basic, so the two never collide.
+| Channel | Credential | Enabled by |
+|---|---|---|
+| **Agents** → `POST/WS /v1/opamp` | `Authorization: Bearer opamp_agent_…` | `OPAMP_AGENT_AUTH=token` — see [Agent authentication](#agent-authentication-agent--server) |
+| **Humans / tooling** → admin API | session token (`POST /auth/session`) or HTTP Basic | a principal, or the legacy `ADMIN_PASSWORD` |
 
-- **No credential (read-only mode):** endpoints marked 🔒 behave as they always have —
-  open, because there is nothing to authenticate against. Closing that door is #95.
-  Docker deployments generate a random credential, so read-only mode is mostly a
-  local-development state.
-- **Credential present:** endpoints marked 🔒 below require HTTP Basic auth with any
-  username and the admin password as the password:
+#### Roles
+
+Every privileged endpoint takes a role. Roles are ordered — a role satisfies every
+role below it:
+
+| Role | May | Why it exists |
+|---|---|---|
+| `viewer` | read everything (alert webhooks redacted) | a dashboard user should not need write access |
+| `operator` | propose changes, apply *approved* revisions, edit alerts, force compliance checks | the person who runs the fleet |
+| `approver` | approve / reject / roll back | the person who signs off — **deliberately not the same role** as `operator`, so two-phase config push (#99, #103) is an approval and not a formality |
+| `admin` | everything, plus identity (principals, sessions) and fleet-wide actions | onboarding and break-glass |
+
+#### Principals (recommended)
+
+A principal is a named identity with a role and its own password, stored
+scrypt-hashed in `data/opamp.db`:
 
 ```bash
-# any username, the admin password as the password
+# Bootstrap: creating the first principal needs an admin credential, so start with
+# ADMIN_PASSWORD set (docker-compose writes the generated one to data/admin_password):
+export ADMIN_PASSWORD="$(cat data/admin_password)"
+opampctl auth principals create alice --role admin    --password '…'
+opampctl auth principals create bob   --role operator --password '…'
+opampctl auth principals create carol --role approver --password '…'
+opampctl auth principals list                        # roles, last seen, active
+
+# Log in as a person. The token is a credential — keep it out of chat and commits.
+export OPAMP_ADMIN_TOKEN="$(opampctl auth login --name bob --raw)"
+opampctl auth whoami                                 # name, role, session expiry
+opampctl alerts set @alerts.json                     # operator: allowed
+opampctl auth logout                                 # revoke this session
+
+# Drop the shared password once every person has an identity:
+unset ADMIN_PASSWORD
+```
+
+Sessions expire after `ADMIN_SESSION_TTL_SECONDS` (1 h) **and** after
+`ADMIN_SESSION_IDLE_SECONDS` (15 min) of inactivity, and can be revoked
+individually (`opampctl auth sessions list` → `auth sessions revoke <id>`) or all at
+once by revoking the principal. Revoking a principal keeps its row, so the name stays
+reserved — "remove alice, re-add alice" cannot silently hand her identity to someone
+else.
+
+#### Legacy shared password (deprecated)
+
+`ADMIN_PASSWORD`, `ADMIN_PASSWORD_FILE` or a generated password still works, as one
+synthesised `admin` principal. It stays for scripts and existing deployments, with a
+startup deprecation warning: there is no per-person identity, no `approver` role, and
+no way to revoke one person without changing everyone's password.
+
+```bash
+# HTTP Basic: any username, the admin password as the password
 curl -u admin:"$ADMIN_PASSWORD" http://localhost:4320/alerts
-# or explicitly:
 curl -H "Authorization: Basic $(printf ":$ADMIN_PASSWORD" | base64)" http://localhost:4320/alerts
 ```
 
-Check the auth mode with `GET /auth/status`
-(`{"password_required": bool, "auth_mode": "password"|"disabled", "roles": [...]}`) and
-validate credentials with `GET /auth/verify`.
+#### Read-only mode (no credential at all)
+
+With nothing configured the server is **read-open and write-closed**: `viewer`
+requests are served and every privileged write answers `403` ("admin auth is not
+configured"). That is what a dashboard-only deployment wants, and it means an
+unconfigured server can no longer be used to change your fleet. Config push also
+refuses to start in this state (#96).
+
+#### Lockout
+
+Failed logins are counted per `(name, client IP)` for **every** Basic-authenticated
+request, not just `POST /auth/session` — otherwise `/auth/verify` would be a free
+credential oracle. Session tokens are not counted: 256 random bits are not guessable.
+After `ADMIN_LOGIN_MAX_ATTEMPTS` (default 5) the server answers `429` with
+`Retry-After`, backing off exponentially
+(`ADMIN_LOGIN_BACKOFF_SECONDS` → 2x → 4x… capped by
+`ADMIN_LOGIN_MAX_BACKOFF_SECONDS`). The response never reveals whether the name
+exists. Behind the bundled proxies set `TRUST_PROXY_HEADERS=true` so the key is the
+real client and not the proxy; **do not** set it when the server is directly
+reachable — a header any client can forge would let an attacker evade the lockout and
+collapse everyone else into one bucket.
+
+Discovery and self-inspection:
+
+```bash
+curl -s localhost:4320/auth/status | jq   # auth_mode, roles, sessions, principals
+opampctl auth whoami                      # who am I, and what may I do
+opampctl auth verify                      # exit 0 if the credential works
+```
+
+`auth_mode` is `principals` (named identities exist), `password` (legacy shared
+secret only) or `disabled` (read-only mode).
 
 ### Endpoints
 
-| Method | Endpoint | Auth | Description |
+| Method | Endpoint | Role | Description |
 |--------|----------|:----:|-------------|
-| GET | `/auth/status` | | Auth mode: `password_required`, `auth_mode` (`password`\|`disabled`), `roles`. No secrets |
-| GET | `/auth/verify` | 🔒 | Validate Basic credentials (200 or 401) |
+| GET | `/auth/status` | — | Auth mode: `auth_mode` (`principals`\|`password`\|`disabled`), `roles`, `sessions`, `principals`. No secrets |
+| POST | `/auth/session` | — | Log in with `{"name", "password"}` → `{"token", …}` (bearer, shown once, SHA-256 at rest). 401 bad credentials, 403 revoked/expired principal, 429 + `Retry-After` when locked out |
+| DELETE | `/auth/session` | viewer | Log out: revoke the session token used for this request. 400 when authenticating with Basic (nothing to revoke) |
+| GET | `/auth/me` | viewer | Identity, role, auth `method` (`session`\|`password`\|`legacy`\|`anonymous`) and session expiry |
+| GET | `/auth/sessions` | admin | Live admin sessions with principal, client IP, user agent, expiry. Never a token |
+| DELETE | `/auth/sessions/{id}` | admin | Revoke one session by its short id ("sign that device out") |
+| GET | `/auth/principals` | admin | Admin identities, roles, last seen, `active`. Never a password or hash |
+| POST | `/auth/principals` | admin | Create an identity: `{"name", "role", "password", "expires_at"}`. scrypt-hashed; 409 taken name, 422 bad role/short password |
+| DELETE | `/auth/principals/{id}` | admin | Revoke an identity and close its sessions (row kept, name stays reserved) |
+| GET | `/auth/verify` | viewer | Validate a credential — any role passes (200, 401, or 429 when locked out); failures feed the lockout |
 | POST | `/v1/opamp` | 🔑 | OpAMP protocol endpoint — agents connect here (protobuf). With `OPAMP_AGENT_AUTH=token` the agent must send `Authorization: Bearer <token>`: 401 without a valid one, 403 when the token is for another `instance_uid` |
 | WS | `/v1/opamp` | 🔑 | Same endpoint over WebSocket when `OPAMP_WS_ENABLED=true`; credential checked before `accept()`, refusals close `1008` |
 | POST | `/v1/metrics` | | OTLP/HTTP metrics ingestion from collectors (JSON or protobuf) |
 | GET | `/agents` | | List agents. Filters: `healthy=true\|false\|unknown`, `status=` (remote config status, or alias `remote_config_status=`), or any description attribute, e.g. `?environment=prod`. Repeated params are OR. Each agent carries a `credential` block |
 | GET | `/agent/{id}` | | Agent details incl. latest OTLP metrics and `credential` state (`enrolled`, `active`, `last_seen_at`, `revoked_at` — never a token) |
 | GET | `/agent/{id}/metrics` | | Latest OTLP metric values for the agent (persisted across restarts) |
-| POST | `/agents/{id}/token` | 🔒 | Mint/rotate an agent credential. Returns the token **once** plus a paste-ready collector snippet. Optional body `{"label", "retire_previous"}`. 422 if `id` is not a hex instance UID |
-| DELETE | `/agents/{id}/token` | 🔒 | Revoke every live credential for the agent (idempotent). Blocks delivery, keeps the agent's state |
+| POST | `/agents/{id}/token` | admin | Mint/rotate an agent credential. Returns the token **once** plus a paste-ready collector snippet. Optional body `{"label", "retire_previous"}`. 422 if `id` is not a hex instance UID |
+| DELETE | `/agents/{id}/token` | admin | Revoke every live credential for the agent (idempotent). Blocks delivery, keeps the agent's state |
 | POST | `/agent/{id}/manifest` | | Generate OCB `manifest.yaml` + build command for a slim collector. Optional body `{"version": "0.123.0"}`. 409 if the agent has no components in use |
 | GET | `/agent/{id}/compliance` | | Evaluate agent against OPA policies (no-op result if OPA disabled) |
 | GET | `/agent/{id}/report` | | Markdown report for one agent (versions, health, components) |
 | GET | `/reports/fleet` | | Full fleet summary report (markdown, same as the UI Reports page) |
 | GET | `/reports/heavy-collectors` | | Collectors with many unused components. Param: `threshold` (0–1, default 0.5) |
 | GET | `/reports/outdated-collectors` | | Collectors with components older than `version` (default `0.149.0`) |
-| POST | `/compliance/check/{id}` | 🔒 | Force a compliance check (503 if OPA disabled) |
+| POST | `/compliance/check/{id}` | operator | Force a compliance check (503 if OPA disabled) |
 | GET | `/compliance/summary` | | Fleet-wide compliance counts |
 | GET | `/compliance/policies` | | Available OPA policies |
-| POST | `/compliance/reload` | 🔒 | Ask OPA to reload policies from disk |
+| POST | `/compliance/reload` | admin | Ask OPA to reload policies from disk |
 | GET | `/compliance/validate` | | Validate OPA policy files |
-| GET | `/alerts` | 🔒 | Current alert configuration |
-| PUT | `/alerts` | 🔒 | Update alert configuration |
-| POST | `/alerts/test` | 🔒 | Send a test alert (optionally with a temporary `event_config`) |
+| GET | `/alerts` | viewer | Alert configuration with `webhook_url` and `headers` **redacted** |
+| PUT | `/alerts` | operator | Merge alert configuration. `***REDACTED***` keeps the stored secret |
+| POST | `/alerts/test` | operator | Send a test alert (optionally with a temporary `event_config`) |
 | GET | `/health` | | Health check (server status, agent count, OPA availability) plus the public `config_push` posture block |
-| GET | `/config/posture` | 🔒 | Full config push posture: every requirement, what is met, where the admin credential came from, whether the override is on. No secrets |
+| GET | `/config/posture` | viewer | Full config push posture: every requirement, what is met, where the admin credential came from, whether the override is on. No secrets |
 | GET | `/metrics` | | Prometheus metrics |
+
+`Role` is the minimum role; roles are ordered (`viewer` < `operator` < `approver` <
+`admin`), so an `approver` may do what an `operator` may. `—` means no credential. In
+read-only mode (nothing configured) reads still work and every non-`—` row answers
+`403`.
 
 Example: filter agents by metadata and health
 
@@ -418,18 +509,34 @@ opampctl compliance validate
 opampctl compliance reload                  # admin
 opampctl compliance check <agent-id>        # admin
 
-# Alerts (admin)
+# Alerts (operator to write; webhook secrets come back redacted on read)
 opampctl alerts get
 opampctl alerts set @alerts.json            # JSON from file (or inline JSON)
 opampctl alerts test --event-type new_agent
+
+# Admin identity and sessions (#95)
+opampctl auth status                        # auth_mode, roles, live principals
+opampctl auth whoami                        # your name, role, session expiry
+opampctl auth login --name bob --raw        # session token -> export OPAMP_ADMIN_TOKEN
+opampctl auth logout                        # revoke this session
+opampctl auth sessions list                 # live sessions (admin)
+opampctl auth sessions revoke <session-id>  # sign one device out (admin)
+opampctl auth principals list               # identities and roles (admin)
+opampctl auth principals create bob --role operator --password '…'
+opampctl auth principals revoke <principal-id>   # closes their sessions too
 ```
+
+`--token` / `OPAMP_ADMIN_TOKEN` sends a session token (preferred); `--password` /
+`ADMIN_PASSWORD` sends HTTP Basic (legacy, for scripts). When both are set the token
+wins.
 
 ### CLI configuration
 
 | Source | Flags | Env vars |
 |--------|-------|----------|
 | Server URL | `--server`, `-s` | `OPAMP_SERVER_URL` |
-| Admin password | `--password`, `-p` | `ADMIN_PASSWORD` |
+| Admin session token | `--token`, `-t` | `OPAMP_ADMIN_TOKEN` (wins over the password) |
+| Admin password (legacy Basic) | `--password`, `-p` | `ADMIN_PASSWORD` |
 
 ### Offline mode (`--db`)
 
@@ -458,12 +565,17 @@ opampctl --show-completion      # show the install command/instructions
 ## MCP Server (for AI agents)
 
 An [MCP](https://modelcontextprotocol.io) server (`opamp-mcp` / `python -m mcp_server`)
-exposes 20 typed tools mirroring the API: `list_agents`, `get_agent`,
+exposes 21 typed tools mirroring the API: `list_agents`, `get_agent`,
 `get_agent_metrics`, `generate_manifest`, `fleet_report`, `heavy_collectors_report`,
 `outdated_collectors_report`, `get_compliance`, `check_compliance`,
 `compliance_summary`, `list_policies`, `validate_policies`, `reload_policies`,
 `get_alerts`, `update_alerts`, `test_alerts`, `agent_report`, `health`, `auth_status`,
-`config_posture`.
+`whoami`, `config_posture`.
+
+**Identity is never delegated to MCP.** Logins, principals and sessions have no MCP
+tools at all — minting an identity is a human/IaC action, not a tool call an AI can
+be talked into. `whoami` exists so an agent can *see* which role it is acting as
+before suggesting a privileged step.
 
 **Write tools are absent, not failing.** `create_agent_token` and
 `revoke_agent_token` only exist when the MCP process is started with
@@ -524,6 +636,13 @@ print(result["manifest_yaml"])
 token = oc.create_agent_token("4f3c2b1a...", label="prod-1")["token"]
 print(oc.get_agent("4f3c2b1a...")["credential"])
 print(oc.revoke_agent_token("4f3c2b1a..."))   # {"revoked": 1}
+
+# Admin identity and sessions (#95)
+session = oc.login("bob", "…")             # POST /auth/session -> token, role, expiry
+scoped = OpampClient(base_url="http://localhost:4320", token=session["token"])
+print(scoped.whoami())                     # {"name": "bob", "role": "operator", ...}
+print(scoped.create_principal("carol", "approver", "…"))   # admin role only
+scoped.logout()
 
 try:
     oc.get_agent("nope")

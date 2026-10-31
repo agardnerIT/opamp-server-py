@@ -80,8 +80,12 @@ class OpampClient:
     Args:
         base_url: Server base URL. Falls back to ``OPAMP_SERVER_URL`` env var,
             then ``http://localhost:4320``.
-        password: Admin password for Basic auth on admin endpoints. Falls back
-            to the ``ADMIN_PASSWORD`` env var. Sent only when set.
+        password: Admin password for Basic auth on privileged endpoints. Falls
+            back to the ``ADMIN_PASSWORD`` env var. Sent only when set;
+            deprecated for interactive use (#95) but still what scripts use.
+        token: Optional session token (``POST /auth/session``). Falls back to the
+            ``OPAMP_ADMIN_TOKEN`` env var. When both are given the token wins —
+            it carries a role and an identity, and it can be revoked.
         timeout: Per-request timeout in seconds.
         transport: Optional httpx transport (for tests / custom routing).
     """
@@ -92,14 +96,20 @@ class OpampClient:
         password: Optional[str] = None,
         timeout: float = DEFAULT_TIMEOUT,
         transport: Optional[httpx.BaseTransport] = None,
+        token: Optional[str] = None,
     ):
         self.base_url = _normalize_base_url(base_url or os.environ.get("OPAMP_SERVER_URL"))
         self.password = password if password is not None else os.environ.get("ADMIN_PASSWORD") or ""
+        self.token = token if token is not None else os.environ.get("OPAMP_ADMIN_TOKEN") or ""
         self.timeout = timeout
         headers = {"Accept": "application/json"}
-        if self.password:
-            token = base64.b64encode(f":{self.password}".encode()).decode()
-            headers["Authorization"] = f"Basic {token}"
+        if self.token:
+            # A session token beats the shared password: it carries an identity and
+            # a role, and it can be revoked (#95).
+            headers["Authorization"] = f"Bearer {self.token}"
+        elif self.password:
+            basic = base64.b64encode(f":{self.password}".encode()).decode()
+            headers["Authorization"] = f"Basic {basic}"
         self._client = httpx.Client(
             base_url=self.base_url,
             headers=headers,
@@ -154,7 +164,7 @@ class OpampClient:
         return self._get("/health")
 
     def config_posture(self) -> Dict[str, Any]:
-        """``GET /config/posture`` — config push security posture (admin).
+        """``GET /config/posture`` — config push security posture (viewer).
 
         Reports every requirement (admin auth, agent auth, TLS), which are met,
         where the admin credential came from and whether the development override
@@ -166,7 +176,12 @@ class OpampClient:
     # ------------------------------------------------------------------ auth
 
     def auth_status(self) -> Dict[str, Any]:
-        """``GET /auth/status`` — whether admin auth is required."""
+        """``GET /auth/status`` — how to authenticate (no secrets).
+
+        ``{"password_required", "auth_mode": "password"|"principals"|"disabled",
+        "roles", "sessions", "principals", "legacy_password"}``. ``disabled`` means
+        read-only mode: reads are open and privileged writes answer 403.
+        """
         return self._get("/auth/status")
 
     def auth_verify(self, password: str) -> Dict[str, Any]:
@@ -186,6 +201,89 @@ class OpampClient:
         except ValueError:
             detail = resp.text
         raise OpampApiError(resp.status_code, detail, url=str(resp.request.url))
+
+
+    # ------------------------------------------------- identities and sessions
+
+    def login(self, name: str = "", password: str = "") -> Dict[str, Any]:
+        """``POST /auth/session`` — exchange name+password for a bearer token.
+
+        Returns ``{"token", "token_type", "expires_at", "principal": {"name",
+        "role"}, "ttl_seconds", "idle_timeout_seconds"}``. The token is shown once
+        and stored only as a SHA-256 hash. Pass it as ``token=`` to this client (or
+        ``Authorization: Bearer``) for later calls. With only the legacy
+        ``ADMIN_PASSWORD`` configured, ``name`` may be empty or ``"admin"``.
+
+        Failed logins are rate limited: 429 with ``Retry-After`` after
+        ``ADMIN_LOGIN_MAX_ATTEMPTS`` failures for that ``(name, client IP)``.
+        """
+        return self._post("/auth/session", json={"name": name, "password": password})
+
+    def logout(self) -> Dict[str, Any]:
+        """``DELETE /auth/session`` — revoke the session token in use.
+
+        Returns ``{"logged_out": bool}``; 400 when the client authenticates with
+        HTTP Basic instead of a session token (there is nothing to revoke).
+        """
+        return self._request("DELETE", "/auth/session")
+
+    def whoami(self) -> Dict[str, Any]:
+        """``GET /auth/me`` — caller identity, role and session expiry.
+
+        ``{"authenticated", "name", "role", "method", "roles",
+        "session_expires_at", "session_idle_timeout_seconds"}``; ``method`` is
+        ``session``, ``password``, ``legacy`` or ``anonymous`` (read-only mode).
+        """
+        return self._get("/auth/me")
+
+    def list_sessions(self) -> Dict[str, Any]:
+        """``GET /auth/sessions`` — live admin sessions (admin role).
+
+        Never contains a token; each entry carries a short ``session_id`` for
+        :meth:`revoke_session`.
+        """
+        return self._get("/auth/sessions")
+
+    def revoke_session(self, session_id: str) -> Dict[str, Any]:
+        """``DELETE /auth/sessions/{id}`` — revoke one session (admin role)."""
+        return self._request("DELETE", f"/auth/sessions/{session_id}")
+
+    def list_principals(self) -> Dict[str, Any]:
+        """``GET /auth/principals`` — admin identities and roles (admin role)."""
+        return self._get("/auth/principals")
+
+    def create_principal(
+        self,
+        name: str,
+        role: str,
+        password: str,
+        expires_at: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """``POST /auth/principals`` — create an identity with a role (admin role).
+
+        Roles, lowest to highest: ``viewer`` (reads), ``operator`` (propose, apply
+        approved, alerts/compliance writes), ``approver`` (approve / reject /
+        rollback), ``admin`` (identity + fleet-wide). A role satisfies every role
+        below it. The password is scrypt-hashed server-side and never returned.
+        409 if the name is taken, 422 for a bad role or a password under 8 chars.
+        """
+        return self._post(
+            "/auth/principals",
+            json={
+                "name": name,
+                "role": role,
+                "password": password,
+                "expires_at": expires_at,
+            },
+        )
+
+    def revoke_principal(self, principal_id: str) -> Dict[str, Any]:
+        """``DELETE /auth/principals/{id}`` — revoke an identity (admin role).
+
+        Closes every session it holds and keeps the row (the name stays reserved, so
+        a revoked identity cannot be silently re-created by someone else).
+        """
+        return self._request("DELETE", f"/auth/principals/{principal_id}")
 
     # ------------------------------------------------------------------ agents
 

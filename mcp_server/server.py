@@ -82,8 +82,26 @@ def health() -> str:
 
 @mcp.tool()
 def auth_status() -> str:
-    """Whether the server requires an admin password."""
+    """How the server authenticates admin callers: mode, roles, live principals (#95).
+
+    `auth_mode` is `password` (legacy shared secret only), `principals` (per-person
+    identities with roles) or `disabled` (read-only server: reads open, privileged
+    writes refused). Read-only tool.
+    """
     return _tool(lambda oc: oc.auth_status())
+
+
+@mcp.tool()
+def whoami() -> str:
+    """Which principal and role this MCP server is acting as (#95).
+
+    `method` is `session`, `password`, `legacy` or `anonymous`. Use it before
+    suggesting a privileged action: if the role is `viewer`, an operator-only call
+    will fail with 403 no matter how it is phrased. Identity administration
+    (principals, sessions, logins) is deliberately **not** exposed to MCP — minting
+    identities is a human/IaC action.
+    """
+    return _tool(lambda oc: oc.whoami())
 
 
 @mcp.tool()

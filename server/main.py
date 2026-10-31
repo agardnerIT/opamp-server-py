@@ -34,9 +34,16 @@ from server.reports import (
     _count_outdated_collectors,
     _is_heavy,
 )
-from server.alerts import get_alert_config, update_alert_config, send_test_alert, send_alert, ALERT_TYPES, ALERT_CONFIG, ALERT_EVENTS, send_new_agent_alert, send_stale_agent_alert, send_compliance_alert
-from server import admin_auth, agent_auth, posture
-from server.admin_auth import require_admin  # noqa: F401  (privileged routes below)
+from server.alerts import get_alert_config, update_alert_config, send_test_alert, send_alert, ALERT_TYPES, ALERT_CONFIG, ALERT_EVENTS, send_new_agent_alert, send_stale_agent_alert, send_compliance_alert, redact_config, merge_redacted
+from server import admin_auth, agent_auth, auth, posture
+from server.auth import (  # noqa: F401  (privileged routes below)
+    ROLE_ADMIN,
+    ROLE_APPROVER,
+    ROLE_OPERATOR,
+    ROLE_VIEWER,
+    require_admin,
+    require_roles,
+)
 from server.framing import message_limit
 from server.ws import (
     CLOSE_POLICY_VIOLATION,
@@ -62,6 +69,11 @@ async def lifespan(app: FastAPI):
     global _cleanup_task
     # Credential first: the posture check needs to know whether admin auth exists.
     admin_auth.ensure()
+    # #95: no credential at all means read-open / write-closed; a shared password
+    # with no principals means nobody can be revoked individually. Both are worth
+    # exactly one startup line.
+    auth.warn_if_read_only()
+    auth.warn_if_legacy()
     # Agents are unauthenticated by default (#94) — say so once, loudly, rather
     # than letting an operator discover it from an incident.
     agent_auth.warn_if_unenforced()
@@ -117,9 +129,13 @@ app = FastAPI(
         "manifests, run OPA compliance checks, and manage alerts.\n\n"
         "Interactive docs: [`/docs`](/docs) · ReDoc: [`/redoc`](/redoc) · "
         "Machine-readable schema: [`/openapi.json`](/openapi.json).\n\n"
-        "**Auth:** endpoints marked as requiring auth use HTTP Basic with the admin "
-        "password (`Authorization: Basic base64(':ADMIN_PASSWORD')`). With no admin "
-        "credential configured the server runs in read-only mode — check "
+        "**Auth:** every privileged endpoint takes a role, lowest to highest: "
+        "`viewer` (reads), `operator` (mutations, propose), `approver` (approve / "
+        "reject / rollback) and `admin` (identity, fleet-wide actions). Authenticate "
+        "with an admin session (`POST /auth/session` → `Authorization: Bearer <token>`) "
+        "or, for scripts, HTTP Basic (`name:password`, or just the legacy "
+        "`ADMIN_PASSWORD`). With no credential configured the server runs in read-only "
+        "mode: reads are open and every privileged write answers 403 — check "
         "`GET /auth/status`.\n\n"
         "**Agent auth:** off by default. With `OPAMP_AGENT_AUTH=token` every agent "
         "message must carry `Authorization: Bearer <token>`; mint one with "
@@ -147,34 +163,237 @@ app.add_middleware(
 def auth_status():
     """Report the admin auth mode — no secrets.
 
-    Returns `{"password_required": bool, "auth_mode": "password"|"disabled",
-    "roles": [str]}`. `password` means `ADMIN_PASSWORD` (or a stored generated
-    credential) is in effect and sensitive endpoints expect HTTP Basic
-    credentials; `disabled` is **read-only mode**, where no credential exists and
-    privileged endpoints behave as they always have (open — closed by #95).
-    `roles` lists the roles a caller gets after authenticating; empty means no
-    authentication happened. Unauthenticated — call this first to discover the
-    auth mode.
+    Returns `{"password_required": bool, "auth_mode": "password"|"principals"|
+    "disabled", "roles": [str], "sessions": bool, "principals": int,
+    "legacy_password": bool}`.
+
+    `password` means only the shared `ADMIN_PASSWORD` (or a stored/generated
+    credential) is configured: one anonymous `admin` principal, deprecated.
+    `principals` means per-person identities exist and `roles` is the full role
+    ladder they may hold. `disabled` is **read-only mode** — no credential exists,
+    so reads are open and every privileged write answers 403 (#95). `sessions` says
+    whether `POST /auth/session` can be used to get a bearer token, and
+    `principals` is the number of live identities. Unauthenticated — call this
+    first to discover how to authenticate.
     """
-    required = admin_auth.configured()
+    live_principals = auth.PRINCIPALS.count_live()
+    is_configured = auth.configured()
+    if live_principals:
+        auth_mode = "principals"
+    elif admin_auth.configured():
+        auth_mode = "password"
+    else:
+        auth_mode = "disabled"
     return {
-        "password_required": required,
-        "auth_mode": "password" if required else "disabled",
-        "roles": ["admin"] if required else [],
+        "password_required": is_configured,
+        "auth_mode": auth_mode,
+        "roles": list(auth.ROLES) if is_configured else [],
+        "sessions": is_configured,
+        "principals": live_principals,
+        "legacy_password": bool(admin_auth.configured()),
     }
+
+
+class LoginRequest(BaseModel):
+    """Body for `POST /auth/session`."""
+
+    name: str = ""
+    password: str = ""
+
+
+class PrincipalRequest(BaseModel):
+    """Body for `POST /auth/principals`."""
+
+    name: str
+    role: str = ROLE_VIEWER
+    password: str
+    expires_at: Optional[str] = None
+
+
+@app.post(
+    "/auth/session",
+    tags=["auth"],
+    summary="Log in and get a bearer session token",
+    status_code=201,
+)
+def create_session(body: LoginRequest, request: Request, response: Response):
+    """Exchange `{"name": ..., "password": ...}` for a session token.
+
+    Returns `{"token", "token_type": "bearer", "expires_at", "principal":
+    {"name", "role"}, "ttl_seconds", "idle_timeout_seconds"}`. Send the token as
+    `Authorization: Bearer <token>` on subsequent calls; log out with
+    `DELETE /auth/session`.
+
+    The token is shown **once** — only its SHA-256 is stored. Sessions expire after
+    `ADMIN_SESSION_TTL_SECONDS` (default 3600) and after `ADMIN_SESSION_IDLE_SECONDS`
+    (default 900) of inactivity. With only the legacy `ADMIN_PASSWORD` configured,
+    any name (or none, or `admin`) works; with principals, `name` must match one.
+
+    Failed logins are counted per `(identity, client IP)` and answered with 429 +
+    `Retry-After` once `ADMIN_LOGIN_MAX_ATTEMPTS` (default 5) is exceeded, with
+    exponential backoff; the response never reveals whether the name exists. Key the
+    lockout on the real client by setting `TRUST_PROXY_HEADERS=true` behind a proxy.
+    """
+    result = auth.login(body.name, body.password, request)
+    response.headers["Cache-Control"] = "no-store"
+    return result
+
+
+@app.delete("/auth/session", tags=["auth"], summary="Log out (revoke your session)")
+def delete_session(request: Request):
+    """Revoke the session token used for this request. Requires a session token.
+
+    Idempotent: `{"logged_out": false}` means it was already gone. HTTP Basic
+    callers have no session to revoke and get 400.
+    """
+    principal = require_roles(request, ROLE_VIEWER)
+    try:
+        return auth.logout(principal)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/auth/me", tags=["auth"], summary="Who am I, and what may I do")
+def whoami(request: Request):
+    """The caller's identity, role and session expiry.
+
+    Returns `{"authenticated": bool, "name", "role", "method", "roles",
+    "session_expires_at", "session_idle_timeout_seconds"}`. `method` is `session`,
+    `password`, `legacy` (the shared `ADMIN_PASSWORD`) or `anonymous` (read-only
+    mode). A UI uses this to hide actions the caller cannot perform — the server
+    enforces the role on every call regardless.
+    """
+    principal = require_roles(request, ROLE_VIEWER)
+    session = (
+        auth.SESSIONS.get(principal.session_hash) if principal.session_hash else None
+    )
+    return {
+        "authenticated": principal.method != "anonymous",
+        "name": principal.name,
+        "role": principal.role,
+        "method": principal.method,
+        "roles": list(auth.ROLES),
+        "session_expires_at": session.get("expires_at") if session else None,
+        "session_idle_timeout_seconds": auth.session_idle_seconds(),
+    }
+
+
+@app.get("/auth/sessions", tags=["auth"], summary="List live admin sessions (admin)")
+def get_sessions(request: Request):
+    """Every live admin session, labelled with its principal. Requires `admin`.
+
+    Returns `{"sessions": [...]}` with `session_id` (a short prefix you pass to
+    `DELETE /auth/sessions/{id}`), principal, timestamps, `client_ip`, `user_agent`
+    and whether it has expired. Never returns a token or its hash. Sessions opened
+    with the shared password have no principal row, so they do not appear here.
+    """
+    require_roles(request, ROLE_ADMIN)
+    return {"sessions": auth.list_sessions()}
+
+
+@app.delete(
+    "/auth/sessions/{session_id}",
+    tags=["auth"],
+    summary="Revoke one admin session (admin)",
+)
+def delete_session_by_id(session_id: str, request: Request):
+    """Revoke one session by the short id from `GET /auth/sessions`. Requires `admin`.
+
+    Use it for "sign that device out". To revoke a person, revoke the principal
+    (`DELETE /auth/principals/{id}`) — that closes their sessions too. Responds 404
+    for an unknown id and 422 for an id shorter than 6 characters.
+    """
+    require_roles(request, ROLE_ADMIN)
+    try:
+        return auth.revoke_session(session_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.get("/auth/principals", tags=["auth"], summary="List admin principals (admin)")
+def get_principals(request: Request):
+    """Admin identities and their roles. Requires `admin`.
+
+    Returns `{"principals": [{"principal_id", "name", "role", "created_at",
+    "expires_at", "revoked_at", "last_seen_at", "active"}], "roles": [...]}`. Never
+    returns a password or its hash. Revoked principals stay listed (`active: false`)
+    so their name stays reserved and older audit entries stay readable.
+    """
+    require_roles(request, ROLE_ADMIN)
+    return {"principals": auth.list_principals(), "roles": list(auth.ROLES)}
+
+
+@app.post(
+    "/auth/principals",
+    tags=["auth"],
+    summary="Create an admin principal (admin)",
+    status_code=201,
+)
+def create_principal(body: PrincipalRequest, request: Request, response: Response):
+    """Create a named identity with a role. Requires `admin`.
+
+    Body: `{"name": "alice", "role": "approver", "password": "...",
+    "expires_at": null}`. Roles: `viewer` < `operator` < `approver` < `admin`; a
+    role satisfies every role below it. `operator` proposes and applies approved
+    revisions, `approver` approves/rejects/rolls back — keeping those separate is
+    what makes the two-phase push (#99, #103) an approval rather than a formality.
+
+    The password is stored **only** as a scrypt hash (a fast hash of a human
+    password is an offline crack waiting to happen) and is never returned. Responds
+    409 if the name is taken (including by a revoked principal) and 422 for an
+    unknown role, a password under 8 characters, or a malformed `expires_at`.
+    """
+    require_roles(request, ROLE_ADMIN)
+    try:
+        record = auth.create_principal(
+            body.name, body.role, body.password, expires_at=body.expires_at
+        )
+    except ValueError as exc:
+        status = 409 if "already taken" in str(exc) else 422
+        raise HTTPException(status_code=status, detail=str(exc))
+    response.headers["Cache-Control"] = "no-store"
+    return record
+
+
+@app.delete(
+    "/auth/principals/{principal_id}",
+    tags=["auth"],
+    summary="Revoke an admin principal (admin)",
+)
+def delete_principal(principal_id: str, request: Request):
+    """Revoke a principal and close every session it holds. Requires `admin`.
+
+    Returns `{"principal_id", "name", "revoked": bool, "sessions_revoked": n}`. The
+    row is kept so the name stays reserved and historical audit entries still
+    resolve. A revoked name cannot be re-created — deliberately, so "remove alice
+    then re-add alice" cannot silently hand her identity to someone else. Responds
+    404 for an unknown id.
+    """
+    require_roles(request, ROLE_ADMIN)
+    try:
+        return auth.revoke_principal(principal_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
 
 
 @app.get("/auth/verify", tags=["auth"], summary="Verify admin credentials")
 def verify_auth(request: Request):
-    """Verify admin credentials; returns 200 `{"authenticated": true}` or 401.
+    """Verify credentials; returns 200 `{"authenticated": true, "role": str}` or 401.
 
-    Requires HTTP Basic auth when an admin credential is configured (401
-    otherwise). Useful as a preflight credential check for agents before calling
-    other admin endpoints. Always succeeds in read-only mode (no credential).
+    Accepts a session token (`Authorization: Bearer <token>`) or HTTP Basic
+    (`name:password`, or the legacy `ADMIN_PASSWORD`). Any role passes — this only
+    proves the credential works. In read-only mode (nothing configured) it succeeds
+    as an anonymous `viewer`.
+
+    Failed Basic attempts feed the same lockout as `POST /auth/session` (429 +
+    `Retry-After` once `ADMIN_LOGIN_MAX_ATTEMPTS` is exceeded), so this endpoint is
+    not an unlimited credential oracle. Session tokens are not counted — 256 random
+    bits are not guessable, and counting them would only fill the lockout map.
     """
-    if not require_admin(request):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
-    return {"authenticated": True}
+    principal = require_roles(request, ROLE_VIEWER)
+    return {"authenticated": principal.method != "anonymous", "role": principal.role}
 
 
 AGENT_METRICS: Dict[str, Dict[str, Any]] = {}
@@ -909,15 +1128,14 @@ def get_agent_compliance(agent_id: str):
         }
 
 
-@app.post("/compliance/check/{agent_id}", tags=["compliance"], summary="Trigger a compliance check for one agent (admin)")
+@app.post("/compliance/check/{agent_id}", tags=["compliance"], summary="Trigger a compliance check for one agent (operator)")
 def check_compliance(agent_id: str, request: Request):
-    """Force a compliance evaluation for an agent. Requires admin auth (401 otherwise).
+    """Force a compliance evaluation for an agent. Requires `operator`.
 
-    Unlike `GET /agent/{id}/compliance`, this is a mutating/admin action and fails
-    with 503 when OPA is not enabled. Responds 404 if the agent is unknown.
+    Unlike `GET /agent/{id}/compliance`, this is a mutating action and fails with
+    503 when OPA is not enabled. Responds 404 if the agent is unknown.
     """
-    if not require_admin(request):
-        raise HTTPException(status_code=401, detail="Authentication required")
+    require_roles(request, ROLE_OPERATOR)
     
     agent = AGENT_REGISTRY.get(agent_id)
     if not agent:
@@ -1022,51 +1240,53 @@ def validate_policies():
     }
 
 
-@app.get("/alerts", tags=["alerts"], summary="Get alert configuration (admin)")
+@app.get("/alerts", tags=["alerts"], summary="Get alert configuration (redacted)")
 def get_alerts(request: Request):
-    """Return the current alert configuration. Requires admin auth (401 otherwise).
+    """Return the current alert configuration, secrets redacted. Requires `viewer`.
 
     Returns `{"types": [...], "events": {...}, "config": {...}}` — the valid event
-    types, the available dispatcher/event settings, and the live config (webhook
-    URL + per-event enablement/templates).
+    types, the available dispatcher/event settings, and the live config (per-event
+    enablement/templates).
+
+    **Redacted:** `webhook_url` comes back as `scheme://host/***REDACTED***` and
+    `headers` as `***REDACTED***`, because a webhook path *is* a bearer secret. Send
+    the sentinel back unchanged on `PUT /alerts` and the stored value is kept — so a
+    UI that round-trips this response cannot wipe the webhook.
     """
-    if not require_admin(request):
-        raise HTTPException(status_code=401, detail="Authentication required")
-    
-    config = get_alert_config()
+    require_roles(request, ROLE_VIEWER)
     return {
         "types": ALERT_TYPES,
         "events": ALERT_EVENTS,
-        "config": config,
+        "config": redact_config(get_alert_config()),
     }
 
 
-@app.put("/alerts", tags=["alerts"], summary="Update alert configuration (admin)")
+@app.put("/alerts", tags=["alerts"], summary="Update alert configuration (operator)")
 def put_alerts(request: Request, body: dict):
-    """Replace/merge the alert configuration. Requires admin auth (401 otherwise).
+    """Merge the alert configuration. Requires `operator`.
 
-    Body is the config object (same shape `GET /alerts` returns under `config`);
-    validation happens in `server/alerts.py`. Returns `{"config": {...}}` with the
-    stored result. Note: currently in-memory only — see issue #50 for persistence.
+    Body is the config object (same shape `GET /alerts` returns under `config`).
+    A field sent as `***REDACTED***` keeps its stored value, so feeding a fetched
+    config back in is safe. Returns `{"config": {...}}` with the stored result,
+    **redacted** for the same reason `GET /alerts` is. Config persists in SQLite
+    (`alert_config` table in `data/opamp.db`).
     """
-    if not require_admin(request):
-        raise HTTPException(status_code=401, detail="Authentication required")
-    
-    config = update_alert_config(body)
-    return {"config": config}
+    require_roles(request, ROLE_OPERATOR)
+    config = update_alert_config(merge_redacted(body))
+    return {"config": redact_config(config)}
 
 
-@app.post("/alerts/test", tags=["alerts"], summary="Send a test alert (admin)")
+@app.post("/alerts/test", tags=["alerts"], summary="Send a test alert (operator)")
 def test_alerts(request: Request, body: dict = None):
-    """Fire a test alert through the configured dispatcher. Requires admin auth.
+    """Fire a test alert through the configured dispatcher. Requires `operator`.
 
     Optional body: `{"event_type": "new_agent", "event_config": {...}}`. When
     `event_config` is supplied it is used for this one send and then reverted
-    (handy for validating unsaved webhook settings). Returns
-    `{"success": bool, "error": str|null}`.
+    (handy for validating unsaved webhook settings); any `***REDACTED***` value in
+    it is filled from the stored config first. Returns `{"success": bool,
+    "error": str|null}`.
     """
-    if not require_admin(request):
-        raise HTTPException(status_code=401, detail="Authentication required")
+    require_roles(request, ROLE_OPERATOR)
     
     if body is None:
         body = {}
@@ -1112,16 +1332,16 @@ def health_check():
 
 @app.get("/config/posture", tags=["config"], summary="Full config push security posture")
 def config_posture(request: Request):
-    """Full posture detail for operators and the UI — admin auth required.
+    """Full posture detail for operators and the UI — requires `viewer`.
 
     `GET /health` carries the one-line summary a banner needs; this endpoint adds
     *why*: which requirements are met and which are not, where the admin
     credential came from, and whether the development override is in force. No
-    secrets are returned (never the password, never a token). 401 without valid
-    credentials whenever an admin credential is configured.
+    secrets are returned (never a password, never a token). Reads nothing an
+    attacker cannot learn from `/health` plus one guess, so any role — including an
+    anonymous viewer in read-only mode — may call it.
     """
-    if not require_admin(request):
-        raise HTTPException(status_code=401, detail="Invalid credentials")
+    require_roles(request, ROLE_VIEWER)
     reqs = posture.requirements()
     return {
         "config_push": posture.posture(),

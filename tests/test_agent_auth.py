@@ -343,8 +343,10 @@ class TestTokensStaySecret:
             assert agent_auth.hash_token(token) not in body
 
     def test_issue_requires_admin(self, client, monkeypatch):
-        monkeypatch.setattr(admin_auth, "ADMIN_PASSWORD", "")  # read-only mode = open
-        assert client.post(f"/agents/{VICTIM_UID.hex()}/token").status_code == 201
+        # #95 closed the "no credential = open" hole: read-only mode is now
+        # read-open but write-closed, so minting a fleet identity needs a credential.
+        monkeypatch.setattr(admin_auth, "ADMIN_PASSWORD", "")
+        assert client.post(f"/agents/{VICTIM_UID.hex()}/token").status_code == 403
         monkeypatch.setattr(admin_auth, "ADMIN_PASSWORD", ADMIN)
         assert client.post(f"/agents/{ATTACKER_UID.hex()}/token").status_code == 401
         assert client.delete(f"/agents/{ATTACKER_UID.hex()}/token").status_code == 401

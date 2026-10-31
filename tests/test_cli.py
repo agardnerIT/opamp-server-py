@@ -44,6 +44,11 @@ def effective_config() -> str:
         "body": base64.b64encode(COLLECTOR_YAML).decode()}}}})
 
 
+# Admin credential for live-ops tests: since #95 privileged endpoints are closed
+# when nothing is configured, so any test touching one authenticates explicitly.
+ADMIN_PW = "cli-pw-123456"
+
+
 def register_agent(agent_id, with_components=False):
     state = AgentState(instance_uid=f"cli-test-{agent_id}".encode(), agent_id=agent_id)
     if with_components:
@@ -55,9 +60,13 @@ def register_agent(agent_id, with_components=False):
 
 @pytest.fixture
 def live(monkeypatch):
-    """Route cli.main's client factory to the in-process app."""
+    """Route cli.main's client factory to the in-process app (with an admin credential)."""
     import cli.main as cli_main
     from client.opamp_client import OpampClient
+    from server import admin_auth
+
+    monkeypatch.setattr(admin_auth, "ADMIN_PASSWORD", ADMIN_PW)
+    monkeypatch.setattr(admin_auth, "PASSWORD_SOURCE", "env")
 
     transport = InProcessASGITransport(server_app)
 
@@ -66,6 +75,7 @@ def live(monkeypatch):
             base_url="http://testserver",
             transport=transport,
             password=cli_main._settings.password,
+            token=cli_main._settings.token,
         )
 
     monkeypatch.setattr(cli_main, "_client", factory)
@@ -95,10 +105,11 @@ class TestLiveOps:
         assert "password_required" in data
 
     def test_config_posture(self, live):
-        data = parse(run("config", "posture"))
+        data = parse(run("--password", ADMIN_PW, "config", "posture"))
         assert data["config_push"]["enabled"] is False
         assert data["override"] is False
-        assert "unmet" in data and len(data["unmet"]) == 3
+        # admin auth is met (the fixture configures it); agent auth and TLS are not.
+        assert "unmet" in data and len(data["unmet"]) == 2
 
     def test_agents_list_and_get(self, live):
         register_agent("1111111111111111")
@@ -155,16 +166,17 @@ class TestLiveOps:
         assert "total" in data and "not_evaluated" in data
 
     def test_alerts_get_and_test(self, live):
-        data = parse(run("alerts", "get"))
+        # `GET /alerts` needs viewer, `POST /alerts/test` needs operator (#95).
+        data = parse(run("--password", ADMIN_PW, "alerts", "get"))
         assert "config" in data
-        data = parse(run("alerts", "test", "--event-type", "new_agent"))
+        data = parse(run("--password", ADMIN_PW, "alerts", "test", "--event-type", "new_agent"))
         assert "success" in data
 
     def test_alerts_set_from_file(self, live, tmp_path):
-        current = parse(run("alerts", "get"))["config"]
+        current = parse(run("--password", ADMIN_PW, "alerts", "get"))["config"]
         cfg = tmp_path / "alerts.json"
         cfg.write_text(json.dumps(current))
-        data = parse(run("alerts", "set", f"@{cfg}"))
+        data = parse(run("--password", ADMIN_PW, "alerts", "set", f"@{cfg}"))
         assert "config" in data
 
     def test_pretty_flag(self, live):
@@ -192,6 +204,51 @@ class TestLiveAdmin:
         monkeypatch.setattr("server.admin_auth.ADMIN_PASSWORD", "pw123")
         result = run("--password", "pw123", "alerts", "get")
         assert result.exit_code == 0, result.output
+
+    def test_whoami_and_auth_status(self, live):
+        data = parse(run("--password", ADMIN_PW, "auth", "whoami"))
+        assert data["role"] == "admin" and data["method"] in ("legacy", "password")
+        status = parse(run("auth", "status"))  # unauthenticated: no credential needed
+        assert status["auth_mode"] in ("password", "principals")
+
+    def test_login_token_roundtrip(self, live):
+        """`auth login --raw` -> `--token` is the documented session flow."""
+        login = run("--password", ADMIN_PW, "auth", "login", "--raw")
+        assert login.exit_code == 0, login.output
+        token = login.output.strip()
+        assert token.startswith("opamp_admin_")
+        me = parse(run("--token", token, "auth", "whoami"))
+        assert me["method"] == "session" and me["authenticated"] is True
+        out = parse(run("--token", token, "auth", "logout"))
+        assert out["logged_out"] is True
+
+    def test_principal_create_list_revoke(self, live):
+        created = parse(
+            run(
+                "--password", ADMIN_PW, "auth", "principals", "create", "ops-bot",
+                "--role", "operator", "--password", "ops-bot-pw-123",
+            )
+        )
+        assert created["role"] == "operator"
+        listed = parse(run("--password", ADMIN_PW, "auth", "principals", "list"))
+        assert any(p["name"] == "ops-bot" for p in listed["principals"])
+        revoked = parse(
+            run("--password", ADMIN_PW, "auth", "principals", "revoke", created["principal_id"])
+        )
+        assert revoked["revoked"] is True
+
+    def test_principal_create_bad_role_is_structured_error(self, live):
+        result = run(
+            "--password", ADMIN_PW, "auth", "principals", "create", "x",
+            "--role", "root", "--password", "pw-123456789",
+        )
+        assert result.exit_code == 1
+        assert json.loads(result.output)["error"] == "HTTP 422"
+
+    def test_sessions_list(self, live):
+        run("--password", ADMIN_PW, "auth", "login", "--raw")
+        data = parse(run("--password", ADMIN_PW, "auth", "sessions", "list"))
+        assert any(s["principal"] for s in data["sessions"])
 
 
 # ---------------------------------------------------------------- offline mode

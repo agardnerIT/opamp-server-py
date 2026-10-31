@@ -70,6 +70,14 @@ if password:
     encoded = base64.b64encode(f":{password}".encode()).decode()
     headers = {"Authorization": f"Basic {encoded}"}
 else:
+    # Read-only mode (#95): no credential is configured, so every privileged write
+    # would answer 403. Say so instead of showing a form that cannot work.
+    st.info(
+        "This server has no admin credential configured, so it is **read-only**. "
+        "Set `ADMIN_PASSWORD` (or create a principal with "
+        "`opampctl auth principals create`) and restart to enable the Admin page. "
+        "Session-token auth for this UI lands with #105."
+    )
     st.stop()
 
 admin_tabs = st.tabs(["Alerts", "Compliance"])

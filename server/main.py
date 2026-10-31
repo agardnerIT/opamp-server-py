@@ -1,5 +1,6 @@
 import asyncio
 import binascii
+import json
 import os
 from pathlib import Path
 import prometheus_client as prom_client
@@ -559,39 +560,56 @@ def cleanup_stale_agents():
         update_metrics()
 
 
-def _apply_status_report(agent_id: str, agent_dict: Dict[str, Any]) -> None:
-    """Apply the status fields present in any valid agent message."""
+HEARTBEAT_PERSIST_SECONDS = 60  # bounds post-restart heartbeat skew (#109)
+
+
+def _apply_status_report(agent_id: str, agent_dict: Dict[str, Any], persist: bool = True) -> bool:
+    """Apply the status fields present in any valid agent message.
+
+    Fields are collected and applied to the in-memory state in one pass, then
+    persisted at most once: a message that changes nothing performs no write at
+    all, and one that changes N field groups performs exactly one (#109).
+    """
+    updates: Dict[str, Any] = {}
+
     if 'health' in agent_dict and agent_dict['health']:
-        healthy = agent_dict['health'].get('healthy', False)
-        AGENT_REGISTRY.update(agent_id, healthy=healthy)
-        PROM_AGENT_HEALTH.labels(agent_id=agent_id).set(1 if healthy else 0)
+        updates['healthy'] = agent_dict['health'].get('healthy', False)
+        PROM_AGENT_HEALTH.labels(agent_id=agent_id).set(1 if updates['healthy'] else 0)
         PROM_MESSAGES_RECEIVED.labels(message_type="health").inc()
 
     if 'agentDescription' in agent_dict:
-        AGENT_REGISTRY.update(agent_id, description=agent_dict['agentDescription'])
+        updates['description'] = agent_dict['agentDescription']
 
     if 'effectiveConfig' in agent_dict:
-        import json
-        config_str = json.dumps(agent_dict['effectiveConfig'])
-        AGENT_REGISTRY.update(agent_id, effective_config=config_str)
+        updates['effective_config'] = json.dumps(agent_dict['effectiveConfig'])
         PROM_MESSAGES_RECEIVED.labels(message_type="effective_config").inc()
 
     if 'health' in agent_dict:
-        AGENT_REGISTRY.update(agent_id, health=agent_dict['health'])
+        updates['health'] = agent_dict['health']
 
     if 'availableComponents' in agent_dict:
-        AGENT_REGISTRY.update(agent_id, available_components=agent_dict['availableComponents'])
+        updates['available_components'] = agent_dict['availableComponents']
         PROM_MESSAGES_RECEIVED.labels(message_type="available_components").inc()
 
     if 'packageStatuses' in agent_dict:
-        AGENT_REGISTRY.update(agent_id, package_statuses=agent_dict['packageStatuses'])
+        updates['package_statuses'] = agent_dict['packageStatuses']
         PROM_MESSAGES_RECEIVED.labels(message_type="package_status").inc()
 
     if 'remoteConfigStatus' in agent_dict:
-        status = agent_dict['remoteConfigStatus'].get('status', 'UNSET')
-        AGENT_REGISTRY.update(agent_id, remote_config_status=status)
+        updates['remote_config_status'] = agent_dict['remoteConfigStatus'].get('status', 'UNSET')
 
     PROM_MESSAGES_RECEIVED.labels(message_type="heartbeat").inc()
+
+    changed = AGENT_REGISTRY.update(agent_id, persist=False, **updates)
+    if not persist:
+        return changed
+
+    # Steady state: nothing changed, so skip the write unless the stored
+    # heartbeat is old enough that a restart would look like a stale fleet.
+    if changed or AGENT_REGISTRY.heartbeat_persist_due(agent_id, HEARTBEAT_PERSIST_SECONDS):
+        AGENT_REGISTRY.persist(agent_id)
+        return True
+    return False
 
 
 def _handle_agent_message(
@@ -664,15 +682,14 @@ def _handle_agent_message(
             agent_id=agent_id,
             capabilities=agent_msg.capabilities,
             description=agent_dict.get("agentDescription", {}),
-        ))
-        AGENT_REGISTRY.update(agent_id, last_heartbeat=utcnow())
+        ), persist=False)
         response.flags = ServerToAgentFlags.ServerToAgentFlags_ReportFullState
         update_metrics()
         
         send_new_agent_alert(agent_id)
-    else:
-        AGENT_REGISTRY.update(agent_id, last_heartbeat=utcnow())
 
+    # One write for the whole message (#109): `_apply_status_report` batches the
+    # field groups and flushes the row at most once, including for a new agent.
     _apply_status_report(agent_id, agent_dict)
     
     disconnected = 'agentDisconnect' in agent_dict

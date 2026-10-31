@@ -257,6 +257,44 @@ opampctl --password "$ADMIN_PASSWORD" health   # same, plus config_push
 curl -s -u ":$ADMIN_PASSWORD" localhost:4320/config/posture | jq .requirements
 ```
 
+## Capacity and deployment topology
+
+**Run exactly one worker.** `AGENT_REGISTRY` is a per-process in-memory dict, so
+`--workers > 1` gives each worker only the agents it has personally seen: `GET
+/agents`, stale-agent cleanup and config-push targeting then disagree per worker,
+and writes serialise on the SQLite write lock anyway (measured: +11% throughput
+for p99 93 ms). One worker per container, scale by running more containers behind
+a proxy.
+
+Measured on an Apple Silicon laptop (Python 3.13, uvicorn, WAL, token auth on,
+2 KB config per message), reproducible with
+`scripts/bench_opamp_capacity.py`:
+
+| scenario | msg/s | p50 / p99 |
+|---|---|---|
+| before #109 (5 full-row writes per heartbeat) | 452 | 2.0 / — ms |
+| one worker, 8 concurrent clients, 2 client processes | **1,728** | 2.6 / 5.3 ms |
+| one worker, 32 concurrent clients, 4 client processes | 1,983 | 10.5 / 32.0 ms |
+| handler only, in process (no uvicorn/auth) | ~27,000 | — |
+
+A heartbeat that changes nothing now performs **zero** writes; a message that
+changes N field groups performs exactly one. The stored `last_heartbeat` is
+flushed at most once a minute per agent, so a restart sees heartbeats at most
+60 s stale.
+
+At 50% headroom that is roughly **26,000 agents at a 30 s poll**, 8,600 at 10 s,
+4,300 at 5 s per worker — but model a restart storm (every agent reconnecting at
+once) against the p99 column, not the throughput column.
+
+```bash
+python3 scripts/bench_opamp_capacity.py                                  # one client process
+BENCH_CLIENTS=2 BENCH_THREADS=4 BENCH_AGENTS=2000 python3 scripts/bench_opamp_capacity.py
+BENCH_WORKERS=4 python3 scripts/bench_opamp_capacity.py                  # why not to
+```
+
+One client process saturates its own GIL at ~1,200 msg/s, so a single-process
+client under-reports server capacity — use `BENCH_CLIENTS` to spread the load.
+
 ## Environment Variables
 
 | Variable | Default | Description |

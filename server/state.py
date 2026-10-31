@@ -1,6 +1,7 @@
 import json
 import os
 import sqlite3
+import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
@@ -888,27 +889,68 @@ class AgentState:
 
 
 class AgentRegistry:
+    """In-memory agent registry backed by SQLite (`agents` table).
+
+    Writes are the capacity ceiling on the OpAMP message path (#109), so callers
+    may batch: `update(persist=False)` applies fields in memory and `persist()`
+    flushes the row once. `update()` returns whether anything actually changed so
+    a no-op heartbeat can skip the write entirely.
+    """
+
     def __init__(self):
         self._store = SQLiteAgentStore()
         self._agents: Dict[str, AgentState] = self._store.load_all()
+        # agent_id -> monotonic time of the last successful persist
+        self._persisted_at: Dict[str, float] = {}
 
-    def register(self, agent_id: str, state: AgentState) -> None:
+    def register(self, agent_id: str, state: AgentState, persist: bool = True) -> None:
         self._agents[agent_id] = state
-        self._store.upsert(state)
+        if persist:
+            self.persist(agent_id)
 
     def get(self, agent_id: str) -> Optional[AgentState]:
         return self._agents.get(agent_id)
 
-    def update(self, agent_id: str, **kwargs) -> None:
-        if agent_id in self._agents:
-            for key, value in kwargs.items():
-                setattr(self._agents[agent_id], key, value)
-            self._agents[agent_id].last_heartbeat = utcnow()
-            self._store.upsert(self._agents[agent_id])
+    def update(self, agent_id: str, persist: bool = True, **kwargs) -> bool:
+        """Apply `kwargs` to the in-memory state; return True if a value changed.
+
+        `last_heartbeat` alone never counts as a change: it moves on every
+        message and persisting it is what made steady state write-bound.
+        """
+        agent = self._agents.get(agent_id)
+        if agent is None:
+            return False
+        changed = False
+        for key, value in kwargs.items():
+            if getattr(agent, key, None) != value:
+                setattr(agent, key, value)
+                changed = True
+        agent.last_heartbeat = utcnow()
+        if persist:
+            self.persist(agent_id)
+        return changed
+
+    def persist(self, agent_id: str) -> None:
+        """Write the whole row once (the only place agents are written)."""
+        agent = self._agents.get(agent_id)
+        if agent is None:
+            return
+        self._store.upsert(agent)
+        self._persisted_at[agent_id] = time.monotonic()
+
+    def heartbeat_persist_due(self, agent_id: str, min_interval: float) -> bool:
+        """True if the stored `last_heartbeat` is stale enough to be worth a write.
+
+        Bounds the recovery skew after a restart to `min_interval` while keeping
+        steady state at ~0 writes.
+        """
+        last = self._persisted_at.get(agent_id)
+        return last is None or (time.monotonic() - last) >= min_interval
 
     def remove(self, agent_id: str) -> bool:
         if agent_id in self._agents:
             del self._agents[agent_id]
+            self._persisted_at.pop(agent_id, None)
             self._store.remove(agent_id)
             return True
         return False

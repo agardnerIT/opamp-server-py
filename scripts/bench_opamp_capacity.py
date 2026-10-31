@@ -6,11 +6,18 @@ what actually bites at fleet scale.
 
     BENCH_AGENTS=2000 BENCH_THREADS=8 BENCH_REQUESTS=150 python3 scripts/bench_opamp_capacity.py
     BENCH_WORKERS=4 python3 scripts/bench_opamp_capacity.py     # multi-worker comparison
+    BENCH_CLIENTS=4 python3 scripts/bench_opamp_capacity.py     # more client processes
+
+One client process is GIL-bound at ~1,200 msg/s, so a single-process client
+under-reports server capacity; `BENCH_CLIENTS` spreads the load over processes.
+Every agent is warmed up before the timed run, so the timed messages are the
+steady state (#109: no status change ⇒ no write).
 
 Numbers from the machine this was written on (baseline for #109): 452 msg/s per
 worker, p50 2.0 ms; 5 SQLite upserts per message; ~38 KB RAM/agent.
 """
 
+import multiprocessing
 import os
 import pathlib
 import shutil
@@ -34,6 +41,7 @@ ADMIN = "bench-pw-123456789"
 AGENTS = int(os.environ.get("BENCH_AGENTS", "2000"))
 THREADS = int(os.environ.get("BENCH_THREADS", "8"))
 PER_THREAD = int(os.environ.get("BENCH_REQUESTS", "150"))
+CLIENTS = int(os.environ.get("BENCH_CLIENTS", "1"))
 CONFIG_BYTES = int(os.environ.get("BENCH_CONFIG_BYTES", "2048"))
 
 
@@ -71,6 +79,67 @@ def rss_mb(pid: int) -> float:
     return int(out.strip() or 0) / 1024
 
 
+def client_process(proc_id: int, tokens: list, config_body: bytes, queue) -> None:
+    """Run `THREADS` keep-alive clients for `PER_THREAD` requests each."""
+    payloads = {
+        uid: build_message(bytes.fromhex(f"{uid:032x}"), uid, config_body)
+        for uid in range(AGENTS)
+    }
+    headers = {
+        uid: {"Authorization": f"Bearer {tokens[uid]}",
+              "Content-Type": "application/x-protobuf"}
+        for uid in range(AGENTS)
+    }
+    url = f"http://127.0.0.1:{PORT}/v1/opamp"
+    latencies: list = []
+    errors: list = []
+    lock = threading.Lock()
+    offset = proc_id * THREADS * PER_THREAD
+
+    def worker(thread_id: int) -> None:
+        client = httpx.Client(limits=httpx.Limits(max_keepalive_connections=4), timeout=30)
+        local = []
+        try:
+            for index in range(PER_THREAD):
+                uid = (offset + thread_id * PER_THREAD + index) % AGENTS
+                start = time.perf_counter()
+                try:
+                    resp = client.post(url, content=payloads[uid], headers=headers[uid])
+                    if resp.status_code != 200:
+                        with lock:
+                            errors.append(resp.status_code)
+                except Exception as exc:  # noqa: BLE001
+                    with lock:
+                        errors.append(repr(exc)[:80])
+                local.append((time.perf_counter() - start) * 1000)
+        finally:
+            client.close()
+        with lock:
+            latencies.extend(local)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(THREADS)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    queue.put((latencies, errors))
+
+
+def warm_up(tokens: list, config_body: bytes) -> None:
+    """One message per agent before timing: registration writes are not steady state."""
+    client = httpx.Client(timeout=30)
+    try:
+        for uid in range(AGENTS):
+            client.post(
+                f"http://127.0.0.1:{PORT}/v1/opamp",
+                content=build_message(bytes.fromhex(f"{uid:032x}"), uid, config_body),
+                headers={"Authorization": f"Bearer {tokens[uid]}",
+                         "Content-Type": "application/x-protobuf"},
+            )
+    finally:
+        client.close()
+
+
 def main() -> None:
     shutil.rmtree(DATA, ignore_errors=True)
     DATA.mkdir(parents=True)
@@ -103,52 +172,27 @@ def main() -> None:
             raise SystemExit("server did not start")
 
         config_body = b"receivers: [otlp]\nprocessors: [batch]\nexporters: [debug]\n" + b"#" * CONFIG_BYTES
-        payloads = {
-            uid: build_message(bytes.fromhex(f"{uid:032x}"), uid, config_body)
-            for uid in range(AGENTS)
-        }
-        headers = {
-            uid: {"Authorization": f"Bearer {tokens[uid]}",
-                  "Content-Type": "application/x-protobuf"}
-            for uid in range(AGENTS)
-        }
 
         base_rss = rss_mb(server.pid)
-        latencies: list = []
-        errors: list = []
-        lock = threading.Lock()
-        url = f"http://127.0.0.1:{PORT}/v1/opamp"
+        warm_up(tokens, config_body)
 
-        def worker(thread_id: int) -> None:
-            client = httpx.Client(limits=httpx.Limits(max_keepalive_connections=4), timeout=30)
-            local = []
-            try:
-                for index in range(PER_THREAD):
-                    uid = (thread_id * PER_THREAD + index) % AGENTS
-                    start = time.perf_counter()
-                    try:
-                        resp = client.post(url, content=payloads[uid], headers=headers[uid])
-                        if resp.status_code != 200:
-                            with lock:
-                                errors.append(resp.status_code)
-                    except Exception as exc:  # noqa: BLE001
-                        with lock:
-                            errors.append(repr(exc)[:80])
-                    local.append((time.perf_counter() - start) * 1000)
-            finally:
-                client.close()
-            with lock:
-                latencies.extend(local)
-
-        threads = [threading.Thread(target=worker, args=(i,)) for i in range(THREADS)]
+        queue = multiprocessing.Queue()
+        clients = [
+            multiprocessing.Process(target=client_process,
+                                    args=(i, tokens, config_body, queue))
+            for i in range(CLIENTS)
+        ]
         start = time.perf_counter()
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
+        for client in clients:
+            client.start()
+        results = [queue.get() for _ in clients]
+        for client in clients:
+            client.join()
         elapsed = time.perf_counter() - start
 
-        total = THREADS * PER_THREAD
+        latencies = [value for values, _ in results for value in values]
+        errors = [error for _, errs in results for error in errs]
+        total = CLIENTS * THREADS * PER_THREAD
         rps = total / elapsed
         latencies.sort()
         peak_rss = rss_mb(server.pid)
@@ -160,7 +204,8 @@ def main() -> None:
 
         print(f"agents seeded        : {AGENTS} (credentials) / {rows} registered by traffic")
         print(f"config body          : {CONFIG_BYTES} bytes per message")
-        print(f"requests             : {total} over {elapsed:.2f}s across {THREADS} keep-alive clients")
+        print(f"load                 : {CLIENTS} process(es) x {THREADS} keep-alive clients, "
+              f"{total} requests over {elapsed:.2f}s")
         print(f"throughput           : {rps:,.0f} OpAMP msg/s")
         print(f"latency p50/p95/p99  : {latencies[len(latencies)//2]:.1f} / "
               f"{latencies[int(len(latencies)*0.95)]:.1f} / "

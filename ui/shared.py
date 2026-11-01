@@ -10,6 +10,7 @@ import pandas as pd
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from ui.config_view import display_config_yaml  # #68: streamlit-free, so it is testable
 from server.manifest import generate_manifest, generate_ocb_command
 from server.posture import posture_warning
 from server.reports import (  # re-exported: report logic lives in server/reports.py

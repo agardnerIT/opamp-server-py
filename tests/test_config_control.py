@@ -830,3 +830,35 @@ def test_audit_records_every_lifecycle_decision(client, registered):
         for row in client.get("/audit?limit=50", headers=admin_headers()).json()["entries"]
     }
     assert {"config.propose", "config.approve", "config.rollback"} <= actions
+
+
+def test_a_role_on_a_config_object_reaches_the_agent(client, registered):
+    """`AgentConfigObject.role` (v0.20.0, #66/#68) survives the whole push path.
+
+    The realistic shape: the expanded config under `""` and the raw one under
+    `"raw"`, each tagged with its role. Dropping the role anywhere between validate
+    and deliver would report success and hand the agent a different object.
+    """
+    config_map = {
+        "": {**CONFIG[""], "role": "expanded"},
+        "raw": {"body": "receivers: [otlp]\n", "content_type": "text/yaml", "role": "raw"},
+    }
+
+    proposed = propose(client, config_map=config_map)
+    assert proposed.status_code == 200, proposed.text
+    approved = approve(client, proposed.json()["proposal_id"])
+    assert approved.status_code == 200, approved.text
+
+    delivered = reply(agent_message())
+    assert delivered.HasField("remote_config")
+    objects = delivered.remote_config.config.config_map
+    assert objects[""].role == "expanded"
+    assert objects["raw"].role == "raw"
+    assert objects["raw"].body == b"receivers: [otlp]\n"
+
+    # The hash covers the role, so the agent echoing it back settles the revision.
+    reported = base64.b64encode(delivered.remote_config.config_hash).decode()
+    assert poll(AGENT_ID, status="APPLIED", hash_b64=reported) is False
+
+    view = client.get(f"/agent/{AGENT_ID}/config", headers=admin_headers()).json()
+    assert view["desired"]["config_map"]["raw"]["role"] == "raw"

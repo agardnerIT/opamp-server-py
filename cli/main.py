@@ -218,7 +218,7 @@ def health() -> None:
     _run(lambda oc: oc.health())
 
 
-def _read_config_file(path: Path) -> Dict[str, Any]:
+def _read_config_file(path: Path, role: str = "") -> Dict[str, Any]:
     """Build a one-object config map from a file on disk.
 
     The file *is* the body; `--content-type` describes it. That is the shape a
@@ -229,7 +229,11 @@ def _read_config_file(path: Path) -> Dict[str, Any]:
         body = path.read_text()
     except OSError as exc:
         _fail(f"Cannot read {path}: {exc}")
-    return {"": {"body": body, "content_type": "text/yaml"}}
+    entry: Dict[str, Any] = {"body": body, "content_type": "text/yaml"}
+    if role:
+        # v0.20.0 `AgentConfigObject.role`: agent-defined, carried verbatim (#68).
+        entry["role"] = role
+    return {"": entry}
 
 
 @config_app.command("posture")
@@ -248,13 +252,16 @@ def config_validate(
                               help="Config body to validate"),
     content_type: str = typer.Option("text/yaml", "--content-type",
                                      help="MIME type of the body"),
+    role: str = typer.Option("", "--role",
+                             help="Agent-defined role for this config object (v0.20.0)"),
 ) -> None:
     """Validate a config body without storing it (live server only).
 
     Always exits 0 with `{"valid": bool, "errors": [...], "config_hash": ...}` — an
     invalid config is an answer, not a failure. Use it in CI before proposing.
     """
-    config_map = {"": {"body": file.read_text(), "content_type": content_type}}
+    config_map = _read_config_file(file, role=role)
+    config_map[""]["content_type"] = content_type
     _run(lambda oc: oc.validate_config(config_map))
 
 
@@ -281,6 +288,8 @@ def config_propose(
         None, "--override-reason",
         help="Record why a policy violation is acceptable (audited)",
     ),
+    role: str = typer.Option("", "--role",
+                             help="Agent-defined role for this config object (v0.20.0)"),
     note: Optional[str] = typer.Option(None, "--note", help="Reason, recorded in the audit log"),
 ) -> None:
     """Propose a config revision — drafts it, delivers nothing (operator).
@@ -291,7 +300,7 @@ def config_propose(
     back. An approver must run `opampctl config approve <proposal_id>` before any
     agent receives it.
     """
-    config_map = _read_config_file(file)
+    config_map = _read_config_file(file, role=role)
     config_map[""]["content_type"] = content_type
 
     resolved_agents = [item.strip() for item in (agents or "").split(",") if item.strip()]
@@ -462,6 +471,8 @@ def config_apply(
                                    help="Filter by metadata, repeatable: --attr environment=prod"),
     confirm: bool = typer.Option(False, "--confirm",
                                  help="Required: acknowledge the blast radius"),
+    role: str = typer.Option("", "--role",
+                             help="Agent-defined role for this config object (v0.20.0)"),
     note: Optional[str] = typer.Option(None, "--note", help="Reason, recorded in the audit log"),
 ) -> None:
     """Push one config to many agents (admin, live server only).
@@ -469,7 +480,8 @@ def config_apply(
     Requires `--confirm` and an explicit selector (`--agent` and/or `--attr`). A
     missing selector is refused — it never means "all agents".
     """
-    config_map = {"": {"body": file.read_text(), "content_type": content_type}}
+    config_map = _read_config_file(file, role=role)
+    config_map[""]["content_type"] = content_type
     filters: Dict[str, Any] = {}
     for item in attr:
         key, _, value = item.partition("=")
@@ -988,6 +1000,8 @@ def agents_config_set(
                               help="Config body to push"),
     content_type: str = typer.Option("text/yaml", "--content-type",
                                      help="MIME type of the body"),
+    role: str = typer.Option("", "--role",
+                             help="Agent-defined role for this config object (v0.20.0)"),
     note: Optional[str] = typer.Option(None, "--note",
                                        help="Reason, recorded in the audit log"),
 ) -> None:
@@ -997,7 +1011,7 @@ def agents_config_set(
     agent's next status report, and only when its hash differs — a failed revision
     is never retried automatically.
     """
-    config_map = _read_config_file(file)
+    config_map = _read_config_file(file, role=role)
     config_map[""]["content_type"] = content_type
     _run(lambda oc: oc.set_agent_config(agent_id, config_map, note=note))
 

@@ -12,11 +12,10 @@ from ui.shared import (
     _compliance_badge,
     render_sidebar,
     show_slim_distro_builder_page,
+    display_config_yaml,
     generate_manifest,
     generate_ocb_command,
     get_auth_headers,
-    json_module,
-    yaml,
     base64,
     datetime,
     requests,
@@ -212,105 +211,23 @@ if agent_id_param:
         st.caption("No telemetry data received.")
         
         if effective_config:
-            try:
-                config_data = json_module.loads(effective_config)
-                raw_body = config_data.get("configMap", {}).get("configMap", {}).get("", {}).get("body", "")
-                if isinstance(raw_body, str):
-                    try:
-                        yaml_body = base64.b64decode(raw_body).decode("utf-8")
-                    except Exception:
-                        yaml_body = raw_body
-                elif isinstance(raw_body, bytes):
-                    yaml_body = raw_body.decode("utf-8")
-                else:
-                    yaml_body = str(raw_body)
-                
-                if yaml_body:
-                    config_yaml = yaml.safe_load(yaml_body)
-                    if config_yaml is None:
-                        config_yaml = {}
-                    
-                    def clean_config(d):
-                        if isinstance(d, dict):
-                            result = {}
-                            for k, v in d.items():
-                                if v is None:
-                                    continue
-                                if isinstance(v, str) and v == '':
-                                    continue
-                                if isinstance(v, dict) and v == {}:
-                                    continue
-                                result[k] = clean_config(v)
-                            return result
-                        elif isinstance(d, list):
-                            return [clean_config(i) for i in d if i is not None and i != {}]
-                        return d
-                    
-                    config_yaml = clean_config(config_yaml)
-                    
-                    if "extensions" in config_yaml and "opamp" in config_yaml["extensions"]:
-                        if "server" not in config_yaml["extensions"]["opamp"]:
-                            config_yaml["extensions"]["opamp"]["server"] = {}
-                        if "http" not in config_yaml["extensions"]["opamp"]["server"]:
-                            config_yaml["extensions"]["opamp"]["server"]["http"] = {}
-                        if "endpoint" not in config_yaml["extensions"]["opamp"]["server"]["http"]:
-                            config_yaml["extensions"]["opamp"]["server"]["http"]["endpoint"] = "http://127.0.0.1:4320/v1/opamp"
-                    
-                    if "exporters" in config_yaml and "debug" in config_yaml["exporters"]:
-                        if config_yaml["exporters"]["debug"].get("use_internal_logger"):
-                            config_yaml["exporters"]["debug"].pop("output_paths", None)
-                    
-                    if "receivers" not in config_yaml:
-                        config_yaml["receivers"] = {"otlp": {"protocols": {"grpc": {}, "http": {}}}}
-                    if "processors" not in config_yaml:
-                        config_yaml["processors"] = {"batch": {}}
-                    if "exporters" not in config_yaml:
-                        config_yaml["exporters"] = {"debug": {}}
-                    
-                    existing_pipelines = config_yaml.get("service", {}).get("pipelines", {})
-                    existing_pipelines.setdefault("traces", {
-                        "receivers": ["otlp"],
-                        "processors": ["batch"],
-                        "exporters": ["debug"]
-                    })
-                    
-                    config_yaml["service"] = {
-                        "extensions": ["opamp"],
-                        "pipelines": existing_pipelines,
-                        "telemetry": {"metrics": {
-                            "level": "basic",
-                            "readers": [{
-                                "periodic": {
-                                    "exporter": {
-                                        "otlp": {
-                                            "protocol": "http/protobuf",
-                                            "endpoint": f"http://{SERVER_URL.split('://')[1] if '://' in SERVER_URL else SERVER_URL}/v1/metrics"
-                                        }
-                                    }
-                                }
-                            }]
-                        }}
-                    }
-                    
-                    new_yaml = yaml.dump(config_yaml, default_flow_style=False, sort_keys=False)
-                    
-                    col_btn, col_exp = st.columns([1, 2])
+            new_yaml = display_config_yaml(effective_config)
+            if new_yaml:
+                col_btn, col_exp = st.columns([1, 2])
 
-                    with col_btn:
-                        st.download_button(
-                            "Download Config with Telemetry",
-                            new_yaml,
-                            file_name="collector-config.yaml",
-                            mime="text/yaml",
-                            key="download_telemetry_config"
-                        )
-                    with col_exp:
-                        with st.expander("Show config"):
-                            st.code(new_yaml, language="yaml")
-                else:
-                    st.caption("Config body is empty")
-            except Exception as e:
-                st.caption(f"Could not parse config: {type(e).__name__}")
+                with col_btn:
+                    st.download_button(
+                        "Download Config with Telemetry",
+                        new_yaml,
+                        file_name="collector-config.yaml",
+                        mime="text/yaml",
+                        key="download_telemetry_config",
+                    )
+                with col_exp:
+                    with st.expander("Show config"):
+                        st.code(new_yaml, language="yaml")
+            else:
+                st.caption("No config object in this agent's report is readable as YAML")
     
     st.divider()
     
@@ -468,100 +385,18 @@ if agent_id_param:
         show_config = st.toggle("Show", value=False, key=f"show_config_{selected_id[:8] if selected_id else 'none'}")
     
     if show_config and effective_config:
-        try:
-            config_data = json_module.loads(effective_config)
-            raw_body = config_data.get("configMap", {}).get("configMap", {}).get("", {}).get("body", "")
-            if isinstance(raw_body, str):
-                try:
-                    yaml_body = base64.b64decode(raw_body).decode("utf-8")
-                except Exception:
-                    yaml_body = raw_body
-            elif isinstance(raw_body, bytes):
-                yaml_body = raw_body.decode("utf-8")
-            else:
-                yaml_body = str(raw_body)
-            
-            if yaml_body:
-                config_yaml = yaml.safe_load(yaml_body)
-                if config_yaml is None:
-                    config_yaml = {}
-                
-                def clean_config(d):
-                    if isinstance(d, dict):
-                        result = {}
-                        for k, v in d.items():
-                            if v is None:
-                                continue
-                            if isinstance(v, str) and v == '':
-                                continue
-                            if isinstance(v, dict) and v == {}:
-                                continue
-                            result[k] = clean_config(v)
-                        return result
-                    elif isinstance(d, list):
-                        return [clean_config(i) for i in d if i is not None and i != {}]
-                    return d
-                
-                config_yaml = clean_config(config_yaml)
-                
-                if "extensions" in config_yaml and "opamp" in config_yaml["extensions"]:
-                    if "server" not in config_yaml["extensions"]["opamp"]:
-                        config_yaml["extensions"]["opamp"]["server"] = {}
-                    if "http" not in config_yaml["extensions"]["opamp"]["server"]:
-                        config_yaml["extensions"]["opamp"]["server"]["http"] = {}
-                    if "endpoint" not in config_yaml["extensions"]["opamp"]["server"]["http"]:
-                        config_yaml["extensions"]["opamp"]["server"]["http"]["endpoint"] = "http://127.0.0.1:4320/v1/opamp"
-                
-                if "exporters" in config_yaml and "debug" in config_yaml["exporters"]:
-                    if config_yaml["exporters"]["debug"].get("use_internal_logger"):
-                        config_yaml["exporters"]["debug"].pop("output_paths", None)
-                
-                if "receivers" not in config_yaml:
-                    config_yaml["receivers"] = {"otlp": {"protocols": {"grpc": {}, "http": {}}}}
-                if "processors" not in config_yaml:
-                    config_yaml["processors"] = {"batch": {}}
-                if "exporters" not in config_yaml:
-                    config_yaml["exporters"] = {"debug": {}}
-                
-                existing_pipelines = config_yaml.get("service", {}).get("pipelines", {})
-                existing_pipelines.setdefault("traces", {
-                    "receivers": ["otlp"],
-                    "processors": ["batch"],
-                    "exporters": ["debug"]
-                })
-                
-                config_yaml["service"] = {
-                    "extensions": ["opamp"],
-                    "pipelines": existing_pipelines,
-                    "telemetry": {"metrics": {
-                        "level": "basic",
-                        "readers": [{
-                            "periodic": {
-                                "exporter": {
-                                    "otlp": {
-                                        "protocol": "http/protobuf",
-                                        "endpoint": f"http://{SERVER_URL.split('://')[1] if '://' in SERVER_URL else SERVER_URL}/v1/metrics"
-                                    }
-                                }
-                            }
-                        }]
-                    }}
-                }
-                
-                cleaned_yaml = yaml.dump(config_yaml, default_flow_style=False, sort_keys=False)
-                
-                st.download_button(
-                    "Download Config",
-                    cleaned_yaml,
-                    file_name="collector-config.yaml",
-                    mime="text/yaml",
-                    key=f"download_config_{selected_id[:8] if selected_id else 'none'}"
-                )
-                st.code(cleaned_yaml, language="yaml", height=400)
-            else:
-                st.caption("Failed to parse configuration")
-        except Exception as e:
-            st.caption(f"Error: {e}")
+        cleaned_yaml = display_config_yaml(effective_config)
+        if cleaned_yaml:
+            st.download_button(
+                "Download Config",
+                cleaned_yaml,
+                file_name="collector-config.yaml",
+                mime="text/yaml",
+                key=f"download_config_{selected_id[:8] if selected_id else 'none'}",
+            )
+            st.code(cleaned_yaml, language="yaml", height=400)
+        else:
+            st.caption("No config object in this agent's report is readable as YAML")
     elif effective_config:
         st.caption("Toggle to show configuration")
     else:

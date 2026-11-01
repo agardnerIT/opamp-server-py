@@ -5,13 +5,16 @@ import sqlite3
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Set
-import yaml
+from typing import Optional, Dict, Any, List
 from loguru import logger
 
 from server import crypto, redaction
+# #68: effective-config reading lives in one shared module so `server/` and the UI
+# cannot drift again. Re-exported here because `from server.state import
+# parse_effective_config` is the old import path.
+from server.effective_config import parse_effective_config
 
 
 def utcnow():
@@ -1616,48 +1619,6 @@ KNOWN_COMPONENTS = {
 }
 
 
-def parse_effective_config(effective_config: Dict[str, Any]) -> Dict[str, set]:
-    try:
-        import base64
-        config_map = effective_config.get("configMap", {}).get("configMap", {})
-        key = ""
-        body = config_map.get(key, {}).get("body", b"")
-        
-        if isinstance(body, str):
-            try:
-                body = base64.b64decode(body).decode("utf-8")
-            except Exception:
-                body = body.encode("utf-8").decode("utf-8")
-        elif isinstance(body, bytes):
-            body = body.decode("utf-8")
-        if not body:
-            return {}
-        
-        parsed = yaml.safe_load(body)
-        if not parsed:
-            return {}
-        
-        used_by_type = defaultdict(set)
-        service = parsed.get("service", {})
-        
-        extensions = service.get("extensions", [])
-        if isinstance(extensions, list):
-            for ext in extensions:
-                used_by_type["extension"].add(ext)
-        
-        pipelines = service.get("pipelines", {})
-        for pipeline in pipelines.values():
-            for receiver in pipeline.get("receivers", []):
-                used_by_type["receiver"].add(receiver)
-            for processor in pipeline.get("processors", []):
-                used_by_type["processor"].add(processor)
-            for exporter in pipeline.get("exporters", []):
-                used_by_type["exporter"].add(exporter)
-        
-        return dict(used_by_type)
-    except Exception:
-        return {}
-
 CAPABILITY_TAGS = {
     0x00000001: ("Reports Status", "📊"),
     0x00000002: ("Accepts Remote Config", "⚙️"),
@@ -1721,6 +1682,8 @@ class AgentState:
     # (raw json, redacted json, paths) — redaction is a per-request cost otherwise,
     # and `GET /agents` walks every agent (#98, #109).
     _redacted_effective_config: Optional[tuple] = field(default=None, repr=False, compare=False)
+    # (the effective_config it was derived from, the usage map) — see _config_usage.
+    _usage_cache: Optional[tuple] = field(default=None, repr=False, compare=False)
 
     def record_report(self, now: Optional[datetime] = None) -> None:
         """Record that the agent just reported, and learn from the gap (#69).
@@ -1809,16 +1772,7 @@ class AgentState:
             "connectors": "connector",
         }
         
-        used_by_type = {}
-        
-        if self.effective_config:
-            try:
-                import json
-                eff_config = json.loads(self.effective_config)
-                used_by_type = parse_effective_config(eff_config)
-            except Exception as e:
-                logger.warning(f"Failed to parse effective_config: {e}")
-                used_by_type = {}
+        used_by_type = self._config_usage()
         
         if not used_by_type:
             used_by_type = self._parse_health_components()
@@ -1842,6 +1796,27 @@ class AgentState:
         
         return dict(groups)
     
+    def _config_usage(self) -> Dict[str, set]:
+        """Components used by the reported config, cached against its exact text (#68).
+
+        Reading every config object is more work than reading `configMap[""]`, and
+        `components` is recomputed for every agent on every `GET /agents`. The cache is
+        keyed on the stored JSON itself, so a new report invalidates it and nothing
+        else has to remember to.
+        """
+        if not self.effective_config:
+            return {}
+        cached = self._usage_cache
+        if cached is not None and cached[0] == self.effective_config:
+            return cached[1]
+        try:
+            usage = parse_effective_config(json.loads(self.effective_config))
+        except Exception as exc:  # a malformed report must not 500 a listing
+            logger.warning(f"Failed to parse effective_config: {exc}")
+            usage = {}
+        self._usage_cache = (self.effective_config, usage)
+        return usage
+
     def _parse_health_components(self) -> Dict[str, set]:
         used_by_type = defaultdict(set)
         health_map = self.health.get("componentHealthMap", {})

@@ -254,8 +254,8 @@ def validate_config(config_map: Dict[str, Any], agent_id: Optional[str] = None) 
 
     Args:
         config_map: {"<object name>": {"body": "<yaml/json text>",
-            "content_type": "text/yaml"}}. Use "" as the key for the single-object
-            case.
+            "content_type": "text/yaml", "role": "<optional>"}}. Use "" as the key
+            for the single-object case.
         agent_id: Optional target agent, which adds its component inventory to the
             checks (catches "this config needs a component that agent does not
             ship").
@@ -299,7 +299,8 @@ def propose_config(
     """Propose a config revision (operator; write-gated). **Delivers nothing.**
 
     Args:
-        config_map: {"<object name>": {"body": "...", "content_type": "text/yaml"}}.
+        config_map: {"<object name>": {"body": "...", "content_type": "text/yaml",
+            "role": "<optional, agent-defined>"}}.
         scope: Exactly one of {"agent_id": id}, {"agents": [ids]} or
             {"filter": {...}} (the GET /agents filter keys), plus an optional
             "include_future": true on a filter scope. A missing scope is refused —

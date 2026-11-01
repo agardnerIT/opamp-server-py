@@ -365,3 +365,59 @@ class TestAuditTools:
         assert not mcp_srv.writes_enabled()
         tools = {t.name for t in mcp._tool_manager.list_tools()}
         assert {"audit_log", "audit_verify", "audit_export"} <= tools
+
+
+# ---------------------------------------------------- remote config (#81, D9)
+
+CONFIG_MAP = {"": {"body": "receivers:\n  otlp:\n", "content_type": "text/yaml"}}
+
+
+@pytest.fixture
+def push_env(monkeypatch):
+    from server import crypto
+
+    monkeypatch.setenv("OPAMP_CONFIG_PUSH_ENABLED", "true")
+    monkeypatch.setenv("OPAMP_AGENT_AUTH", "token")
+    monkeypatch.setenv("PUBLIC_URL", "https://opamp.example.com")
+    monkeypatch.setenv("CONFIG_AT_REST_KEY", crypto.generate_key())
+    crypto.reset_key_cache()
+    yield
+    crypto.reset_key_cache()
+
+
+class TestRemoteConfigTools:
+    def test_validate_is_available_and_side_effect_free(self, wired):
+        assert call(mcp_srv.validate_config, CONFIG_MAP)["valid"] is True
+        assert call(mcp_srv.validate_config, {"": {"body": "a: [b", "content_type": "text/yaml"}})[
+            "valid"
+        ] is False
+
+    def test_agent_config_is_redacted(self, wired, push_env):
+        agent_id = "ab" * 16
+        register_agent(agent_id)
+        from server import remote_config
+
+        remote_config.REGISTRY.push(
+            agent_id,
+            {"": {"body": "exporters:\n  x:\n    password: hunter2\n", "content_type": "text/yaml"}},
+            "admin",
+        )
+        data = call(mcp_srv.agent_config, agent_id)
+        assert data["desired"]["redacted"] is True
+        assert "hunter2" not in json.dumps(data)
+
+    def test_no_write_or_apply_tool_is_ever_exposed(self):
+        """D9/#106: MCP may propose and validate, never apply, approve or roll back."""
+        names = {tool.name for tool in mcp._tool_manager.list_tools()}
+        forbidden = {
+            "set_agent_config",
+            "push_config",
+            "apply_config",
+            "apply_agent_config",
+            "delete_agent_config",
+            "withdraw_config",
+            "approve_config",
+            "rollback_config",
+        }
+        assert not (names & forbidden)
+        assert {"agent_config", "validate_config"} <= names

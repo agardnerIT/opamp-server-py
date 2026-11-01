@@ -46,23 +46,12 @@ from typing import Any, Dict, Optional
 from loguru import logger
 
 from server.state import AUDIT_EXPORT_COLUMNS, SQLiteAuditStore, utcnow
+from server.redaction import is_secret_key, scrub_fields, scrub_text
 
-# Field names that would mean a secret leaked into a log line or a row. Dropped,
-# not truncated. Substrings catch the variants nobody remembers to add here
-# (`db_password`, `agent_token_hash`, `x-api-secret`).
-_FORBIDDEN_KEYS = frozenset(
-    {
-        "token",
-        "token_hash",
-        "secret",
-        "secret_hash",
-        "password",
-        "password_hash",
-        "authorization",
-        "hash",
-    }
-)
-_FORBIDDEN_SUBSTRINGS = ("password", "token", "secret", "authorization", "passwd")
+# #98 owns the list of secret-shaped key names; #97 only decides what to do with
+# them (drop, never truncate). A second list here is how one surface ends up
+# unfiltered.
+_is_secret_key = is_secret_key
 
 # Free-form detail is capped: an audit row describes what happened, it is not a
 # payload dump, and an unbounded `detail_json` is a way to blow up the table.
@@ -172,34 +161,10 @@ def breaker_state() -> Dict[str, Any]:
 
 
 # -------------------------------------------------------------------- redaction
-
-
-def _is_secret_key(key: str) -> bool:
-    lowered = key.lower()
-    if lowered in _FORBIDDEN_KEYS:
-        return True
-    return any(part in lowered for part in _FORBIDDEN_SUBSTRINGS)
-
-
-def scrub_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
-    """Drop credential-looking keys, recursively for nested dicts (#97, #98 hook).
-
-    Shared with #98 on purpose: one filter, so a new field name is taught to
-    redaction once. Non-dict values pass through; the caller stringifies.
-    """
-    clean: Dict[str, Any] = {}
-    for key, value in fields.items():
-        if not isinstance(key, str) or _is_secret_key(key):
-            continue
-        if isinstance(value, dict):
-            clean[key] = scrub_fields(value)
-        elif isinstance(value, (list, tuple)):
-            clean[key] = [
-                scrub_fields(item) if isinstance(item, dict) else item for item in value
-            ]
-        else:
-            clean[key] = value
-    return clean
+#
+# `scrub_fields()` and `is_secret_key()` are `server.redaction`'s (#98): one list
+# of secret key names, taught once. They stay importable from here because that is
+# where #97's call sites already point.
 
 
 def _detail_json(fields: Dict[str, Any]) -> Optional[str]:
@@ -211,6 +176,9 @@ def _detail_json(fields: Dict[str, Any]) -> Optional[str]:
         payload = json.dumps(clean, default=str, sort_keys=True)
     except Exception:  # pragma: no cover - defensive
         payload = json.dumps({"unserialisable": True})
+    # Keys were already dropped by `scrub_fields`; this catches a secret *value* in
+    # a field whose name looks innocent (`url`, `note`, `endpoint`).
+    payload = scrub_text(payload)
     if len(payload) > DETAIL_MAX_CHARS:
         payload = json.dumps(
             {"truncated": True, "preview": payload[: DETAIL_MAX_CHARS // 2]},
@@ -290,7 +258,7 @@ def _log_line(event: str, fields: Dict[str, Any]) -> None:
         }
     )
     try:
-        logger.warning("AUDIT " + json.dumps(payload, default=str, sort_keys=True))
+        logger.warning(scrub_text("AUDIT " + json.dumps(payload, default=str, sort_keys=True)))
     except Exception:  # pragma: no cover - defensive
         logger.warning(f"AUDIT {event}")
 

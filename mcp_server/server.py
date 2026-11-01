@@ -228,6 +228,42 @@ def get_agent_metrics(agent_id: str) -> str:
     return _tool(lambda oc: oc.get_agent_metrics(agent_id))
 
 
+# --------------------------------------------------------------- remote config
+
+
+@mcp.tool()
+def agent_config(agent_id: str) -> str:
+    """Desired and effective collector config for one agent — **redacted**.
+
+    Returns {"agent_id", "desired", "effective", "remote_config_status",
+    "history", "config_push_allowed"}. Secret-looking keys and auth-shaped header
+    values are replaced with "<redacted>" and listed in "redacted_paths"; there is
+    deliberately **no** reveal option here, because an AI client has no business
+    reading fleet credentials (epic #93, D9).
+
+    "desired" is null until a config has been pushed. "failed_at" on a desired
+    revision means the agent reported FAILED and that revision is poisoned — it
+    will not be retried; a human must push a new revision or roll back.
+    """
+    return _tool(lambda oc: oc.get_agent_config(agent_id))
+
+
+@mcp.tool()
+def validate_config(config_map: Dict[str, Any]) -> str:
+    """Validate a config map **without** pushing it (safe for an AI to call).
+
+    Args:
+        config_map: {"<object name>": {"body": "<yaml/json text>",
+            "content_type": "text/yaml"}}. Use "" as the key for the single-object
+            case.
+
+    Returns {"valid", "errors", "warnings", "config_hash", "size_bytes",
+    "objects"}. This is the propose/validate half of the flow: MCP may check a
+    config and report the hash, but apply/approve/rollback are never exposed here.
+    """
+    return _tool(lambda oc: oc.validate_config(config_map))
+
+
 # ---------------------------------------------------------------- credentials
 
 

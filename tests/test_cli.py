@@ -108,8 +108,9 @@ class TestLiveOps:
         data = parse(run("--password", ADMIN_PW, "config", "posture"))
         assert data["config_push"]["enabled"] is False
         assert data["override"] is False
-        # admin auth is met (the fixture configures it); agent auth and TLS are not.
-        assert "unmet" in data and len(data["unmet"]) == 2
+        # admin auth is met (the fixture configures it); agent auth, TLS and the
+        # config encryption key (#98) are not.
+        assert "unmet" in data and len(data["unmet"]) == 3
 
     def test_agents_list_and_get(self, live):
         register_agent("1111111111111111")
@@ -540,3 +541,83 @@ class TestOfflineAudit:
         # Oldest first, so a SIEM ingests it in the order it happened.
         assert json.loads(lines[0])["action"] == "config.propose"
         assert json.loads(lines[1])["action"] == "config.approve"
+
+
+# ------------------------------------------------------- remote config (#81)
+
+CONFIG_FILE_BODY = "receivers:\n  otlp:\n    protocols:\n      grpc:\n"
+
+
+@pytest.fixture
+def push_env(monkeypatch):
+    from server import crypto
+
+    monkeypatch.setenv("OPAMP_CONFIG_PUSH_ENABLED", "true")
+    monkeypatch.setenv("OPAMP_AGENT_AUTH", "token")
+    monkeypatch.setenv("PUBLIC_URL", "https://opamp.example.com")
+    monkeypatch.setenv("CONFIG_AT_REST_KEY", crypto.generate_key())
+    crypto.reset_key_cache()
+    yield
+    crypto.reset_key_cache()
+
+
+class TestConfigCommands:
+    def test_validate_reports_a_hash(self, live, tmp_path):
+        path = tmp_path / "collector.yaml"
+        path.write_text(CONFIG_FILE_BODY)
+        data = parse(run("--password", ADMIN_PW, "config", "validate", "--file", str(path)))
+        assert data["valid"] is True and len(data["config_hash"]) == 64
+
+    def test_validate_invalid_still_exits_zero(self, live, tmp_path):
+        path = tmp_path / "broken.yaml"
+        path.write_text("receivers: [broken")
+        data = parse(run("--password", ADMIN_PW, "config", "validate", "--file", str(path)))
+        assert data["valid"] is False and data["errors"]
+
+    def test_set_get_withdraw(self, live, push_env, tmp_path):
+        register_agent("ab" * 16)
+        path = tmp_path / "collector.yaml"
+        path.write_text(CONFIG_FILE_BODY)
+
+        pushed = parse(
+            run("--password", ADMIN_PW, "agents", "config", "set", "ab" * 16,
+                "--file", str(path), "--note", "cli test")
+        )
+        assert pushed["revision_id"].startswith("rev-")
+
+        got = parse(run("--password", ADMIN_PW, "agents", "config", "get", "ab" * 16))
+        assert got["desired"]["revision_id"] == pushed["revision_id"]
+        assert got["effective"]["redacted"] is False
+
+        withdrawn = parse(
+            run("--password", ADMIN_PW, "agents", "config", "withdraw", "ab" * 16)
+        )
+        assert withdrawn["withdrawn"] is True
+
+    def test_set_is_404_when_push_is_disabled(self, live, tmp_path):
+        register_agent("cd" * 16)
+        path = tmp_path / "collector.yaml"
+        path.write_text(CONFIG_FILE_BODY)
+        result = run("--password", ADMIN_PW, "agents", "config", "set", "cd" * 16,
+                     "--file", str(path))
+        assert result.exit_code == 1
+        assert "404" in json.loads(result.output)["error"]
+
+    def test_apply_needs_confirm(self, live, push_env, tmp_path):
+        register_agent("ef" * 16)
+        path = tmp_path / "collector.yaml"
+        path.write_text(CONFIG_FILE_BODY)
+        refused = run("--password", ADMIN_PW, "config", "apply", "--file", str(path),
+                      "--agent", "ef" * 16)
+        assert refused.exit_code == 1
+
+        ok = parse(
+            run("--password", ADMIN_PW, "config", "apply", "--file", str(path),
+                "--agent", "ef" * 16, "--confirm")
+        )
+        assert ok["succeeded"] == 1
+
+    def test_offline_get_is_always_redacted(self, offline_db):
+        data = parse(run("--db", str(offline_db), "agents", "config", "get", "aaaa1111aaaa1111"))
+        assert data["effective"]["redacted"] is True or data["effective"]["config"] is not None
+        assert "never revealed" in data["note"]

@@ -24,6 +24,9 @@ The server speaks TLS        `PUBLIC_URL` is `https://`/`wss://`, or
 The audit log is writable    `OPAMP_AUDIT_ENABLED=true` (the default, #97) and the
                              chain is not in its failure back-off. A push nobody
                              can account for afterwards is the T5 threat
+Configs are encrypted at rest `CONFIG_AT_REST_KEY` is set (#98), or the operator
+                             explicitly accepted plaintext with
+                             `OPAMP_ALLOW_PLAINTEXT_CONFIG_STORAGE=true`
 ===========================  ===================================================
 
 `OPAMP_ALLOW_INSECURE_CONFIG_PUSH=true` is a local-development escape hatch: it
@@ -39,7 +42,7 @@ from typing import Dict, List
 from fastapi import HTTPException
 from loguru import logger
 
-from server import admin_auth, audit, auth
+from server import admin_auth, audit, auth, crypto
 
 # Detail used by every gated push route. 404, not 403: a server with config push
 # off should not confirm to a stranger that the surface exists at all.
@@ -108,6 +111,22 @@ def audit_enabled() -> bool:
     return audit.available()
 
 
+def config_at_rest_mode() -> str:
+    """How config bodies would be stored: `encrypted`, `plaintext` or `unconfigured` (#98)."""
+    return crypto.at_rest_mode()
+
+
+def config_at_rest_met() -> bool:
+    """Config bodies are encrypted, or the operator explicitly opted out (#98).
+
+    Deliberately not "is a key present": an explicit
+    `OPAMP_ALLOW_PLAINTEXT_CONFIG_STORAGE=true` is a decision, and the honest thing
+    is to accept it while reporting `plaintext` on every surface. What is *not*
+    acceptable is silently degrading because nobody set the key.
+    """
+    return config_at_rest_mode() in ("encrypted", "plaintext")
+
+
 def posture() -> Dict[str, object]:
     """The public posture summary embedded in `GET /health`."""
     agent_auth = agent_auth_mode()
@@ -117,6 +136,7 @@ def posture() -> Dict[str, object]:
         "agent_auth": agent_auth,
         "audit": audit_enabled(),
         "tls": tls_enabled(),
+        "config_at_rest": config_at_rest_mode(),
     }
 
 
@@ -182,6 +202,18 @@ def requirements() -> Dict[str, Dict[str, object]]:
             "detail": "set OPAMP_AUDIT_ENABLED=true (the default) and make sure "
             "DATA_DIR is writable; check GET /audit/verify and the server log for "
             "the reason (#97)",
+        },
+        "config_at_rest": {
+            "label": "config bodies would be stored unencrypted",
+            "met": config_at_rest_met(),
+            "mode": config_at_rest_mode(),
+            "detail": (
+                f"set {crypto.KEY_ENV} to a base64-encoded 32-byte key (generate one "
+                'with: python -c "import os,base64; print(base64.b64encode('
+                'os.urandom(32)).decode())") — or, for local development only, set '
+                f"{crypto.ALLOW_PLAINTEXT_ENV}=true and accept that any copy of the "
+                "database exposes every exporter credential in the fleet (#98)"
+            ),
         },
     }
 
@@ -267,9 +299,10 @@ def posture_warning(push: Dict[str, object] | None = None) -> str | None:
         "server can rewrite your fleet's configuration.**\n\n"
         f"- Agent authentication: **{agent_auth_label}**\n"
         f"- TLS: **{tls_label}**\n"
-        f"- Audit log: **{'on' if push.get('audit') else 'off'}**\n\n"
-        "Fix the posture (admin auth + agent auth + TLS + audit log) and unset the "
-        "override. "
+        f"- Audit log: **{'on' if push.get('audit') else 'off'}**\n"
+        f"- Config at rest: **{push.get('config_at_rest') or 'unconfigured'}**\n\n"
+        "Fix the posture (admin auth + agent auth + TLS + audit log + a config "
+        "encryption key) and unset the override. "
         "Local development only."
     )
 

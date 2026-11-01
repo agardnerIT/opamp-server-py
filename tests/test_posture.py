@@ -19,7 +19,7 @@ from fastapi import Depends, FastAPI
 from fastapi.testclient import TestClient
 
 from proto import opamp_pb2
-from server import admin_auth, posture
+from server import admin_auth, crypto, posture
 from server.main import app
 from server.state import AGENT_REGISTRY
 
@@ -36,6 +36,9 @@ def _secure_env(monkeypatch, tmp_path, agent_auth="token"):
     monkeypatch.setenv("OPAMP_CONFIG_PUSH_ENABLED", "true")
     monkeypatch.setenv("OPAMP_AGENT_AUTH", agent_auth)
     monkeypatch.setenv("PUBLIC_URL", "https://opamp.example.com")
+    # #98: a config encryption key is now part of the posture.
+    monkeypatch.setenv("CONFIG_AT_REST_KEY", crypto.generate_key())
+    crypto.reset_key_cache()
     monkeypatch.setattr(posture, "ENFORCED_AGENT_AUTH_MODES", frozenset({"token", "mtls"}))
 
 
@@ -52,8 +55,12 @@ def _clean_env(monkeypatch):
         "ADMIN_PASSWORD",
         "ADMIN_PASSWORD_FILE",
         "OPAMP_ADMIN_AUTOGENERATE_PASSWORD",
+        "CONFIG_AT_REST_KEY",
+        "CONFIG_AT_REST_KEY_PREVIOUS",
+        "OPAMP_ALLOW_PLAINTEXT_CONFIG_STORAGE",
     ):
         monkeypatch.delenv(var, raising=False)
+    crypto.reset_key_cache()
     monkeypatch.setattr(admin_auth, "ADMIN_PASSWORD", "")
     monkeypatch.setattr(admin_auth, "PASSWORD_SOURCE", "none")
     yield
@@ -83,6 +90,7 @@ def test_defaults_are_off_and_safe():
         "agent_auth": "off",
         "audit": True,
         "tls": False,
+        "config_at_rest": "unconfigured",
     }
 
 
@@ -113,10 +121,12 @@ def test_tls_from_public_url_or_upstream_terminator(monkeypatch):
 
 def test_unmet_requirements_names_every_missing_item_at_once():
     missing = posture.unmet_requirements()
-    assert len(missing) == 3
+    assert len(missing) == 4
     assert "admin auth" in missing[0]
     assert "agents are not authenticated" in missing[1]
     assert "TLS" in missing[2]
+    # #98: a plaintext config store is a requirement failure, not a warning.
+    assert "unencrypted" in missing[3]
 
 
 def test_requirements_met_gives_empty_list(monkeypatch, tmp_path):
@@ -170,9 +180,9 @@ def test_startup_refuses_naming_every_requirement(monkeypatch):
         posture.assert_startup_posture()
     message = str(exc.value)
     assert "refusing to start" in message
-    for fragment in ("admin auth", "agents are not authenticated", "TLS"):
+    for fragment in ("admin auth", "agents are not authenticated", "TLS", "unencrypted"):
         assert fragment in message
-    assert len(exc.value.missing) == 3
+    assert len(exc.value.missing) == 4
     assert "OPAMP_ALLOW_INSECURE_CONFIG_PUSH" in message
 
 
@@ -297,11 +307,18 @@ def test_posture_warning_is_loud_and_actionable(monkeypatch):
 
 def test_posture_warning_reports_tls_and_audit_when_present():
     warning = posture.posture_warning(
-        {"insecure": True, "agent_auth": "token", "tls": True, "audit": True}
+        {
+            "insecure": True,
+            "agent_auth": "token",
+            "tls": True,
+            "audit": True,
+            "config_at_rest": "encrypted",
+        }
     )
     assert "token (enforced)" in warning
     assert "TLS: **yes**" in warning
     assert "Audit log: **on**" in warning
+    assert "Config at rest: **encrypted**" in warning
 
 
 # --------------------------------------------------------------------------- /health
@@ -316,6 +333,7 @@ def test_health_reports_posture(client):
         "agent_auth": "off",
         "audit": True,
         "tls": False,
+        "config_at_rest": "unconfigured",
     }
 
 
@@ -368,7 +386,13 @@ def test_config_posture_reports_every_requirement(client):
     assert body["config_push"]["enabled"] is False
     assert body["allowed"] is False
     assert body["override"] is False
-    assert set(body["requirements"]) == {"admin_auth", "agent_auth", "tls", "audit"}
+    assert set(body["requirements"]) == {
+        "admin_auth",
+        "agent_auth",
+        "tls",
+        "audit",
+        "config_at_rest",
+    }
     # #97: audit is the one requirement that is met out of the box.
     assert body["requirements"]["audit"]["met"] is True
     assert all(
@@ -376,7 +400,7 @@ def test_config_posture_reports_every_requirement(client):
         for key, state in body["requirements"].items()
         if key != "audit"
     )
-    assert len(body["unmet"]) == 3
+    assert len(body["unmet"]) == 4
     assert body["http"] == {
         "public_url": None,
         "tls": False,

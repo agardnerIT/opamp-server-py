@@ -586,6 +586,11 @@ AUDITED_ROUTES = {
     ("POST", "/compliance/reload"): "compliance.policies_reloaded",
     ("PUT", "/alerts"): "alerts.updated",
     ("POST", "/alerts/test"): "alerts.test",
+    # #81: config push is the most privileged mutation in the server, so each of
+    # these records before it acts (pre-write, then act — #97).
+    ("PUT", "/agent/{agent_id}/config"): "config.push",
+    ("DELETE", "/agent/{agent_id}/config"): "config.withdraw",
+    ("POST", "/config/apply"): "config.apply",
 }
 
 EXPLAINED_ROUTES = {
@@ -598,6 +603,9 @@ EXPLAINED_ROUTES = {
     ("POST", "/v1/metrics"): "telemetry ingest, not a privileged decision",
     # Generates YAML for download; touches no server or agent state.
     ("POST", "/agent/{agent_id}/manifest"): "pure function, no state change",
+    # #81: a validator. It stores nothing and changes nothing — an AI agent asking
+    # "would this config be accepted?" must not fill the audit log.
+    ("POST", "/config/validate"): "pure validation, no state change",
 }
 
 

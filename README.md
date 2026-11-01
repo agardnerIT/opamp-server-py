@@ -214,6 +214,7 @@ published to the world is a fleet takeover, so the defaults are now closed:
 | Config push | **off** | Push routes return 404 (not 403 — a stranger does not get to learn the surface exists), the server does not advertise `OffersRemoteConfig`, and no `remote_config` field is ever sent |
 | Agent auth | off | Any client can claim any agent identity. Set `OPAMP_AGENT_AUTH=token` and give each agent a credential — see [Agent authentication](#agent-authentication-agent--server) |
 | TLS | off | Credentials and configs travel in cleartext |
+| Config at rest | *no key* | Config bodies are not stored until `CONFIG_AT_REST_KEY` is set (or the plaintext opt-out is taken) — see [Config data and secrets](#config-data-and-secrets) |
 | Ports in `docker-compose.yml` | `127.0.0.1` | Reachable from the host only, not from the network |
 
 **To expose it safely**, do all five:
@@ -232,9 +233,12 @@ published to the world is a fleet takeover, so the defaults are now closed:
    per agent. The token travels in the agent's config, so TLS is not optional
    once you turn this on.
 4. **Set `CORS_ORIGINS`** to the origin the UI is served from instead of `*`.
-5. **Keep config push off** until the posture check passes for you. Turning it on
-   is refused at startup unless admin auth, agent auth, TLS and a writable audit
-   log are all in place:
+5. **Set `CONFIG_AT_REST_KEY`** so pushed configs are encrypted on disk. Losing
+   the key loses *desired* config, not the fleet — see
+   [Config data and secrets](#config-data-and-secrets).
+6. **Keep config push off** until the posture check passes for you. Turning it on
+   is refused at startup unless admin auth, agent auth, TLS, a writable audit log
+   and a config encryption key are all in place:
 
 ```bash
 OPAMP_CONFIG_PUSH_ENABLED=true uvicorn server.main:app --port 4320
@@ -243,6 +247,7 @@ OPAMP_CONFIG_PUSH_ENABLED=true uvicorn server.main:app --port 4320
 #   - agents are not authenticated: ...
 #   - the server is not served over TLS: ...
 #   - the audit log is not available: ...
+#   - config bodies would be stored unencrypted: ...
 ```
 
 The only way past that is `OPAMP_ALLOW_INSECURE_CONFIG_PUSH=true`, which is for
@@ -253,7 +258,8 @@ Check your posture at any time:
 
 ```bash
 curl -s localhost:4320/health | jq .config_push
-# {"enabled": false, "insecure": false, "agent_auth": "off", "audit": true, "tls": false}
+# {"enabled": false, "insecure": false, "agent_auth": "off", "audit": true, "tls": false,
+#  "config_at_rest": "unconfigured"}
 opampctl --password "$ADMIN_PASSWORD" health   # same, plus config_push
 curl -s -u ":$ADMIN_PASSWORD" localhost:4320/config/posture | jq .requirements
 ```
@@ -303,6 +309,122 @@ break; deleting rows *before* the checkpoint still shows up as tampering.
 | `denied` | refused before acting (bad credential, insufficient role, locked out) |
 | `error` | recorded, then the mutation failed (see the second row for the outcome) |
 | `noop` | idempotent no-change (e.g. logging out twice) |
+
+## Config data and secrets
+
+Config bodies are the most sensitive data this server holds: exporter auth
+headers, basic-auth extensions, TLS keys, internal endpoints. Three rules apply
+everywhere (`server/redaction.py`, `server/crypto.py`):
+
+**Redacted by default.** `GET /agents`, `GET /agent/{id}`, the reports, the alert
+payloads, the CLI, the MCP server and the UI all pass through one filter. Keys that
+look like credentials (`password`, `api_key`, `authorization`, `client_secret`,
+`private_key`, …) are replaced with `<redacted>` at any depth, and auth-shaped
+values (`Authorization: Basic …`, `https://user:pw@host`) are masked by shape. Each
+response says what was hidden:
+
+```bash
+opampctl --password "$ADMIN_PASSWORD" agents config get <agent-id>
+# {"desired": {...}, "effective": {"redacted": true,
+#   "redacted_paths": ["configMap.configMap[].body"], ...}}
+```
+
+Base64 bodies (OpAMP bodies are `bytes`, and `MessageToDict` renders them base64)
+are decoded, scrubbed and re-encoded — otherwise the filter would see nothing.
+
+**Revealing is a separate, audited action.** `GET /agent/{id}/config?reveal=true`
+needs the `approver` role (or higher), writes a `config.reveal` audit row and sets
+`Cache-Control: no-store`. It is not exposed over MCP at all: an AI client has no
+business reading fleet credentials.
+
+**A redacted body can never be pushed.** A redacted document is a display
+artefact; pushing one would silently wipe every credential in the fleet. Any
+`PUT /agent/{id}/config` whose body contains `<redacted>` (or the redaction marker)
+is a 422.
+
+**Encrypted at rest.** Bodies are sealed with AES-256-GCM, bound to the row they
+belong to (AAD = `agent:<id>` / `revision:<id>`), so copying a ciphertext between
+rows fails to decrypt instead of handing an agent someone else's config:
+
+```bash
+# Generate a key (32 bytes, base64) and keep it out of git
+python -c "import os,base64; print(base64.b64encode(os.urandom(32)).decode())"
+CONFIG_AT_REST_KEY=...        # .env or a secret mount
+```
+
+Rotation is three steps: set the new `CONFIG_AT_REST_KEY`, put the old key in
+`CONFIG_AT_REST_KEY_PREVIOUS`, run `opampctl config rotate-key --db data/opamp.db`,
+then drop the previous key. Rows still sealed with a key you no longer supply fail
+closed with an error naming the key id — they are never silently replaced with
+NULL, so supplying the key later still works.
+
+**Losing the key loses desired config, not the fleet.** Agents keep running the
+config they last applied, and the server can rebuild desired state from the
+`effective_config` each agent reports. Say that to your incident channel before
+you need it.
+
+**Reported configs can contain secrets you did not push.** Upstream warns that the
+collector's `reports_raw_config` option exposes the full contents of the collector's
+config files. Leave it off unless you trust this server with them.
+
+Retention: superseded revisions keep their hash, author and timestamps but lose
+the body after `CONFIG_RETENTION_DAYS` (default 30). The current revision is never
+pruned — a restart must not forget the fleet.
+
+## Remote config push
+
+Off by default. When the [posture](#before-you-expose-this-server) is secure and
+`OPAMP_CONFIG_PUSH_ENABLED=true`, the server stores a *desired* config per agent
+and delivers it — it is desired state, not a command, so it survives restarts and
+is idempotent.
+
+```bash
+# 1. Validate without storing anything (safe; this is what an AI agent may do)
+opampctl --password "$ADMIN_PASSWORD" config validate --file collector.yaml
+# {"valid": true, "config_hash": "9101…", "size_bytes": 214, "objects": 1}
+
+# 2. Push to one agent (approver role)
+opampctl --password "$ADMIN_PASSWORD" agents config set <agent-id> \
+  --file collector.yaml --note "add otlp receiver"
+
+# 3. Watch what the agent says about it
+opampctl --password "$ADMIN_PASSWORD" agents config get <agent-id>
+
+# 4. Fleet-wide, explicitly targeted and explicitly confirmed (admin role)
+opampctl --password "$ADMIN_PASSWORD" config apply --file collector.yaml \
+  --attr environment=prod --confirm
+
+# 5. Withdraw: an empty config map, which tells the agent to run its local config
+opampctl --password "$ADMIN_PASSWORD" agents config withdraw <agent-id>
+```
+
+How delivery works:
+
+- The agent must advertise `AcceptsRemoteConfig` — the spec's MUST. The
+  collector's `extension/opampextension` never does; the **OpAMP Supervisor**
+  (`cmd/opampsupervisor`) does, and it is the only agent that can actually apply a
+  pushed config (it restarts the collector and auto-reverts on failure).
+- The server compares the hash the agent reports (`RemoteConfigStatus.
+  last_remote_config_hash`) with its own. Equal → nothing is sent. Different →
+  the reply carries `remote_config`. That is the spec's reconciliation rule and
+  what stops a re-push loop.
+- **Never retried automatically.** A `FAILED` status for our revision poisons it:
+  it is surfaced in the API, the UI and the audit log (`config.apply.failed`), and
+  will not be sent again. Push a new revision or roll back — a human decision,
+  on purpose.
+- Hashes are SHA-256 over a length-prefixed, key-sorted encoding of the config
+  map. Spec §Calculating Hashes makes the hash server-defined ("the Agent never
+  calculates hashes, it only stores and compares them"), which the supervisor
+  confirms: it echoes back exactly the hash we sent.
+- Validation before storage is structural: shape, size (`CONFIG_MAX_BYTES`),
+  YAML/JSON parses, and no redaction marker. A `role` field is rejected because
+  this build's proto (v0.18-era) has no `AgentConfigObject.role` — that arrives
+  with the v0.20.0 proto sync (#66). Protected invariants and the OPA policy gate
+  are #100.
+
+Two-phase propose/approve (#99/#103) is not built yet: today a push *is* the
+approval, which is why it needs the `approver` role. The revision store this uses
+is the one those issues will extend — there will not be a second delivery path.
 
 ## Capacity and deployment topology
 
@@ -370,6 +492,11 @@ client under-reports server capacity — use `BENCH_CLIENTS` to spread the load.
 | `TLS_TERMINATED_UPSTREAM` | `false` | Assert that a TLS terminator you control sits in front of the server (see `docker/`). Assertion only — keep the server on loopback |
 | `OPAMP_AUDIT_ENABLED` | `true` | Append-only, hash-chained audit log for privileged actions (#97). **On by default**: a privileged action that cannot be recorded is refused, so turning this off makes the server read-only for writes. Reported in `/health` as `config_push.audit` |
 | `AUDIT_RETENTION_DAYS` | `365` | Entries older than this are pruned (at most hourly) with an `audit.checkpoint` row recording the cut. `0` keeps everything |
+| `CONFIG_AT_REST_KEY` | *(empty)* | base64-encoded 32-byte AES-256-GCM key for config bodies (#98). A config-push posture requirement. Generate with `python -c "import os,base64; print(base64.b64encode(os.urandom(32)).decode())"` |
+| `CONFIG_AT_REST_KEY_PREVIOUS` | *(empty)* | The key you are rotating *from*: accepted for reads only, so `opampctl config rotate-key --db …` can re-encrypt. Clear it when rotation is done |
+| `OPAMP_ALLOW_PLAINTEXT_CONFIG_STORAGE` | `false` | **Local development only.** Store config bodies unencrypted and let push start without a key. Reported as `config_at_rest: plaintext` in `/health` |
+| `CONFIG_MAX_BYTES` | `1048576` | Maximum size of one pushed config map (bytes). A collector config is kilobytes |
+| `CONFIG_RETENTION_DAYS` | `30` | Superseded config revisions keep hash/author/timestamps but lose the body after this long. The current revision is never pruned. `0` keeps everything |
 | `OPAMP_ALLOW_INSECURE_CONFIG_PUSH` | `false` | **Local development only.** Starts with config push enabled on an insecure posture: red warning, `insecure: true` in `/health`, permanent UI banner. See [Before you expose this server](#before-you-expose-this-server) |
 
 ## Alerts (Webhook)
@@ -530,6 +657,11 @@ secret only) or `disabled` (read-only mode).
 | POST | `/agent/{id}/manifest` | | Generate OCB `manifest.yaml` + build command for a slim collector. Optional body `{"version": "0.123.0"}`. 409 if the agent has no components in use |
 | GET | `/agent/{id}/compliance` | | Evaluate agent against OPA policies (no-op result if OPA disabled) |
 | GET | `/agent/{id}/report` | | Markdown report for one agent (versions, health, components) |
+| GET | `/agent/{id}/config` | viewer | Desired (pushed) + effective (reported) config, **redacted** with `redacted_paths`. `?reveal=true` needs `approver`, is audited (`config.reveal`) and sets `Cache-Control: no-store`. Includes revision `history` (metadata only) |
+| PUT | `/agent/{id}/config` | approver | Push a desired config: `{"config_map": {"": {"body": "<yaml>", "content_type": "text/yaml"}}, "note": "…"}`. 404 when push is disabled, 422 with every validation error, including a redacted body. Creates an immutable revision |
+| DELETE | `/agent/{id}/config` | approver | Withdraw by pushing an **empty** config map (agent falls back to its local config). Delivered once |
+| POST | `/config/apply` | admin | Push one config to many agents: `{"config_map", "agents": [...] \| "filter": {...}, "confirm": true}`. No selector is a 400 — never "all agents" |
+| POST | `/config/validate` | viewer | Validate a config map without storing it. Always 200: `{"valid", "errors", "warnings", "config_hash", "size_bytes", "objects"}` |
 | GET | `/reports/fleet` | | Full fleet summary report (markdown, same as the UI Reports page) |
 | GET | `/reports/heavy-collectors` | | Collectors with many unused components. Param: `threshold` (0–1, default 0.5) |
 | GET | `/reports/outdated-collectors` | | Collectors with components older than `version` (default `0.149.0`) |
@@ -541,7 +673,7 @@ secret only) or `disabled` (read-only mode).
 | GET | `/alerts` | viewer | Alert configuration with `webhook_url` and `headers` **redacted** |
 | PUT | `/alerts` | operator | Merge alert configuration. `***REDACTED***` keeps the stored secret |
 | POST | `/alerts/test` | operator | Send a test alert (optionally with a temporary `event_config`) |
-| GET | `/health` | | Health check (server status, agent count, OPA availability) plus the public `config_push` posture block |
+| GET | `/health` | | Health check (server status, agent count, OPA availability, `desired_configs`) plus the public `config_push` posture block (incl. `config_at_rest`) |
 | GET | `/config/posture` | viewer | Full config push posture: every requirement, what is met, where the admin credential came from, whether the override is on. No secrets |
 | GET | `/audit` | admin | Privileged-action history, newest first. Filters `since`, `until`, `actor`, `action` (prefix), `target`, `result`; `limit`/`offset` paginated. Hashes only — never a config body or a secret |
 | GET | `/audit/verify` | admin | Recompute the hash chain. `ok: false` + `broken_at` means the log is no longer evidence; `anchored_by_checkpoint` is benign retention |
@@ -585,6 +717,15 @@ opampctl agents token create <agent-id> --label prod-1   # token (once) + collec
 opampctl agents token create <agent-id> --raw            # just the token, for $(...)
 opampctl agents token create <agent-id> --retire-previous  # rotate with an immediate cutover
 opampctl agents token revoke <agent-id>                  # blocks delivery, keeps agent state
+
+# Remote config (#81) — config push must be enabled and the posture secure
+opampctl agents config get <agent-id>        # desired + effective, REDACTED
+opampctl agents config get <agent-id> --reveal   # real values: approver role, audited
+opampctl agents config set <agent-id> --file collector.yaml --note "add otlp receiver"
+opampctl agents config withdraw <agent-id>   # empty config map: run the local config
+opampctl config validate --file collector.yaml   # side-effect-free check + hash
+opampctl config apply --file collector.yaml --attr environment=prod --confirm  # admin
+opampctl config rotate-key --db data/opamp.db    # re-encrypt under the current key
 
 # Reports
 opampctl reports fleet --raw
@@ -731,6 +872,13 @@ oc = OpampClient(base_url="http://localhost:4320", password="changeme")
 agents = oc.list_agents(healthy="true", environment="prod")   # metadata filters
 result = oc.generate_manifest(agents["agents"][0]["id"])
 print(result["manifest_yaml"])
+
+# Remote config (#81): validate, push, inspect (redacted by default)
+print(oc.validate_config({"": {"body": open("collector.yaml").read(), "content_type": "text/yaml"}}))
+oc.set_agent_config(agent_id, {"": {"body": yaml_text, "content_type": "text/yaml"}})
+print(oc.get_agent_config(agent_id)["desired"]["revision_id"])
+oc.delete_agent_config(agent_id)          # withdraw
+oc.apply_agent_config(config_map, agents=[agent_id], confirm=True)
 
 # Agent credentials (admin) — the token is returned once
 token = oc.create_agent_token("4f3c2b1a...", label="prod-1")["token"]

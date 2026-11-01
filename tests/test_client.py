@@ -183,17 +183,19 @@ class TestOpsAndAuth:
         data = oc.config_posture()
         assert data["config_push"]["enabled"] is False
         assert data["allowed"] is False
-        # #97 added `audit` as a fourth requirement (and it is met by default).
+        # #97 added `audit` (met by default); #98 added `config_at_rest`.
         assert set(data["requirements"]) == {
             "admin_auth",
             "agent_auth",
             "tls",
             "audit",
+            "config_at_rest",
         }
         assert data["requirements"]["admin_auth"]["met"] is True
         assert data["requirements"]["audit"]["met"] is True
-        # admin auth and audit are met here, so agent auth + TLS are the two gaps.
-        assert len(data["unmet"]) == 2
+        # admin auth and audit are met here; agent auth, TLS and the config
+        # encryption key are the three gaps.
+        assert len(data["unmet"]) == 3
 
     def test_auth_verify_ok_and_bad(self, monkeypatch):
         monkeypatch.setattr("server.admin_auth.ADMIN_PASSWORD", "pw123")
@@ -514,3 +516,67 @@ class TestAudit:
         with pytest.raises(OpampApiError) as exc:
             oc.audit_log(since="not-a-date")
         assert exc.value.status_code == 422
+
+
+# --- remote config (#81) ---------------------------------------------------------
+
+CONFIG_MAP = {"": {"body": "receivers:\n  otlp:\n", "content_type": "text/yaml"}}
+
+
+@pytest.fixture
+def push_env(monkeypatch, tmp_path):
+    """A secure posture with push on, so the client can exercise the real routes."""
+    from server import admin_auth, crypto
+
+    monkeypatch.setattr(admin_auth, "ADMIN_PASSWORD", "client-pw-123456")
+    monkeypatch.setattr(admin_auth, "PASSWORD_SOURCE", "env")
+    monkeypatch.setenv("OPAMP_CONFIG_PUSH_ENABLED", "true")
+    monkeypatch.setenv("OPAMP_AGENT_AUTH", "token")
+    monkeypatch.setenv("PUBLIC_URL", "https://opamp.example.com")
+    monkeypatch.setenv("CONFIG_AT_REST_KEY", crypto.generate_key())
+    crypto.reset_key_cache()
+    yield
+    crypto.reset_key_cache()
+
+
+class TestRemoteConfig:
+    def test_validate_is_side_effect_free(self, oc):
+        assert oc.validate_config(CONFIG_MAP)["valid"] is True
+        bad = oc.validate_config({"": {"body": "a: [b", "content_type": "text/yaml"}})
+        assert bad["valid"] is False and bad["errors"]
+
+    def test_push_get_withdraw(self, oc, push_env):
+        agent_id = register_agent("ab" * 16)
+        pushed = oc.set_agent_config(agent_id, CONFIG_MAP, note="test")
+        assert pushed["revision_id"].startswith("rev-")
+        assert pushed["config_hash"]
+
+        got = oc.get_agent_config(agent_id)
+        assert got["desired"]["revision_id"] == pushed["revision_id"]
+        assert got["desired"]["redacted"] is False  # nothing secret in this body
+        assert got["history"]
+
+        withdrawn = oc.delete_agent_config(agent_id)
+        assert withdrawn["withdrawn"] is True
+        assert oc.get_agent_config(agent_id)["desired"]["withdrawn"] is True
+
+    def test_push_is_404_when_disabled(self, oc):
+        agent_id = register_agent("cd" * 16)
+        with pytest.raises(OpampApiError) as exc:
+            oc.set_agent_config(agent_id, CONFIG_MAP)
+        assert exc.value.status_code == 404
+        assert exc.value.detail == "config push is disabled"
+
+    def test_reveal_requires_approver(self, oc, push_env):
+        agent_id = register_agent("ef" * 16)
+        oc.set_agent_config(agent_id, CONFIG_MAP)
+        # The legacy shared password is an `admin` principal, so reveal is allowed.
+        assert oc.get_agent_config(agent_id, reveal=True)["desired"]["redacted"] is False
+
+    def test_apply_requires_confirm(self, oc, push_env):
+        agent_id = register_agent("12" * 16)
+        with pytest.raises(OpampApiError) as exc:
+            oc.apply_agent_config(CONFIG_MAP, agents=[agent_id])
+        assert exc.value.status_code == 400
+        ok = oc.apply_agent_config(CONFIG_MAP, agents=[agent_id], confirm=True)
+        assert ok["succeeded"] == 1

@@ -12,6 +12,12 @@ This project is designed to be operated by AI agents. Layers (each wraps the pre
 
 When adding API endpoints: add the endpoint (docstring included), extend `client/opamp_client.py`, add an `opampctl` command, add an MCP tool, then add tests for each. All four layers must stay in sync.
 
+Config bodies are secrets: never render one without `server/redaction.py` (one
+filter, everywhere), never store one without `server/crypto.py` (AES-GCM, bound to
+the row), and never accept a body containing `<redacted>` (a redacted push wipes
+fleet credentials). `AgentState.to_dict()` is the API choke point — redaction
+happens there, not per route.
+
 ## Non-Interactive Shell Commands
 
 **ALWAYS use non-interactive flags** with file operations to avoid hanging on confirmation prompts.

@@ -23,7 +23,7 @@ from loguru import logger
 from starlette.websockets import WebSocketDisconnect
 
 from proto import opamp_pb2
-from server import admin_auth, agent_auth, posture
+from server import admin_auth, agent_auth, crypto, posture
 from server.framing import decode_message, encode_message
 from server.main import app
 from server.state import AGENT_REGISTRY, SQLiteCredentialStore
@@ -412,6 +412,8 @@ class TestPostureIntegration:
         monkeypatch.setenv("OPAMP_CONFIG_PUSH_ENABLED", "true")
         monkeypatch.setenv("OPAMP_AGENT_AUTH", "token")
         monkeypatch.setenv("PUBLIC_URL", "https://opamp.example.com")
+        monkeypatch.setenv("CONFIG_AT_REST_KEY", crypto.generate_key())
+        crypto.reset_key_cache()
         assert posture.push_allowed() is True
 
         monkeypatch.setenv("OPAMP_AGENT_AUTH", "mtls")

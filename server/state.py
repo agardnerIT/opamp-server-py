@@ -11,6 +11,8 @@ from typing import Optional, Dict, Any, List, Set
 import yaml
 from loguru import logger
 
+from server import crypto, redaction
+
 
 def utcnow():
     return datetime.now(timezone.utc)
@@ -38,6 +40,14 @@ def _parse_ts(s: Optional[str]) -> datetime:
     return datetime.fromisoformat(s).replace(tzinfo=timezone.utc) if s else utcnow()
 
 
+def _optional_column(row, name: str):
+    """Read a column that may predate a migration (sqlite3.Row raises on miss)."""
+    try:
+        return row[name]
+    except (IndexError, KeyError):
+        return None
+
+
 class SQLiteAgentStore:
     def __init__(self, db_path: Path = DB_PATH):
         self.db_path = db_path
@@ -61,14 +71,23 @@ class SQLiteAgentStore:
                     available_components TEXT,
                     health TEXT,
                     compliance TEXT,
-                    updated_at TEXT
+                    updated_at TEXT,
+                    last_remote_config_hash TEXT,
+                    remote_config_error TEXT
                 )
             """)
-            
+
             cursor = conn.execute("PRAGMA table_info(agents)")
             columns = [row[1] for row in cursor.fetchall()]
             if "compliance" not in columns:
                 conn.execute("ALTER TABLE agents ADD COLUMN compliance TEXT")
+            # #81: the spec's MUST is a *hash comparison*, so the hash the agent
+            # reports has to be stored, not just its status string. Added by
+            # migration so an existing database keeps working.
+            if "last_remote_config_hash" not in columns:
+                conn.execute("ALTER TABLE agents ADD COLUMN last_remote_config_hash TEXT")
+            if "remote_config_error" not in columns:
+                conn.execute("ALTER TABLE agents ADD COLUMN remote_config_error TEXT")
 
     def load_all(self) -> Dict[str, "AgentState"]:
         agents = {}
@@ -84,8 +103,9 @@ class SQLiteAgentStore:
                 INSERT INTO agents (agent_id, instance_uid, connected_at, last_heartbeat,
                                    healthy, capabilities, description, effective_config,
                                    remote_config_status, package_statuses, available_components,
-                                   health, compliance, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                   health, compliance, updated_at, last_remote_config_hash,
+                                   remote_config_error)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(agent_id) DO UPDATE SET
                     last_heartbeat=excluded.last_heartbeat,
                     healthy=excluded.healthy,
@@ -97,7 +117,9 @@ class SQLiteAgentStore:
                     available_components=excluded.available_components,
                     health=excluded.health,
                     compliance=excluded.compliance,
-                    updated_at=excluded.updated_at
+                    updated_at=excluded.updated_at,
+                    last_remote_config_hash=excluded.last_remote_config_hash,
+                    remote_config_error=excluded.remote_config_error
                 WHERE excluded.updated_at > agents.updated_at
             """, self._state_to_row(state))
 
@@ -114,16 +136,43 @@ class SQLiteAgentStore:
             int(state.healthy) if state.healthy is not None else None,
             state.capabilities,
             json.dumps(state.description),
-            state.effective_config,
+            self._sealed_effective_config(state),
             state.remote_config_status,
             json.dumps(state.package_statuses),
             json.dumps(state.available_components),
             json.dumps(state.health),
             json.dumps(state.compliance) if state.compliance else None,
             utcnow().isoformat(),
+            state.last_remote_config_hash,
+            state.remote_config_error,
         )
 
+    @staticmethod
+    def _sealed_effective_config(state: "AgentState") -> Optional[str]:
+        """Seal the effective config for storage (#98).
+
+        A row that failed to decrypt is written back exactly as it was: an
+        unreadable-with-this-key body must not be replaced by NULL just because
+        this process could not open it, or supplying the right key later would
+        find nothing left to open.
+        """
+        if state.effective_config is None and state.sealed_effective_config:
+            return state.sealed_effective_config
+        return crypto.seal_if_configured(state.effective_config, f"agent:{state.agent_id}")
+
     def _row_to_state(self, row) -> "AgentState":
+        sealed = row["effective_config"]
+        effective_config = sealed
+        config_error = None
+        if crypto.is_sealed(sealed):
+            try:
+                effective_config = crypto.open_sealed(sealed, f"agent:{row['agent_id']}")
+            except crypto.ConfigDecryptError as exc:
+                # Fail closed per row, not per fleet: one undecryptable config must
+                # not make `GET /agents` a 500, and it must not be silently dropped.
+                logger.warning(f"agent {row['agent_id']}: {exc}")
+                effective_config = None
+                config_error = str(exc)
         return AgentState(
             instance_uid=row["instance_uid"],
             agent_id=row["agent_id"],
@@ -132,12 +181,16 @@ class SQLiteAgentStore:
             healthy=bool(row["healthy"]) if row["healthy"] is not None else None,
             capabilities=row["capabilities"] or 0,
             description=json.loads(row["description"] or "{}"),
-            effective_config=row["effective_config"],
+            effective_config=effective_config,
             remote_config_status=row["remote_config_status"] or "UNSET",
             package_statuses=json.loads(row["package_statuses"] or "{}"),
             available_components=json.loads(row["available_components"] or "{}"),
             health=json.loads(row["health"] or "{}"),
             compliance=json.loads(row["compliance"] or "null"),
+            last_remote_config_hash=_optional_column(row, "last_remote_config_hash"),
+            remote_config_error=_optional_column(row, "remote_config_error"),
+            sealed_effective_config=sealed if config_error else None,
+            config_error=config_error,
         )
 
 
@@ -589,6 +642,209 @@ class SQLiteSessionStore:
         with self._connect() as conn:
             cursor = conn.execute(
                 "DELETE FROM admin_sessions WHERE expires_at < ?", (cutoff,)
+            )
+            return cursor.rowcount or 0
+
+
+# ------------------------------------------------------------------- remote config
+
+
+class SQLiteDesiredConfigStore:
+    """Desired (remote) collector config per agent (#81).
+
+    Two tables, on purpose:
+
+    ``config_revisions``
+        Append-only. A revision is immutable (epic #93, D4) and is what the audit
+        log points at, what a rollout refers to, and what retention prunes. The
+        body is sealed with `server.crypto` under AAD ``revision:<id>`` (#98), so
+        copying a blob into another row fails to decrypt rather than handing an
+        agent someone else's config.
+
+    ``desired_configs``
+        One row per agent: *which* revision is current, plus the one before it so
+        a rollback is a pointer move and not a re-upload. Rollback still creates a
+        new revision — the pointer is bookkeeping, not a second code path.
+
+    Revisions are never updated in place except by retention (which nulls the
+    body and keeps hash + metadata) and by ``mark_failed`` (a status fact, not
+    content). That is what makes "what did we push, when, to whom" answerable.
+    """
+
+    def __init__(self, db_path: Path = DB_PATH):
+        self.db_path = db_path
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._connect() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS config_revisions (
+                    revision_id TEXT PRIMARY KEY,
+                    agent_id TEXT NOT NULL,
+                    config_blob TEXT,
+                    config_hash TEXT NOT NULL,
+                    author TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    withdrawn INTEGER NOT NULL DEFAULT 0,
+                    failed_at TEXT,
+                    failure_detail TEXT,
+                    body_pruned_at TEXT
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS config_revisions_agent_idx "
+                "ON config_revisions(agent_id, created_at)"
+            )
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS desired_configs (
+                    agent_id TEXT PRIMARY KEY,
+                    revision_id TEXT NOT NULL,
+                    previous_revision_id TEXT,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+            conn.execute("PRAGMA journal_mode=WAL")
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=5000")
+        return conn
+
+    @staticmethod
+    def _row(row) -> Dict[str, Any]:
+        record = {key: row[key] for key in row.keys()}
+        if "withdrawn" in record:
+            record["withdrawn"] = bool(record["withdrawn"])
+        return record
+
+    def put(
+        self,
+        agent_id: str,
+        revision_id: str,
+        config_map: Dict[str, Any],
+        config_hash: str,
+        author: str,
+        withdrawn: bool = False,
+    ) -> Dict[str, Any]:
+        """Append a revision and make it the desired state for `agent_id`.
+
+        `config_map` is stored sealed; `config_hash` is stored in the clear because
+        it is not a secret (it is the value the agent echoes back and the value the
+        audit log records).
+        """
+        blob = crypto.seal_if_configured(
+            json.dumps({"config_map": config_map}, sort_keys=True),
+            f"revision:{revision_id}",
+        )
+        now = utcnow().isoformat()
+        with self._connect() as conn:
+            previous = conn.execute(
+                "SELECT revision_id FROM desired_configs WHERE agent_id=?", (agent_id,)
+            ).fetchone()
+            conn.execute(
+                "INSERT INTO config_revisions "
+                "(revision_id, agent_id, config_blob, config_hash, author, created_at, withdrawn) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (revision_id, agent_id, blob, config_hash, author, now, int(withdrawn)),
+            )
+            conn.execute(
+                "INSERT INTO desired_configs "
+                "(agent_id, revision_id, previous_revision_id, updated_at) "
+                "VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(agent_id) DO UPDATE SET "
+                "revision_id=excluded.revision_id, "
+                "previous_revision_id=desired_configs.revision_id, "
+                "updated_at=excluded.updated_at",
+                (agent_id, revision_id, previous["revision_id"] if previous else None, now),
+            )
+        return self.current(agent_id) or {}
+
+    def current(self, agent_id: str) -> Optional[Dict[str, Any]]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT r.* FROM desired_configs d "
+                "JOIN config_revisions r ON r.revision_id = d.revision_id "
+                "WHERE d.agent_id=?",
+                (agent_id,),
+            ).fetchone()
+        return self._row(row) if row else None
+
+    def previous(self, agent_id: str) -> Optional[Dict[str, Any]]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT r.* FROM desired_configs d "
+                "JOIN config_revisions r ON r.revision_id = d.previous_revision_id "
+                "WHERE d.agent_id=?",
+                (agent_id,),
+            ).fetchone()
+        return self._row(row) if row else None
+
+    def revision(self, revision_id: str) -> Optional[Dict[str, Any]]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM config_revisions WHERE revision_id=?", (revision_id,)
+            ).fetchone()
+        return self._row(row) if row else None
+
+    def history(self, agent_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM config_revisions WHERE agent_id=? "
+                "ORDER BY created_at DESC LIMIT ?",
+                (agent_id, limit),
+            ).fetchall()
+        return [self._row(row) for row in rows]
+
+    def load_current(self) -> Dict[str, Dict[str, Any]]:
+        """Every agent's current revision, for the in-memory cache."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT r.* FROM desired_configs d "
+                "JOIN config_revisions r ON r.revision_id = d.revision_id"
+            ).fetchall()
+        return {row["agent_id"]: self._row(row) for row in rows}
+
+    def mark_failed(self, revision_id: str, detail: str = "") -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE config_revisions SET failed_at=?, failure_detail=? "
+                "WHERE revision_id=? AND failed_at IS NULL",
+                (utcnow().isoformat(), detail[:2000], revision_id),
+            )
+
+    def clear(self, agent_id: str) -> None:
+        """Forget the desired state (used by tests and by a hard withdrawal)."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM desired_configs WHERE agent_id=?", (agent_id,))
+
+    def sealed_revisions(self) -> List[Dict[str, Any]]:
+        """Sealed bodies still present — the rotation job's work list (#98)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT revision_id, config_blob FROM config_revisions "
+                "WHERE config_blob IS NOT NULL"
+            ).fetchall()
+        return [self._row(row) for row in rows]
+
+    def reseal(self, revision_id: str, blob: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE config_revisions SET config_blob=? WHERE revision_id=?",
+                (blob, revision_id),
+            )
+
+    def prune(self, cutoff: str) -> int:
+        """Drop bodies of superseded revisions older than `cutoff` (#98 retention).
+
+        Hash, author and timestamps stay: that is the audit trail. The *current*
+        revision is never pruned regardless of age — a desired config that is still
+        being delivered must stay readable, or a restart would forget the fleet.
+        """
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE config_revisions SET config_blob=NULL, body_pruned_at=? "
+                "WHERE created_at < ? AND config_blob IS NOT NULL "
+                "AND revision_id NOT IN (SELECT revision_id FROM desired_configs)",
+                (utcnow().isoformat(), cutoff),
             )
             return cursor.rowcount or 0
 
@@ -1114,6 +1370,17 @@ class AgentState:
     available_components: Dict[str, Any] = field(default_factory=dict)
     health: Dict[str, Any] = field(default_factory=dict)
     compliance: Optional[Dict[str, Any]] = None
+    # #81: the spec's reconciliation MUST compares hashes, so both halves of the
+    # agent's RemoteConfigStatus are kept. Hex here, base64 on the wire.
+    last_remote_config_hash: Optional[str] = None
+    remote_config_error: Optional[str] = None
+    # #98: the sealed body this row was loaded from, kept only when it could not be
+    # opened with the keys this process has (see SQLiteAgentStore._sealed_...).
+    sealed_effective_config: Optional[str] = field(default=None, repr=False)
+    config_error: Optional[str] = None
+    # (raw json, redacted json, paths) — redaction is a per-request cost otherwise,
+    # and `GET /agents` walks every agent (#98, #109).
+    _redacted_effective_config: Optional[tuple] = field(default=None, repr=False, compare=False)
 
     @property
     def capability_tags(self) -> list[dict]:
@@ -1271,7 +1538,30 @@ class AgentState:
 
         return True
 
+    def redacted_effective_config(self) -> tuple:
+        """`(json, redacted_paths)` for the effective config, cached per raw body.
+
+        Redaction is a parse + walk of a ~10 KB document; doing it for every agent
+        on every `GET /agents` would put it back on the hot path #109 just removed
+        it from. The cache key is the raw string itself, so it self-invalidates.
+        """
+        raw = self.effective_config
+        cached = self._redacted_effective_config
+        if cached is not None and cached[0] == raw:
+            return cached[1], cached[2]
+        redacted, paths = redaction.redact_effective_config(raw)
+        self._redacted_effective_config = (raw, redacted, paths)
+        return redacted, paths
+
     def to_dict(self) -> Dict[str, Any]:
+        """API shape. **Redacted by default** — this is the single choke point (#98).
+
+        Every read surface (`/agents`, `/agent/{id}`, reports, the UI) goes through
+        here, so a config containing a password renders masked everywhere without
+        each caller remembering. The audited reveal path in `main.py` re-reads the
+        raw value deliberately, not by accident.
+        """
+        effective_config, redacted_paths = self.redacted_effective_config()
         return {
             "id": self.agent_id,
             "healthy": self.healthy,
@@ -1280,8 +1570,13 @@ class AgentState:
             "capabilities": self.capabilities,
             "capability_tags": self.capability_tags,
             "description": self.description,
-            "effective_config": self.effective_config,
+            "effective_config": effective_config,
+            "effective_config_redacted": bool(redacted_paths),
+            "redacted_paths": redacted_paths,
+            "config_error": self.config_error,
             "remote_config_status": self.remote_config_status,
+            "last_remote_config_hash": self.last_remote_config_hash,
+            "remote_config_error": self.remote_config_error,
             "package_statuses": self.package_statuses,
             "available_components": self.available_components,
             "components": self.components,

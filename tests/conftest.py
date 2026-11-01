@@ -17,10 +17,11 @@ import copy
 
 import pytest
 
-from server import agent_auth, alerts, audit, auth
+from server import agent_auth, alerts, audit, auth, crypto, remote_config
 from server.state import (
     SQLiteAuditStore,
     SQLiteCredentialStore,
+    SQLiteDesiredConfigStore,
     SQLitePrincipalStore,
     SQLiteSessionStore,
 )
@@ -40,6 +41,18 @@ def isolated_global_stores(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(alerts, "DB_PATH", tmp_path / "alerts.db")
     monkeypatch.setattr(audit, "STORE", SQLiteAuditStore(tmp_path / "audit.db"))
+    # #81/#98: the desired-config registry is a process-wide cache over the
+    # repository's database, and it holds decrypted config bodies. Never share it.
+    monkeypatch.setattr(
+        remote_config,
+        "REGISTRY",
+        remote_config.DesiredConfigRegistry(
+            SQLiteDesiredConfigStore(tmp_path / "config.db")
+        ),
+    )
+    # Decoded encryption keys are cached against the raw env value; a test that sets
+    # a key must not leak it into the next one.
+    crypto.reset_key_cache()
     monkeypatch.setattr(
         alerts, "ALERT_CONFIG", copy.deepcopy(DEFAULT_ALERT_CONFIG)
     )
@@ -49,3 +62,4 @@ def isolated_global_stores(monkeypatch, tmp_path):
     yield
     auth.reset_lockouts()
     audit.reset_circuit_breaker()
+    crypto.reset_key_cache()

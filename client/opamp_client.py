@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import base64
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 import httpx
@@ -411,6 +411,85 @@ class OpampClient:
     def get_agent_metrics(self, agent_id: str) -> Dict[str, Any]:
         """``GET /agent/{id}/metrics`` — latest ingested OTLP metric values."""
         return self._get(f"/agent/{agent_id}/metrics")
+
+    # ------------------------------------------------------------ remote config
+
+    def get_agent_config(self, agent_id: str, reveal: bool = False) -> Dict[str, Any]:
+        """``GET /agent/{id}/config`` — desired + effective config, **redacted**.
+
+        Secret-looking keys and auth-shaped header values are replaced with
+        ``<redacted>`` and listed in ``redacted_paths``. ``reveal=True`` returns the
+        real values; it needs the ``approver`` role (or higher), is audited as
+        ``config.reveal``, and is the only way to see a secret.
+
+        ``desired`` is null until something has been pushed; ``failed_at`` means the
+        agent reported FAILED and that revision is poisoned (never retried).
+        """
+        params = {"reveal": "true"} if reveal else None
+        return self._get(f"/agent/{agent_id}/config", params=params)
+
+    def set_agent_config(
+        self,
+        agent_id: str,
+        config_map: Dict[str, Any],
+        note: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """``PUT /agent/{id}/config`` — push a desired config (approver).
+
+        ``config_map`` maps a config object name to ``{"body", "content_type"}``;
+        ``{"": {...}}`` is the single-object case. Returns the new ``revision_id``
+        and ``config_hash``. Delivery happens on the agent's next status report and
+        only when its reported hash differs — never automatically retried.
+
+        404 means config push is disabled (not forbidden): the surface does not
+        exist until the posture is secure. 422 lists every validation error.
+        """
+        body: Dict[str, Any] = {"config_map": config_map}
+        if note:
+            body["note"] = note
+        return self._put(f"/agent/{agent_id}/config", json=body)
+
+    def delete_agent_config(self, agent_id: str) -> Dict[str, Any]:
+        """``DELETE /agent/{id}/config`` — withdraw the desired config (approver).
+
+        Withdrawal is an *empty* config map, which tells the agent to run its local
+        config; it is delivered once, like any other revision.
+        """
+        return self._request("DELETE", f"/agent/{agent_id}/config")
+
+    def apply_agent_config(
+        self,
+        config_map: Dict[str, Any],
+        agents: Optional[List[str]] = None,
+        filter: Optional[Dict[str, Any]] = None,
+        confirm: bool = False,
+        note: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """``POST /config/apply`` — push one config to many agents (admin).
+
+        Blast radius is explicit: pass ``agents=[...]`` or ``filter={...}`` (the
+        ``GET /agents`` filter keys). A missing selector is a 400 — never "all".
+        ``confirm=True`` is required, which is the deliberate speed bump before a
+        fleet-wide change.
+        """
+        body: Dict[str, Any] = {"config_map": config_map, "confirm": confirm}
+        if agents is not None:
+            body["agents"] = agents
+        if filter is not None:
+            body["filter"] = filter
+        if note:
+            body["note"] = note
+        return self._post("/config/apply", json=body)
+
+    def validate_config(self, config_map: Dict[str, Any]) -> Dict[str, Any]:
+        """``POST /config/validate`` — check a config map without storing it.
+
+        Returns ``{"valid", "errors", "warnings", "config_hash", "size_bytes",
+        "objects"}``. Always 200: an invalid config is an answer, not an error. This
+        is the call an AI agent should make before proposing anything (MCP may
+        validate and propose, never apply).
+        """
+        return self._post("/config/validate", json={"config_map": config_map})
 
     # ------------------------------------------------------------- credentials
 

@@ -25,7 +25,7 @@ import pytest
 from fastapi.testclient import TestClient
 from loguru import logger
 
-from server import admin_auth, auth
+from server import admin_auth, auth, crypto
 from server.audit import audit_event
 from server.main import app
 from server.state import (
@@ -650,6 +650,9 @@ class TestPostureGate:
         monkeypatch.setenv("OPAMP_CONFIG_PUSH_ENABLED", "true")
         monkeypatch.setenv("OPAMP_AGENT_AUTH", "token")
         monkeypatch.setenv("TLS_TERMINATED_UPSTREAM", "true")
+        # #98: the encryption-at-rest requirement is part of the posture now.
+        monkeypatch.setenv("CONFIG_AT_REST_KEY", crypto.generate_key())
+        crypto.reset_key_cache()
         assert posture.push_allowed() is True
 
 

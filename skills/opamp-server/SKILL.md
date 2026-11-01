@@ -101,6 +101,12 @@ opampctl agents compliance <agent-id>
 | Export the audit log (admin) | `audit export -f jsonl\|csv [-o file]` | `audit_export` | `GET /audit/export` |
 | Mint agent credential (admin) | `agents token create <id> [--raw]` | `create_agent_token` (write-gated) | `POST /agents/{id}/token` |
 | Revoke agent credentials (admin) | `agents token revoke <id>` | `revoke_agent_token` (write-gated) | `DELETE /agents/{id}/token` |
+| Desired + effective config (redacted) | `agents config get <id> [--reveal]` | `agent_config` (redacted only) | `GET /agent/{id}/config` |
+| Push a config (approver) | `agents config set <id> --file f.yaml` | — (never exposed) | `PUT /agent/{id}/config` |
+| Withdraw a config (approver) | `agents config withdraw <id>` | — | `DELETE /agent/{id}/config` |
+| Validate a config (safe) | `config validate --file f.yaml` | `validate_config` | `POST /config/validate` |
+| Fleet push (admin, confirmed) | `config apply --file f.yaml --attr env=prod --confirm` | — | `POST /config/apply` |
+| Re-encrypt stored bodies | `config rotate-key --db data/opamp.db` | — | — |
 | Offline (no server) | `--db data/opamp.db …` | — | — |
 
 ## Agent credentials (`OPAMP_AGENT_AUTH=token`)
@@ -192,6 +198,43 @@ proposes and another approves.
   commit or a chat transcript. Use `--raw` into a shell variable, and
   `auth whoami` to confirm which role you are acting as before a privileged call.
 
+## Remote config (`OPAMP_CONFIG_PUSH_ENABLED=true`)
+
+Off by default. When it is on and the posture is secure, the server stores a
+*desired* config per agent and delivers it on the agent's next status report —
+desired state, not a command, so it survives restarts and is idempotent.
+
+```bash
+opampctl config validate --file collector.yaml          # safe: no storage, no audit
+opampctl --password "$ADMIN_PASSWORD" agents config set <id> --file collector.yaml
+opampctl agents config get <id>                          # desired + effective, REDACTED
+opampctl --password "$ADMIN_PASSWORD" config apply --file collector.yaml \
+  --attr environment=prod --confirm                      # admin, explicit targets
+opampctl --password "$ADMIN_PASSWORD" agents config withdraw <id>
+```
+
+Rules that matter when acting on this:
+
+- **Only the OpAMP Supervisor can apply a pushed config.** `extension/opampextension`
+  never advertises `AcceptsRemoteConfig`; a bare collector will simply never be
+  offered one. Check `agents get <id>` → `capabilities`.
+- **Never retried automatically.** If the agent reports `FAILED` for our revision it
+  is *poisoned*: visible as `desired.failed_at`, audited as `config.apply.failed`,
+  and never sent again. Push a new revision or roll back — do not "just retry".
+- **A redacted body cannot be pushed.** Anything containing `<redacted>` is a 422.
+  If you fetched a config with `agents config get`, it is a display artefact — go
+  back to the source file.
+- **`--reveal` is a privileged, audited action** (`approver` role, `config.reveal`
+  row, `Cache-Control: no-store`). Do not reveal to debug something you could check
+  with `redacted_paths`.
+- **MCP can validate and read, never apply.** `validate_config` + `agent_config`
+  exist; there is no push/approve/rollback tool and there never will be (epic #93,
+  D9). Propose the config and its hash to a human instead.
+- **Fleet-wide needs `--confirm` and an explicit selector.** A missing selector is a
+  400 — it never means "all agents".
+- **`config get` offline (`--db`)** shows metadata only and always redacts; there is
+  no credential and no audit trail offline, so there is no reveal.
+
 ## Gotchas
 
 - **Agent IDs are hex instance UIDs** from `list_agents` — not hostnames.
@@ -203,7 +246,8 @@ proposes and another approves.
 - **Offline mode** (`--db`) is read-only: no health, compliance, or alerts.
 - **MCP config**: `python -m mcp_server` needs a Python where the package is installed (`pip install -e ".[mcp]"`); pass env vars in the client config, not flags.
 - **Config push is off by default and fails closed.** `GET /health` → `config_push`
-  (`{"enabled", "insecure", "agent_auth", "audit", "tls"}`) is the public summary;
+  (`{"enabled", "insecure", "agent_auth", "audit", "tls", "config_at_rest"}`) is the
+  public summary;
   `opampctl config posture` adds *why* each requirement is unmet. Push routes
   return **404** when disabled — not 403, so a 404 tells you nothing about whether
   the endpoint exists. `insecure: true` means the development override

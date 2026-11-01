@@ -6,13 +6,13 @@ from pathlib import Path
 import prometheus_client as prom_client
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from fastapi import FastAPI, Request, HTTPException, Query, WebSocket
+from fastapi import FastAPI, Request, HTTPException, Query, WebSocket, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, JSONResponse
 from pydantic import BaseModel
 from google.protobuf.json_format import MessageToDict
 from loguru import logger
-from typing import Optional, Dict, Any, Literal
+from typing import Optional, Dict, Any, List, Literal
 from functools import wraps
 
 from dotenv import load_dotenv
@@ -43,7 +43,8 @@ from server.reports import (
     _is_heavy,
 )
 from server.alerts import get_alert_config, update_alert_config, send_test_alert, send_alert, ALERT_TYPES, ALERT_CONFIG, ALERT_EVENTS, send_new_agent_alert, send_stale_agent_alert, send_compliance_alert, redact_config, merge_redacted
-from server import admin_auth, agent_auth, audit, auth, posture
+from server import admin_auth, agent_auth, audit, auth, crypto, posture, redaction, remote_config
+from server.redaction import redact_document
 from server.auth import (  # noqa: F401  (privileged routes below)
     ROLE_ADMIN,
     ROLE_APPROVER,
@@ -51,7 +52,9 @@ from server.auth import (  # noqa: F401  (privileged routes below)
     ROLE_VIEWER,
     audit_action,
     require_admin,
+    require_audit,
     require_roles,
+    role_satisfies,
 )
 from server.framing import message_limit
 from server.ws import (
@@ -98,6 +101,12 @@ async def periodic_cleanup():
         # Retention runs at most hourly (the tick is every 15s) and appends an
         # `audit.checkpoint` row so the chain stays verifiable (#97).
         audit.maybe_prune()
+        # #98: superseded config bodies age out; hashes and authors stay. The
+        # current revision is never pruned, or a restart would forget the fleet.
+        try:
+            remote_config.REGISTRY.prune()
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(f"config retention prune failed: {exc}")
 
 
 @asynccontextmanager
@@ -117,6 +126,13 @@ async def lifespan(app: FastAPI):
     # posture (#96). Read-only deployments are unaffected.
     posture.assert_startup_posture()
     _log_audit_startup()
+    # #98: the log filter goes on before anything else can log a config, and the
+    # storage mode is stated once so a plaintext store is never a surprise.
+    redaction.install_log_filter()
+    crypto.warn_if_plaintext()
+    # #81: the desired-config cache is loaded once; the message path must not read
+    # SQLite per message (#109).
+    remote_config.REGISTRY.reload()
     _cleanup_task = asyncio.create_task(periodic_cleanup())
     yield
     if _cleanup_task:
@@ -150,6 +166,17 @@ PROM_OPA_ENABLED = prom_client.Gauge(
 )
 
 PROM_OPA_ENABLED.set(1 if OPA_ENABLED else 0)
+
+PROM_CONFIG_OFFERS = prom_client.Counter(
+    "opamp_remote_config_offers_total",
+    "Remote configs delivered to agents (#81)",
+)
+
+PROM_CONFIG_PUSHES = prom_client.Counter(
+    "opamp_remote_config_pushes_total",
+    "Desired config revisions created, by result",
+    ["result"],
+)
 
 
 def _parse_cors_origins(raw: str) -> list:
@@ -767,7 +794,16 @@ def _apply_status_report(agent_id: str, agent_dict: Dict[str, Any], persist: boo
         PROM_MESSAGES_RECEIVED.labels(message_type="package_status").inc()
 
     if 'remoteConfigStatus' in agent_dict:
-        updates['remote_config_status'] = agent_dict['remoteConfigStatus'].get('status', 'UNSET')
+        status = agent_dict['remoteConfigStatus'] or {}
+        updates['remote_config_status'] = status.get('status', 'UNSET')
+        # #81: the spec's reconciliation MUST compares hashes, so the hash the agent
+        # echoes back (base64 on the wire) and its error text are kept. Stored as
+        # hex, which is what the API and the audit log use.
+        reported_hash = remote_config.hash_from_wire(status.get('lastRemoteConfigHash'))
+        if reported_hash is not None:
+            updates['last_remote_config_hash'] = reported_hash
+        updates['remote_config_error'] = status.get('errorMessage') or None
+        PROM_MESSAGES_RECEIVED.labels(message_type="remote_config_status").inc()
 
     PROM_MESSAGES_RECEIVED.labels(message_type="heartbeat").inc()
 
@@ -862,6 +898,12 @@ def _handle_agent_message(
     # One write for the whole message (#109): `_apply_status_report` batches the
     # field groups and flushes the row at most once, including for a new agent.
     _apply_status_report(agent_id, agent_dict)
+
+    # #81: react to a FAILED report before deciding what to offer — a poisoned
+    # revision must not be re-sent in the same reply that learned it failed (D6).
+    status_name, reported_hash, error_message = remote_config.parse_status(agent_dict)
+    if status_name:
+        remote_config.note_status(agent_id, status_name, reported_hash, error_message)
     
     disconnected = 'agentDisconnect' in agent_dict
     if disconnected:
@@ -872,6 +914,15 @@ def _handle_agent_message(
         AGENT_METRICS.pop(agent_id, None)
         update_metrics()
     
+    # #81: offer the desired config when (and only when) the agent's reported hash
+    # differs from ours. The agent is authenticated by this point, so the offer can
+    # only ever go to the agent it was written for (D1).
+    if not disconnected and posture.push_allowed():
+        offer = remote_config.offer_for(agent_id, agent_msg.capabilities, agent_dict.get("remoteConfigStatus"))
+        if offer is not None:
+            response.remote_config.CopyFrom(offer)
+            PROM_CONFIG_OFFERS.inc()
+
     # Last line of defence for #81/#102: nothing may put remote_config on the
     # wire while the posture says config push is not allowed.
     posture.scrub_remote_config(response)
@@ -1550,15 +1601,456 @@ def test_alerts(request: Request, body: dict = None):
     return {"success": success, "error": error}
 
 
+class RemoteConfigRequest(BaseModel):
+    """Body for pushing a desired config (#81).
+
+    `config_map` maps a config object name to its body; `{"": {...}}` is the
+    single-object case the spec recommends. Keys are agent-defined: `""` is valid
+    and not special, and more than one object is normal.
+    """
+
+    config_map: Dict[str, Any]
+    note: Optional[str] = None
+
+
+class FleetConfigRequest(RemoteConfigRequest):
+    """Body for a fleet-wide apply. Explicit targets or a filter; `confirm` gates it."""
+
+    agents: Optional[List[str]] = None
+    filter: Optional[Dict[str, Any]] = None
+    confirm: bool = False
+
+
+class ValidateConfigRequest(BaseModel):
+    config_map: Dict[str, Any]
+
+
+def _desired_view(agent_id: str, reveal: bool = False) -> Optional[Dict[str, Any]]:
+    """API-shaped view of an agent's desired config (#81), redacted unless revealed (#98)."""
+    record = remote_config.REGISTRY.get(agent_id)
+    if record is None:
+        return None
+    config_map = record.get("config_map") or {}
+    if reveal:
+        redacted, paths = config_map, []
+    else:
+        redacted, paths = redact_document(config_map)
+    return {
+        "revision_id": record.get("revision_id"),
+        "config_hash": record.get("config_hash"),
+        "author": record.get("author"),
+        "created_at": record.get("created_at"),
+        "withdrawn": bool(record.get("withdrawn")),
+        "failed_at": record.get("failed_at"),
+        "failure_detail": record.get("failure_detail"),
+        "config_map": redacted,
+        "redacted": bool(paths),
+        "redacted_paths": paths,
+    }
+
+
+def _effective_view(state: AgentState, reveal: bool) -> Optional[Dict[str, Any]]:
+    """Effective config as the API shows it: redacted unless explicitly revealed."""
+    if state is None:
+        return None
+    raw = state.effective_config
+    if reveal:
+        return {
+            "config": json.loads(raw) if raw else None,
+            "redacted": False,
+            "redacted_paths": [],
+            "config_error": state.config_error,
+        }
+    redacted, paths = state.redacted_effective_config()
+    return {
+        "config": json.loads(redacted) if redacted else None,
+        "redacted": bool(paths),
+        "redacted_paths": paths,
+        "config_error": state.config_error,
+    }
+
+
+@app.get(
+    "/agent/{agent_id}/config",
+    tags=["config"],
+    summary="Desired and effective config for one agent (redacted)",
+)
+def get_agent_config(agent_id: str, request: Request, reveal: bool = False):
+    """Desired (pushed) config alongside the effective (reported) one. Requires `viewer`.
+
+    **Both are redacted by default** (#98): secret-looking keys at any depth and
+    auth-shaped header values are replaced with `<redacted>`, and
+    `redacted_paths` lists what was masked without showing it. This is the one
+    endpoint that can reveal them again: `?reveal=true` requires the `approver`
+    role or higher, writes an audit row (`config.reveal`), and sets
+    `Cache-Control: no-store`. Revealing is a debugging action, not a browsing one.
+
+    `desired` is null when no config has been pushed. `withdrawn` means the last
+    push was a withdrawal (an empty config map, which tells the agent to run its
+    local config). `failed_at` means the agent reported `FAILED` for that revision:
+    it is **poisoned** and will not be retried (epic #93, D6) — push a new revision
+    or roll back.
+
+    `history` lists revision metadata (hash, author, timestamps) without bodies, so
+    "who changed this and when" is answerable without shipping config in a listing.
+    """
+    principal = require_roles(request, ROLE_VIEWER)
+    try:
+        agent_id = remote_config.normalize_agent_id(agent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    state = AGENT_REGISTRY.get(agent_id)
+    desired = _desired_view(agent_id, reveal)
+    if state is None and desired is None:
+        raise HTTPException(status_code=404, detail=f"agent {agent_id} not found")
+
+    if reveal:
+        # #98: the only way to see a secret value, and it leaves a record.
+        if not role_satisfies(principal.role, ROLE_APPROVER):
+            raise HTTPException(
+                status_code=403,
+                detail=f"revealing secrets requires the {ROLE_APPROVER} role or higher",
+            )
+        audit_action(
+            principal,
+            "config.reveal",
+            target_kind="agent",
+            target_id=agent_id,
+        )
+
+    history = [
+        {
+            "revision_id": row["revision_id"],
+            "config_hash": row["config_hash"],
+            "author": row["author"],
+            "created_at": row["created_at"],
+            "withdrawn": bool(row.get("withdrawn")),
+            "failed_at": row.get("failed_at"),
+            "body_pruned_at": row.get("body_pruned_at"),
+        }
+        for row in remote_config.REGISTRY.history(agent_id, limit=20)
+    ]
+
+    response = JSONResponse(
+        {
+            "agent_id": agent_id,
+            "desired": desired,
+            "effective": _effective_view(state, reveal),
+            "remote_config_status": {
+                "status": state.remote_config_status if state else None,
+                "last_remote_config_hash": state.last_remote_config_hash if state else None,
+                "error": state.remote_config_error if state else None,
+            },
+            "history": history,
+            "config_push_allowed": posture.push_allowed(),
+        }
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.put(
+    "/agent/{agent_id}/config",
+    tags=["config"],
+    summary="Push a desired config to one agent (approver)",
+)
+def put_agent_config(
+    agent_id: str,
+    body: RemoteConfigRequest,
+    request: Request,
+    _gate=Depends(posture.config_push_gate),
+    _audit=Depends(require_audit("config.push")),
+):
+    """Store a new desired config revision for one agent. Requires `approver`.
+
+    Returns 404 when config push is disabled or the posture is unsafe (#96) — the
+    same answer as a route that does not exist, so a stranger learns nothing.
+
+    The body is validated before anything is stored: malformed YAML, a body over
+    `CONFIG_MAX_BYTES`, a `role` field this protocol version cannot express, or a
+    **redacted** document (pushing one would wipe the fleet's credentials) is a 422
+    naming every problem. A revision is immutable (D4); pushing again creates a new
+    one and keeps the previous for rollback.
+
+    Delivery is *desired state*, not a command (D5): the agent receives it on its
+    next status report (HTTP) or immediately over its WebSocket, and only when the
+    hash it reports differs from ours. Nothing is retried automatically — a
+    `FAILED` revision is poisoned until a human pushes again (D6).
+
+    This direct push is approval-by-fiat: the caller holds the approver role. The
+    two-phase propose/approve flow that separates those duties arrives with #99 and
+    #103; it will reuse this store rather than add a second delivery path.
+    """
+    principal = require_roles(request, ROLE_APPROVER)
+    try:
+        agent_id = remote_config.normalize_agent_id(agent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    if AGENT_REGISTRY.get(agent_id) is None:
+        raise HTTPException(status_code=404, detail=f"agent {agent_id} not found")
+
+    try:
+        config_map, warnings = remote_config.validate_config_map(body.config_map)
+    except remote_config.ConfigValidationError as exc:
+        PROM_CONFIG_PUSHES.labels(result="invalid").inc()
+        raise HTTPException(
+            status_code=422,
+            detail={"message": "config validation failed", "errors": exc.errors},
+        )
+
+    config_hash = remote_config.compute_hash(config_map)
+    revision_id = remote_config.new_revision_id()
+    # #97: recorded before the mutation, so a push that cannot be recorded does not
+    # happen. The body never appears — only its hash.
+    audit_action(
+        principal,
+        "config.push",
+        target_kind="agent",
+        target_id=agent_id,
+        revision_id=revision_id,
+        config_hash=config_hash,
+        objects=len(config_map),
+        note=body.note,
+    )
+    try:
+        record = remote_config.REGISTRY.push(
+            agent_id, config_map, principal.name, revision_id=revision_id
+        )
+    except Exception as exc:
+        audit.audit_event(
+            "config.push",
+            principal=principal.name,
+            role=principal.role,
+            result="error",
+            target_kind="agent",
+            target_id=agent_id,
+            revision_id=revision_id,
+            error=str(exc),
+        )
+        PROM_CONFIG_PUSHES.labels(result="error").inc()
+        raise HTTPException(status_code=500, detail=f"could not store the revision: {exc}")
+
+    PROM_CONFIG_PUSHES.labels(result="ok").inc()
+    return {
+        "agent_id": agent_id,
+        "revision_id": record["revision_id"],
+        "config_hash": record["config_hash"],
+        "objects": len(config_map),
+        "warnings": warnings,
+        "delivery": "queued — sent on the agent's next status report",
+    }
+
+
+@app.delete(
+    "/agent/{agent_id}/config",
+    tags=["config"],
+    summary="Withdraw a desired config (approver)",
+)
+def delete_agent_config(
+    agent_id: str,
+    request: Request,
+    _gate=Depends(posture.config_push_gate),
+    _audit=Depends(require_audit("config.withdraw")),
+):
+    """Withdraw the desired config by pushing an **empty** config map. Requires `approver`.
+
+    Withdrawal is not a special case: an empty remote config is how the spec says
+    "run your local config", so it is delivered as an ordinary revision whose hash
+    differs from the agent's, exactly once. The agent's status is then tracked like
+    any other change.
+    """
+    principal = require_roles(request, ROLE_APPROVER)
+    try:
+        agent_id = remote_config.normalize_agent_id(agent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    if remote_config.REGISTRY.get(agent_id) is None and AGENT_REGISTRY.get(agent_id) is None:
+        raise HTTPException(status_code=404, detail=f"agent {agent_id} not found")
+
+    revision_id = remote_config.new_revision_id()
+    audit_action(
+        principal,
+        "config.withdraw",
+        target_kind="agent",
+        target_id=agent_id,
+        revision_id=revision_id,
+    )
+    record = remote_config.REGISTRY.withdraw(agent_id, principal.name, revision_id=revision_id)
+    return {
+        "agent_id": agent_id,
+        "revision_id": record["revision_id"],
+        "config_hash": record["config_hash"],
+        "withdrawn": True,
+        "delivery": "queued — sent on the agent's next status report",
+    }
+
+
+@app.post(
+    "/config/apply",
+    tags=["config"],
+    summary="Push a desired config to many agents (admin, confirmed)",
+)
+def apply_config_fleet(
+    body: FleetConfigRequest,
+    request: Request,
+    _gate=Depends(posture.config_push_gate),
+    _audit=Depends(require_audit("config.apply")),
+):
+    """Push one config revision to a set of agents. Requires `admin` and `confirm: true`.
+
+    Blast radius is explicit: either `agents: [<id>, ...]` or a `filter` using the
+    same keys as `GET /agents` (`healthy`, `remote_config_status`, and description
+    attributes). No selector is a 400 rather than "all agents", because a missing
+    field must not mean the whole fleet.
+
+    One audit row covers the request (config hash, agent count); the per-agent
+    revision ids are in each agent's config history. Per-agent rows for a 400-agent
+    rollout would bury every other entry in the log.
+    """
+    principal = require_roles(request, ROLE_ADMIN)
+    if not body.confirm:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "fleet-wide config push requires \"confirm\": true — set it only after "
+                "checking the target list, or use PUT /agent/{id}/config for one agent"
+            ),
+        )
+
+    try:
+        config_map, warnings = remote_config.validate_config_map(body.config_map)
+    except remote_config.ConfigValidationError as exc:
+        PROM_CONFIG_PUSHES.labels(result="invalid").inc()
+        raise HTTPException(
+            status_code=422,
+            detail={"message": "config validation failed", "errors": exc.errors},
+        )
+
+    if body.agents:
+        targets = []
+        for raw_id in body.agents:
+            try:
+                targets.append(remote_config.normalize_agent_id(raw_id))
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc))
+    elif body.filter:
+        attributes: Dict[str, List[str]] = {}
+        filters = body.filter or {}
+        healthy = filters.get("healthy")
+        remote_status = filters.get("remote_config_status") or filters.get("status")
+        for key, value in filters.items():
+            if key in ("healthy", "remote_config_status", "status"):
+                continue
+            values = value if isinstance(value, list) else [value]
+            attributes[key] = [str(item) for item in values]
+        targets = [
+            state.agent_id
+            for state in AGENT_REGISTRY.list_all()
+            if state.matches_filters(
+                healthy=healthy,
+                remote_config_status=remote_status,
+                attributes=attributes,
+            )
+        ]
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="provide \"agents\": [...] or \"filter\": {...}; a missing selector is never \"all agents\"",
+        )
+
+    if not targets:
+        raise HTTPException(status_code=404, detail="no agents matched the selector")
+
+    config_hash = remote_config.compute_hash(config_map)
+    audit_action(
+        principal,
+        "config.apply",
+        target_kind="fleet",
+        target_id=f"{len(targets)} agents",
+        config_hash=config_hash,
+        agent_count=len(targets),
+        objects=len(config_map),
+        note=body.note,
+    )
+
+    results = []
+    for target in targets:
+        revision_id = remote_config.new_revision_id()
+        try:
+            record = remote_config.REGISTRY.push(
+                target, config_map, principal.name, revision_id=revision_id
+            )
+            results.append({"agent_id": target, "revision_id": record["revision_id"], "ok": True})
+            PROM_CONFIG_PUSHES.labels(result="ok").inc()
+        except Exception as exc:  # one agent's failure must not abort the rollout
+            results.append({"agent_id": target, "ok": False, "error": str(exc)})
+            PROM_CONFIG_PUSHES.labels(result="error").inc()
+
+    return {
+        "config_hash": config_hash,
+        "agents": len(targets),
+        "succeeded": sum(1 for item in results if item["ok"]),
+        "failed": sum(1 for item in results if not item["ok"]),
+        "warnings": warnings,
+        "results": results,
+        "delivery": "queued — sent on each agent's next status report",
+    }
+
+
+@app.post(
+    "/config/validate",
+    tags=["config"],
+    summary="Validate a config body without storing it",
+)
+def validate_config(body: ValidateConfigRequest, request: Request):
+    """Check a config map and return its hash, size and problems. Requires `viewer`.
+
+    No storage, no audit, no side effects — this is the "may I?" question that a
+    CLI, a UI draft or an AI agent asks before proposing anything (epic #93, D9:
+    MCP may propose and validate, never apply). Always 200: `valid: false` with the
+    `errors` list is the answer, and a validator that raises on invalid input is
+    awkward to call in a loop.
+
+    The checks are structural (shape, size, YAML/JSON parses, no redaction marker).
+    The protected-invariant and OPA policy gate is #100 and will extend this
+    function, not replace it.
+    """
+    require_roles(request, ROLE_VIEWER)
+    try:
+        normalised, warnings = remote_config.validate_config_map(body.config_map)
+    except remote_config.ConfigValidationError as exc:
+        return {
+            "valid": False,
+            "errors": exc.errors,
+            "warnings": [],
+            "config_hash": None,
+            "size_bytes": None,
+            "objects": None,
+        }
+    size = sum(len((entry.get("body") or "").encode("utf-8")) for entry in normalised.values())
+    return {
+        "valid": True,
+        "errors": [],
+        "warnings": warnings,
+        "config_hash": remote_config.compute_hash(normalised),
+        "size_bytes": size,
+        "objects": len(normalised),
+    }
+
+
 @app.get("/health", tags=["ops"], summary="Health check")
 def health_check():
     """Liveness/readiness probe: server status, agent count, OPA availability, posture.
 
     Unauthenticated. Returns `{"status": "healthy", "agents_connected": n,
     "opa_enabled": bool, "opa_url": str|null, "alerts_enabled": true,
-    "config_push": {"enabled", "insecure", "agent_auth", "audit", "tls"}}`.
+    "config_push": {"enabled", "insecure", "agent_auth", "audit", "tls",
+    "config_at_rest"}, "desired_configs": n}`.
     The `config_push` block is the public posture summary — `insecure: true` means
     config push is on despite an unsafe posture and the UI shows a banner.
+    `config_at_rest` is `encrypted`, `plaintext` (explicit development opt-out) or
+    `unconfigured` (#98): a plaintext config store must never be invisible.
     Prometheus metrics are served separately at `GET /metrics`.
     """
     from server.opa_client import OPAClient
@@ -1571,6 +2063,7 @@ def health_check():
         "opa_url": OPA_URL if OPA_ENABLED else None,
         "alerts_enabled": True,
         "config_push": posture.posture(),
+        "desired_configs": remote_config.REGISTRY.count(),
     }
 
 
@@ -1604,6 +2097,12 @@ def config_posture(request: Request):
         "admin_auth": {
             "mode": "password" if admin_auth.configured() else "disabled",
             "source": admin_auth.source(),
+        },
+        "config_at_rest": crypto.describe(),
+        "remote_config": {
+            "revisions": remote_config.REGISTRY.count(),
+            "max_bytes": remote_config.max_bytes(),
+            "retention_days": remote_config.retention_days(),
         },
     }
 

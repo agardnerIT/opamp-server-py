@@ -54,8 +54,11 @@ auth_app = typer.Typer(
     help="Admin auth: mode, sessions and identities (#95)", no_args_is_help=True
 )
 config_app = typer.Typer(
-    help="Config push posture (remote config control plane lands in #103)",
+    help="Remote config: posture, validate, push, withdraw (#81, #98)",
     no_args_is_help=True,
+)
+agent_config_app = typer.Typer(
+    help="Desired/effective config for one agent (#81)", no_args_is_help=True
 )
 audit_app = typer.Typer(
     help="Audit log: query, verify, export (#97)", no_args_is_help=True
@@ -63,6 +66,7 @@ audit_app = typer.Typer(
 
 app.add_typer(agents_app, name="agents", help="Agent inspection commands")
 agents_app.add_typer(token_app, name="token", help="Agent credentials (admin)")
+agents_app.add_typer(agent_config_app, name="config", help="Remote config for one agent")
 app.add_typer(reports_app, name="reports", help="Markdown fleet reports")
 app.add_typer(compliance_app, name="compliance", help="OPA policy compliance")
 app.add_typer(alerts_app, name="alerts", help="Alert configuration (admin)")
@@ -214,6 +218,20 @@ def health() -> None:
     _run(lambda oc: oc.health())
 
 
+def _read_config_file(path: Path) -> Dict[str, Any]:
+    """Build a one-object config map from a file on disk.
+
+    The file *is* the body; `--content-type` describes it. That is the shape a
+    collector config has in the real world, and it keeps `opampctl` usable in a
+    pipeline: `opampctl agents config set <id> --file collector.yaml`.
+    """
+    try:
+        body = path.read_text()
+    except OSError as exc:
+        _fail(f"Cannot read {path}: {exc}")
+    return {"": {"body": body, "content_type": "text/yaml"}}
+
+
 @config_app.command("posture")
 def config_posture() -> None:
     """Config push security posture: which requirements are met, and why not.
@@ -222,6 +240,117 @@ def config_posture() -> None:
     (no credential configured) can read it too.
     """
     _run(lambda oc: oc.config_posture())
+
+
+@config_app.command("validate")
+def config_validate(
+    file: Path = typer.Option(..., "--file", "-f", exists=True, dir_okay=False,
+                              help="Config body to validate"),
+    content_type: str = typer.Option("text/yaml", "--content-type",
+                                     help="MIME type of the body"),
+) -> None:
+    """Validate a config body without storing it (live server only).
+
+    Always exits 0 with `{"valid": bool, "errors": [...], "config_hash": ...}` — an
+    invalid config is an answer, not a failure. Use it in CI before proposing.
+    """
+    config_map = {"": {"body": file.read_text(), "content_type": content_type}}
+    _run(lambda oc: oc.validate_config(config_map))
+
+
+@config_app.command("apply")
+def config_apply(
+    file: Path = typer.Option(..., "--file", "-f", exists=True, dir_okay=False,
+                              help="Config body to push"),
+    content_type: str = typer.Option("text/yaml", "--content-type",
+                                     help="MIME type of the body"),
+    agent: List[str] = typer.Option([], "--agent", "-a",
+                                    help="Target agent id, repeatable"),
+    attr: List[str] = typer.Option([], "--attr",
+                                   help="Filter by metadata, repeatable: --attr environment=prod"),
+    confirm: bool = typer.Option(False, "--confirm",
+                                 help="Required: acknowledge the blast radius"),
+    note: Optional[str] = typer.Option(None, "--note", help="Reason, recorded in the audit log"),
+) -> None:
+    """Push one config to many agents (admin, live server only).
+
+    Requires `--confirm` and an explicit selector (`--agent` and/or `--attr`). A
+    missing selector is refused — it never means "all agents".
+    """
+    config_map = {"": {"body": file.read_text(), "content_type": content_type}}
+    filters: Dict[str, Any] = {}
+    for item in attr:
+        key, _, value = item.partition("=")
+        filters.setdefault(key, []).append(value)
+    _run(
+        lambda oc: oc.apply_agent_config(
+            config_map,
+            agents=agent or None,
+            filter=filters or None,
+            confirm=confirm,
+            note=note,
+        )
+    )
+
+
+@config_app.command("rotate-key")
+def config_rotate_key(
+    db: Path = typer.Option(..., "--db", exists=True, dir_okay=False,
+                            help="Path to opamp.db (required: this is a maintenance command)"),
+) -> None:
+    """Re-encrypt stored config bodies under the current CONFIG_AT_REST_KEY (#98).
+
+    Rotation procedure: set the new `CONFIG_AT_REST_KEY`, keep the old one in
+    `CONFIG_AT_REST_KEY_PREVIOUS`, run this, then drop the previous key. Runs
+    against the database file directly (no server, no credential), so it works on a
+    stopped server or a restored backup. Exits non-zero if any row cannot be read —
+    a rotation that silently skips rows is worse than one that stops.
+    """
+    from server import crypto
+    from server.state import SQLiteAgentStore, SQLiteDesiredConfigStore
+
+    if not crypto.configured():
+        _fail(f"{crypto.KEY_ENV} is not set: nothing to rotate to")
+    agent_store = SQLiteAgentStore(db)
+    config_store = SQLiteDesiredConfigStore(db)
+    rotated, failed = 0, []
+
+    for revision in config_store.sealed_revisions():
+        blob = revision.get("config_blob")
+        if not crypto.needs_rotation(blob):
+            continue
+        try:
+            config_store.reseal(
+                revision["revision_id"],
+                crypto.rotate_sealed(blob, f"revision:{revision['revision_id']}"),
+            )
+            rotated += 1
+        except crypto.ConfigDecryptError as exc:
+            failed.append({"revision_id": revision["revision_id"], "error": str(exc)})
+
+    for agent_id, state in agent_store.load_all().items():
+        sealed = state.sealed_effective_config
+        if not sealed or not crypto.needs_rotation(sealed):
+            continue
+        try:
+            agent_store.upsert(
+                type(state)(
+                    **{
+                        **state.__dict__,
+                        "effective_config": None,
+                        "sealed_effective_config": crypto.rotate_sealed(
+                            sealed, f"agent:{agent_id}"
+                        ),
+                    }
+                )
+            )
+            rotated += 1
+        except crypto.ConfigDecryptError as exc:
+            failed.append({"agent_id": agent_id, "error": str(exc)})
+
+    _emit({"rotated": rotated, "failed": failed, "db": str(db)})
+    if failed:
+        raise typer.Exit(code=1)
 
 
 # ------------------------------------------------------------------- admin auth
@@ -605,6 +734,91 @@ def agents_manifest(
         return
     _run(lambda oc: oc.generate_manifest(agent_id, version=version),
          raw_field="manifest_yaml" if raw else None)
+
+
+@agent_config_app.command("get")
+def agents_config_get(
+    agent_id: str = typer.Argument(..., help="Agent instance UID (hex)"),
+    reveal: bool = typer.Option(
+        False, "--reveal",
+        help="Show real secret values (approver role, audited as config.reveal)",
+    ),
+) -> None:
+    """Desired + effective config for one agent — redacted unless `--reveal`.
+
+    Works offline (`--db`): the effective config is read straight from SQLite and
+    is **always** redacted there, because offline mode has no credential and no
+    audit trail to record a reveal in.
+    """
+    if _settings.offline:
+        from server import redaction
+        from server.state import SQLiteDesiredConfigStore
+
+        state = _offline_get_state(agent_id)
+        effective, paths = state.redacted_effective_config()
+        store = SQLiteDesiredConfigStore(_settings.db)
+        current = store.current(agent_id)
+        _emit(
+            {
+                "agent_id": agent_id,
+                "desired": {
+                    "revision_id": current["revision_id"],
+                    "config_hash": current["config_hash"],
+                    "author": current["author"],
+                    "created_at": current["created_at"],
+                    "withdrawn": bool(current.get("withdrawn")),
+                    "failed_at": current.get("failed_at"),
+                }
+                if current
+                else None,
+                "effective": {
+                    "config": json.loads(effective) if effective else None,
+                    "redacted": bool(paths),
+                    "redacted_paths": paths,
+                    "config_error": state.config_error,
+                },
+                "remote_config_status": {
+                    "status": state.remote_config_status,
+                    "last_remote_config_hash": state.last_remote_config_hash,
+                    "error": state.remote_config_error,
+                },
+                "note": "offline: config bodies are redacted and never revealed",
+            }
+        )
+        return
+    _run(lambda oc: oc.get_agent_config(agent_id, reveal=reveal))
+
+
+@agent_config_app.command("set")
+def agents_config_set(
+    agent_id: str = typer.Argument(..., help="Agent instance UID (hex)"),
+    file: Path = typer.Option(..., "--file", "-f", exists=True, dir_okay=False,
+                              help="Config body to push"),
+    content_type: str = typer.Option("text/yaml", "--content-type",
+                                     help="MIME type of the body"),
+    note: Optional[str] = typer.Option(None, "--note",
+                                       help="Reason, recorded in the audit log"),
+) -> None:
+    """Push a desired config to one agent (approver, live server only).
+
+    The file becomes the single config object (`""` key). Delivery happens on the
+    agent's next status report, and only when its hash differs — a failed revision
+    is never retried automatically.
+    """
+    config_map = _read_config_file(file)
+    config_map[""]["content_type"] = content_type
+    _run(lambda oc: oc.set_agent_config(agent_id, config_map, note=note))
+
+
+@agent_config_app.command("withdraw")
+def agents_config_withdraw(
+    agent_id: str = typer.Argument(..., help="Agent instance UID (hex)"),
+) -> None:
+    """Withdraw the desired config (approver, live server only).
+
+    Pushes an empty config map, which tells the agent to run its local config.
+    """
+    _run(lambda oc: oc.delete_agent_config(agent_id))
 
 
 @agents_app.command("compliance")

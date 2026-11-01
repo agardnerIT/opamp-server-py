@@ -19,9 +19,12 @@ import pytest
 
 from server import agent_auth, alerts, audit, auth, crypto, remote_config
 from server.state import (
+    AGENT_REGISTRY,
+    SQLiteAgentStore,
     SQLiteAuditStore,
     SQLiteCredentialStore,
     SQLiteDesiredConfigStore,
+    SQLiteMetricsStore,
     SQLitePrincipalStore,
     SQLiteSessionStore,
 )
@@ -50,6 +53,19 @@ def isolated_global_stores(monkeypatch, tmp_path):
             SQLiteDesiredConfigStore(tmp_path / "config.db")
         ),
     )
+    # The agent registry and the metrics cache also default to the repository's
+    # `data/opamp.db`. Swap the *store* (not the registry object — every module and
+    # test already holds a reference to it) and drop whatever the import loaded, so
+    # no test reads a developer's fleet or writes a test fleet into the repo (#107).
+    monkeypatch.setattr(AGENT_REGISTRY, "_store", SQLiteAgentStore(tmp_path / "agents.db"))
+    AGENT_REGISTRY._agents.clear()
+    AGENT_REGISTRY._persisted_at.clear()
+    from server import main as server_main
+
+    monkeypatch.setattr(
+        server_main, "_METRICS_STORE", SQLiteMetricsStore(tmp_path / "metrics.db")
+    )
+    server_main.AGENT_METRICS.clear()
     # Decoded encryption keys are cached against the raw env value; a test that sets
     # a key must not leak it into the next one.
     crypto.reset_key_cache()
@@ -60,6 +76,9 @@ def isolated_global_stores(monkeypatch, tmp_path):
     audit.reset_circuit_breaker()
     audit.reset_prune_timer()
     yield
+    AGENT_REGISTRY._agents.clear()
+    AGENT_REGISTRY._persisted_at.clear()
+    server_main.AGENT_METRICS.clear()
     auth.reset_lockouts()
     audit.reset_circuit_breaker()
     crypto.reset_key_cache()

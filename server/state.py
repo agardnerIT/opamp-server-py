@@ -214,7 +214,9 @@ class SQLiteMetricsStore:
                     "agent_id TEXT PRIMARY KEY, metrics TEXT NOT NULL, updated_at TEXT NOT NULL)"
                 )
         except sqlite3.Error as exc:
-            logger.warning(f"Could not init metrics store at {db_path}: {exc}")
+            logger.bind(event="store.write_failed", operation="metrics_init", error=str(exc)).warning(
+                f"Could not init metrics store at {db_path}: {exc}"
+            )
 
     def upsert(self, agent_id: str, entry: Dict[str, Any]) -> None:
         try:
@@ -225,7 +227,12 @@ class SQLiteMetricsStore:
                     (agent_id, json.dumps(entry.get("metrics", {})), entry.get("updated_at") or utcnow().isoformat()),
                 )
         except sqlite3.Error as exc:
-            logger.warning(f"Could not persist metrics for {agent_id}: {exc}")
+            logger.bind(
+                event="store.write_failed",
+                operation="metrics_upsert",
+                agent_id=agent_id,
+                error=str(exc),
+            ).warning(f"Could not persist metrics for {agent_id}: {exc}")
 
     def get(self, agent_id: str) -> Optional[Dict[str, Any]]:
         try:
@@ -234,7 +241,9 @@ class SQLiteMetricsStore:
                     "SELECT metrics, updated_at FROM agent_metrics WHERE agent_id=?", (agent_id,)
                 ).fetchone()
         except sqlite3.Error as exc:
-            logger.warning(f"Could not read metrics for {agent_id}: {exc}")
+            logger.bind(
+                event="store.read_failed", operation="metrics_get", agent_id=agent_id, error=str(exc)
+            ).warning(f"Could not read metrics for {agent_id}: {exc}")
             return None
         if not row:
             return None
@@ -249,7 +258,12 @@ class SQLiteMetricsStore:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute("DELETE FROM agent_metrics WHERE agent_id=?", (agent_id,))
         except sqlite3.Error as exc:
-            logger.warning(f"Could not delete metrics for {agent_id}: {exc}")
+            logger.bind(
+                event="store.write_failed",
+                operation="metrics_delete",
+                agent_id=agent_id,
+                error=str(exc),
+            ).warning(f"Could not delete metrics for {agent_id}: {exc}")
 
 class SQLiteCredentialStore:
     """Per-agent OpAMP credentials (#94): one row per issued token.
@@ -905,7 +919,11 @@ class SQLiteDesiredConfigStore:
             "  THEN desired_configs.previous_revision_id "
             "  ELSE desired_configs.revision_id END, "
             "delivered_hash=NULL, delivered_at=NULL, last_status=NULL, last_error=NULL, "
-            "attempts=0, unconfirmed=0, updated_at=excluded.updated_at",
+            # Poison is a fact about the revision that failed (D6), not about the
+            # agent: a new assignment must be deliverable even when the one it
+            # replaces was poisoned. Without this a rollback after a failed push is
+            # silently undeliverable — the one-click recovery the epic promises.
+            "attempts=0, poisoned=0, unconfirmed=0, updated_at=excluded.updated_at",
             (agent_id, revision_id, previous_id, now),
         )
 

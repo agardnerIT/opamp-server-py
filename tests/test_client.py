@@ -183,9 +183,16 @@ class TestOpsAndAuth:
         data = oc.config_posture()
         assert data["config_push"]["enabled"] is False
         assert data["allowed"] is False
-        assert set(data["requirements"]) == {"admin_auth", "agent_auth", "tls"}
+        # #97 added `audit` as a fourth requirement (and it is met by default).
+        assert set(data["requirements"]) == {
+            "admin_auth",
+            "agent_auth",
+            "tls",
+            "audit",
+        }
         assert data["requirements"]["admin_auth"]["met"] is True
-        # admin auth is met here, so agent auth + TLS are the two remaining gaps.
+        assert data["requirements"]["audit"]["met"] is True
+        # admin auth and audit are met here, so agent auth + TLS are the two gaps.
         assert len(data["unmet"]) == 2
 
     def test_auth_verify_ok_and_bad(self, monkeypatch):
@@ -465,3 +472,45 @@ class TestAgentCredentials:
             with pytest.raises(OpampApiError) as exc:
                 c.create_agent_token("not-a-uid")
             assert exc.value.status_code == 422
+
+
+# --- audit log (#97) -------------------------------------------------------------
+
+class TestAudit:
+    def test_log_verify_and_export(self, oc):
+        from server.audit import audit_event
+
+        audit_event("config.propose", principal="alice", role="operator", target_id="ab" * 16)
+
+        log = oc.audit_log(action="config.", limit=10)
+        assert log["total"] >= 1
+        assert log["entries"][0]["action"] == "config.propose"
+        assert set(
+            ["id", "ts", "actor", "actor_kind", "role", "action", "result", "entry_hash"]
+        ) <= set(log["entries"][0])
+        assert log["enabled"] is True
+
+        assert oc.audit_verify()["ok"] is True
+
+        jsonl = oc.audit_export(format="jsonl")
+        assert isinstance(jsonl, str)
+        assert json.loads(jsonl.strip().splitlines()[0])["action"] == "config.propose"
+
+        rows = oc.audit_export(format="csv").strip().splitlines()
+        assert rows[0].startswith("id,ts,actor")
+
+    def test_requires_admin(self, oc):
+        auth_token = oc.login(name="admin", password="client-pw-123456")["token"]
+        with make_client(token=auth_token) as c:
+            a_viewer = c.create_principal("v", "viewer", "viewer-pw-123")
+            viewer_token = c.login(name="v", password="viewer-pw-123")["token"]
+        with make_client(token=viewer_token) as c:
+            with pytest.raises(OpampApiError) as exc:
+                c.audit_log()
+            assert exc.value.status_code == 403
+        assert a_viewer["role"] == "viewer"
+
+    def test_malformed_timestamp_is_422(self, oc):
+        with pytest.raises(OpampApiError) as exc:
+            oc.audit_log(since="not-a-date")
+        assert exc.value.status_code == 422

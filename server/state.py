@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import sqlite3
@@ -590,6 +591,406 @@ class SQLiteSessionStore:
                 "DELETE FROM admin_sessions WHERE expires_at < ?", (cutoff,)
             )
             return cursor.rowcount or 0
+
+
+# ---------------------------------------------------------------------------- audit
+
+# The hash that starts the chain: the `prev_hash` of the very first row. Fixed so a
+# verifier can tell "nothing was ever deleted" from "something was deleted".
+AUDIT_GENESIS = "0" * 64
+
+# Columns covered by `entry_hash`, in a fixed order. `id` is excluded on purpose:
+# it is assigned by SQLite, so including it would make the hash unverifiable from
+# the stored values alone. `entry_hash` cannot cover itself.
+AUDIT_HASH_FIELDS = (
+    "ts",
+    "actor",
+    "actor_kind",
+    "role",
+    "action",
+    "target_kind",
+    "target_id",
+    "revision_id",
+    "config_hash",
+    "result",
+    "detail_json",
+    "prev_hash",
+)
+
+AUDIT_COLUMNS = AUDIT_HASH_FIELDS + ("entry_hash",)
+
+# Export order: `id` first (what a human sorts by), then the hashed columns.
+AUDIT_EXPORT_COLUMNS = ("id",) + AUDIT_HASH_FIELDS + ("entry_hash",)
+
+
+def audit_entry_hash(values: Dict[str, Any]) -> str:
+    """SHA-256 over the canonical JSON of one audit row (sans `id`/`entry_hash`).
+
+    Canonical = sorted keys, no whitespace, UTF-8, `None` rendered as `null`. Any
+    change to any covered field changes the hash, which is what makes a silent edit
+    detectable by `verify()` without write access to the chain.
+    """
+    canonical = {field: values.get(field) for field in AUDIT_HASH_FIELDS}
+    payload = json.dumps(
+        canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _normalise_audit_ts(value: Optional[str]) -> Optional[str]:
+    """Re-serialise a caller-supplied timestamp so string comparison is safe.
+
+    Rows are written with `datetime.isoformat()` in UTC (`+00:00`). A filter of
+    `2026-10-01T00:00:00Z` is valid for a human and would sort wrongly against
+    `+00:00` suffixes, so bounds go through the same round trip as the rows.
+    """
+    if not value:
+        return None
+    text = value.strip().replace("Z", "+00:00")
+    parsed = datetime.fromisoformat(text)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
+class SQLiteAuditStore:
+    """Append-only, hash-chained audit log (#97).
+
+    One table, and every row's `entry_hash` covers the row plus the previous row's
+    hash. Silent edits are detectable by :meth:`verify`; an attacker with write
+    access can rebuild the chain from the start, which is why the docs say export
+    entries off-box if you need real assurance.
+
+    Writes are **fail-closed**: `append()` raises so a privileged caller can refuse
+    to act. Reads are best-effort in the caller (`server/audit.py`), because a
+    dashboard that cannot read the log should show an error, not crash the server.
+
+    `BEGIN IMMEDIATE` around read-tail-then-insert is the part that matters under
+    load: uvicorn runs one worker today, but a second one would otherwise read the
+    same tail, compute two different rows with the same `prev_hash`, and split the
+    chain. The write lock serialises them instead.
+
+    Pruning keeps the chain verifiable: a prune first appends an `audit.checkpoint`
+    row recording the hash it cut to, so `verify()` anchors there instead of
+    reporting a break that would then be permanent.
+    """
+
+    def __init__(self, db_path: Path = DB_PATH):
+        self.db_path = db_path
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._connect() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS audit_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts TEXT NOT NULL,
+                    actor TEXT NOT NULL,
+                    actor_kind TEXT NOT NULL,
+                    role TEXT,
+                    action TEXT NOT NULL,
+                    target_kind TEXT,
+                    target_id TEXT,
+                    revision_id TEXT,
+                    config_hash TEXT,
+                    result TEXT NOT NULL,
+                    detail_json TEXT,
+                    prev_hash TEXT,
+                    entry_hash TEXT NOT NULL
+                )
+            """)
+            conn.execute("CREATE INDEX IF NOT EXISTS audit_log_ts_idx ON audit_log(ts)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS audit_log_actor_idx ON audit_log(actor)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS audit_log_action_idx ON audit_log(action)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS audit_log_target_idx "
+                "ON audit_log(target_kind, target_id)"
+            )
+            conn.execute("PRAGMA journal_mode=WAL")
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=5000")
+        return conn
+
+    @staticmethod
+    def _row(row) -> Dict[str, Any]:
+        return {key: row[key] for key in row.keys()}
+
+    # ------------------------------------------------------------------ writes
+
+    def _append_on(self, conn: sqlite3.Connection, entry: Dict[str, Any]) -> Dict[str, Any]:
+        """Insert one row on an already-open write transaction."""
+        tail = conn.execute(
+            "SELECT entry_hash FROM audit_log ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        row = {field: entry.get(field) for field in AUDIT_HASH_FIELDS}
+        row["prev_hash"] = tail["entry_hash"] if tail else AUDIT_GENESIS
+        row["entry_hash"] = audit_entry_hash(row)
+        conn.execute(
+            "INSERT INTO audit_log ({}) VALUES ({})".format(
+                ", ".join(AUDIT_COLUMNS), ", ".join("?" for _ in AUDIT_COLUMNS)
+            ),
+            tuple(row[column] for column in AUDIT_COLUMNS),
+        )
+        row["id"] = conn.execute("SELECT last_insert_rowid() AS id").fetchone()["id"]
+        return row
+
+    def append(self, entry: Dict[str, Any]) -> Dict[str, Any]:
+        """Append one entry and return the stored row (including `id`/`entry_hash`).
+
+        Raises `sqlite3.Error` when the row cannot be written — the caller decides
+        whether that is fatal (privileged mutations) or not (denials).
+        """
+        conn = self._connect()
+        try:
+            # Manual transaction: `sqlite3`'s implicit BEGIN is deferred, and a
+            # deferred read followed by a write is how two writers race for the tail.
+            conn.isolation_level = None
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._append_on(conn, entry)
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+            conn.execute("COMMIT")
+            return row
+        finally:
+            conn.close()
+
+    def prune(self, cutoff: str, limit: int = 10000) -> int:
+        """Delete entries older than `cutoff`, with a checkpoint row recording the cut.
+
+        Returns the number of rows deleted (0 when nothing is old enough). The
+        checkpoint is appended *before* the delete and is itself retained, so the
+        first surviving row's `prev_hash` is explainable rather than alarming.
+        """
+        cutoff = _normalise_audit_ts(cutoff) or cutoff
+        conn = self._connect()
+        try:
+            conn.isolation_level = None
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                rows = conn.execute(
+                    "SELECT id, ts, entry_hash FROM audit_log "
+                    "WHERE ts < ? AND action != 'audit.checkpoint' "
+                    "ORDER BY id LIMIT ?",
+                    (cutoff, int(limit)),
+                ).fetchall()
+                if not rows:
+                    conn.execute("COMMIT")
+                    return 0
+                last = rows[-1]
+                self._append_on(
+                    conn,
+                    {
+                        "ts": utcnow().isoformat(),
+                        "actor": "system",
+                        "actor_kind": "system",
+                        "role": None,
+                        "action": "audit.checkpoint",
+                        "target_kind": "server",
+                        "target_id": None,
+                        "revision_id": None,
+                        "config_hash": None,
+                        "result": "ok",
+                        "detail_json": json.dumps(
+                            {
+                                "pruned_rows": len(rows),
+                                "pruned_through_id": last["id"],
+                                "pruned_through_ts": last["ts"],
+                                "pruned_through_hash": last["entry_hash"],
+                                "cutoff": cutoff,
+                            },
+                            sort_keys=True,
+                        ),
+                    },
+                )
+                conn.execute("DELETE FROM audit_log WHERE id <= ?", (last["id"],))
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
+            conn.execute("COMMIT")
+            return len(rows)
+        finally:
+            conn.close()
+
+    # ------------------------------------------------------------------- reads
+
+    def list_entries(
+        self,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
+        actor: Optional[str] = None,
+        action: Optional[str] = None,
+        target: Optional[str] = None,
+        result: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """Newest first. Filters are exact except `action`, which is a prefix.
+
+        Prefix matching on `action` is what makes `action=config.` a useful filter
+        (`config.propose`, `config.apply`, ...) without a second parameter.
+        """
+        where, params = _audit_filter_clause(since, until, actor, action, target, result)
+        sql = "SELECT * FROM audit_log" + where + " ORDER BY id DESC LIMIT ? OFFSET ?"
+        params.extend([max(1, int(limit)), max(0, int(offset))])
+        with self._connect() as conn:
+            return [self._row(row) for row in conn.execute(sql, params).fetchall()]
+
+    def count_entries(
+        self,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
+        actor: Optional[str] = None,
+        action: Optional[str] = None,
+        target: Optional[str] = None,
+        result: Optional[str] = None,
+    ) -> int:
+        """Rows matching the same filters as `list_entries` (for pagination)."""
+        where, params = _audit_filter_clause(since, until, actor, action, target, result)
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM audit_log" + where, params
+            ).fetchone()
+        return int(row["n"]) if row else 0
+
+    def count(self) -> int:
+        with self._connect() as conn:
+            row = conn.execute("SELECT COUNT(*) AS n FROM audit_log").fetchone()
+        return int(row["n"]) if row else 0
+
+    def bounds(self) -> Dict[str, Any]:
+        """`{count, first_ts, last_ts, first_id, last_id}` for status displays."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n, MIN(ts) AS first_ts, MAX(ts) AS last_ts, "
+                "MIN(id) AS first_id, MAX(id) AS last_id FROM audit_log"
+            ).fetchone()
+        return {
+            "count": int(row["n"] or 0),
+            "first_ts": row["first_ts"],
+            "last_ts": row["last_ts"],
+            "first_id": row["first_id"],
+            "last_id": row["last_id"],
+        }
+
+    def verify(self) -> Dict[str, Any]:
+        """Recompute the whole chain. Returns a verdict, never raises on tampering.
+
+        Reported fields: `ok`, counts, the id where verification broke (if it did),
+        why, and whether the chain was anchored by a retention checkpoint (which is
+        the one legitimate reason the first retained row does not point at genesis).
+        """
+        with self._connect() as conn:
+            rows = [
+                self._row(row)
+                for row in conn.execute("SELECT * FROM audit_log ORDER BY id").fetchall()
+            ]
+
+        report: Dict[str, Any] = {
+            "ok": True,
+            "entries": len(rows),
+            "checked": 0,
+            "broken_at": None,
+            "reason": None,
+            "anchored_by_checkpoint": False,
+            "first_id": rows[0]["id"] if rows else None,
+            "last_id": rows[-1]["id"] if rows else None,
+            "first_ts": rows[0]["ts"] if rows else None,
+            "last_ts": rows[-1]["ts"] if rows else None,
+        }
+        if not rows:
+            return report
+
+        expected_prev = AUDIT_GENESIS
+        first_prev = rows[0]["prev_hash"]
+        if first_prev != AUDIT_GENESIS:
+            anchor = _checkpoint_anchor(rows, first_prev)
+            if anchor is None:
+                report.update(
+                    ok=False,
+                    broken_at=rows[0]["id"],
+                    reason=(
+                        "the first retained entry does not chain to genesis and no "
+                        "checkpoint accounts for the gap: entries were deleted"
+                    ),
+                )
+                return report
+            report["anchored_by_checkpoint"] = True
+            expected_prev = first_prev
+
+        for row in rows:
+            report["checked"] += 1
+            if row["prev_hash"] != expected_prev:
+                report.update(
+                    ok=False,
+                    broken_at=row["id"],
+                    reason="prev_hash does not match the previous entry: a row was removed or reordered",
+                )
+                return report
+            if audit_entry_hash(row) != row["entry_hash"]:
+                report.update(
+                    ok=False,
+                    broken_at=row["id"],
+                    reason="entry_hash does not match the row contents: the row was edited",
+                )
+                return report
+            expected_prev = row["entry_hash"]
+
+        return report
+
+
+def _audit_filter_clause(
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    actor: Optional[str] = None,
+    action: Optional[str] = None,
+    target: Optional[str] = None,
+    result: Optional[str] = None,
+) -> tuple:
+    """Build the WHERE clause shared by listing and counting."""
+    clauses: List[str] = []
+    params: List[Any] = []
+    if since:
+        clauses.append("ts >= ?")
+        params.append(_normalise_audit_ts(since))
+    if until:
+        clauses.append("ts <= ?")
+        params.append(_normalise_audit_ts(until))
+    if actor:
+        clauses.append("actor = ?")
+        params.append(actor)
+    if action:
+        clauses.append("action LIKE ?")
+        params.append(f"{action}%")
+    if target:
+        clauses.append("(target_id = ? OR revision_id = ?)")
+        params.extend([target, target])
+    if result:
+        clauses.append("result = ?")
+        params.append(result)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    return where, params
+
+
+def _checkpoint_anchor(rows: List[Dict[str, Any]], first_prev: str) -> Optional[str]:
+    """Hash recorded by a retention checkpoint for the row before the first survivor."""
+    """Hash a retention checkpoint recorded for the row before the first survivor."""
+    for row in rows:
+        if row["action"] != "audit.checkpoint":
+            continue
+        try:
+            detail = json.loads(row["detail_json"] or "{}")
+        except ValueError:
+            continue
+        if detail.get("pruned_through_hash") == first_prev:
+            return first_prev
+    return None
 
 
 COMPONENT_TYPES = {

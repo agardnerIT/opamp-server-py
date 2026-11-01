@@ -153,8 +153,7 @@ With `token`:
   rejected before any state is applied, so the real agent's record is untouched;
 - every rejection is counted in `opamp_agent_auth_failures_total{reason}` —
   `missing`, `malformed`, `unknown`, `revoked`, `uid_mismatch`,
-  `binding_conflict` — and written through the audit seam (#97 replaces it with
-  the append-only log);
+  `binding_conflict` — and written to the [audit log](#audit-log);
 - a live WebSocket binding may only move to the **same** principal, so a second
   connection cannot take over an agent (a legitimate reconnect moves cleanly).
 
@@ -234,7 +233,8 @@ published to the world is a fleet takeover, so the defaults are now closed:
    once you turn this on.
 4. **Set `CORS_ORIGINS`** to the origin the UI is served from instead of `*`.
 5. **Keep config push off** until the posture check passes for you. Turning it on
-   is refused at startup unless admin auth, agent auth and TLS are all in place:
+   is refused at startup unless admin auth, agent auth, TLS and a writable audit
+   log are all in place:
 
 ```bash
 OPAMP_CONFIG_PUSH_ENABLED=true uvicorn server.main:app --port 4320
@@ -242,6 +242,7 @@ OPAMP_CONFIG_PUSH_ENABLED=true uvicorn server.main:app --port 4320
 #   - admin auth is not configured: ...
 #   - agents are not authenticated: ...
 #   - the server is not served over TLS: ...
+#   - the audit log is not available: ...
 ```
 
 The only way past that is `OPAMP_ALLOW_INSECURE_CONFIG_PUSH=true`, which is for
@@ -252,10 +253,56 @@ Check your posture at any time:
 
 ```bash
 curl -s localhost:4320/health | jq .config_push
-# {"enabled": false, "insecure": false, "agent_auth": "off", "audit": false, "tls": false}
+# {"enabled": false, "insecure": false, "agent_auth": "off", "audit": true, "tls": false}
 opampctl --password "$ADMIN_PASSWORD" health   # same, plus config_push
 curl -s -u ":$ADMIN_PASSWORD" localhost:4320/config/posture | jq .requirements
 ```
+
+## Audit log
+
+Every privileged decision — a login, a lockout, a session revoked, a principal
+created, an agent credential minted or revoked, an agent auth failure — writes
+exactly one row to `audit_log` in `data/opamp.db`. From #99 onward, every
+config-push action lands there too, so "who pushed that config to 400 collectors"
+has an answer that does not depend on anyone remembering.
+
+```bash
+opampctl --password "$ADMIN_PASSWORD" audit list --action config. --limit 20
+opampctl --password "$ADMIN_PASSWORD" audit list --actor alice --since 2026-10-01
+opampctl --password "$ADMIN_PASSWORD" audit verify            # exit 1 if the chain is broken
+opampctl --password "$ADMIN_PASSWORD" audit export -f jsonl -o audit.jsonl
+```
+
+**Hash-chained.** Each row stores `prev_hash` (the previous row's `entry_hash`) and
+an `entry_hash` over its own canonical JSON. `GET /audit/verify` recomputes the
+whole chain: an edited row fails an `entry_hash` check, a deleted or reordered row
+fails a `prev_hash` check, and `broken_at` names where it shows. Be honest about
+the limits — an attacker with write access to the database can rebuild the chain
+from the start, so export entries off-box (`audit export`) if the log is evidence.
+
+**Fail closed.** A privileged action records its decision *before* acting, and if
+the row cannot be written the action does not happen (HTTP 500, nothing mutated).
+Denials and auth failures are the exception: those are logged best-effort, because
+turning a 401 into a 500 when the disk is full is an outage caused by bookkeeping.
+After 5 consecutive write failures the best-effort path pauses for 60s — `AUDIT`
+lines in the server log keep flowing, and `/health` reports `audit: false`.
+
+**No bodies, no secrets.** Entries carry actor, role, action, target, result and a
+small redacted `detail_json` — hashes, counts, verdict codes. Fields named like
+credentials are dropped at the seam, so passing a token by accident cannot store
+it. Config *bodies* never appear; `config_hash` does (that is the #99 seam).
+
+**Retention.** `AUDIT_RETENTION_DAYS` (default 365; `0` keeps forever) prunes at
+most hourly. A prune writes an `audit.checkpoint` row recording the hash it cut to
+before deleting, so `/audit/verify` anchors there instead of reporting a permanent
+break; deleting rows *before* the checkpoint still shows up as tampering.
+
+| Result | Means |
+|---|---|
+| `ok` | the action was performed |
+| `denied` | refused before acting (bad credential, insufficient role, locked out) |
+| `error` | recorded, then the mutation failed (see the second row for the outcome) |
+| `noop` | idempotent no-change (e.g. logging out twice) |
 
 ## Capacity and deployment topology
 
@@ -321,7 +368,8 @@ client under-reports server capacity — use `BENCH_CLIENTS` to spread the load.
 | `OPAMP_AGENT_AUTH` | `off` | Agent authentication on `/v1/opamp`: `off` \| `token` \| `mtls`. `token` requires `Authorization: Bearer <token>` per agent (see [Agent authentication](#agent-authentication-agent--server)); `mtls` is reported but not enforced by this build. `off` logs a startup warning, and config push refuses to start without `token` |
 | `PUBLIC_URL` | *(empty)* | Public URL agents/browsers use. `https://` or `wss://` counts as TLS for the posture check |
 | `TLS_TERMINATED_UPSTREAM` | `false` | Assert that a TLS terminator you control sits in front of the server (see `docker/`). Assertion only — keep the server on loopback |
-| `OPAMP_AUDIT_ENABLED` | `false` | Reports audit-log availability for privileged actions (#97); always `false` today |
+| `OPAMP_AUDIT_ENABLED` | `true` | Append-only, hash-chained audit log for privileged actions (#97). **On by default**: a privileged action that cannot be recorded is refused, so turning this off makes the server read-only for writes. Reported in `/health` as `config_push.audit` |
+| `AUDIT_RETENTION_DAYS` | `365` | Entries older than this are pruned (at most hourly) with an `audit.checkpoint` row recording the cut. `0` keeps everything |
 | `OPAMP_ALLOW_INSECURE_CONFIG_PUSH` | `false` | **Local development only.** Starts with config push enabled on an insecure posture: red warning, `insecure: true` in `/health`, permanent UI banner. See [Before you expose this server](#before-you-expose-this-server) |
 
 ## Alerts (Webhook)
@@ -495,6 +543,9 @@ secret only) or `disabled` (read-only mode).
 | POST | `/alerts/test` | operator | Send a test alert (optionally with a temporary `event_config`) |
 | GET | `/health` | | Health check (server status, agent count, OPA availability) plus the public `config_push` posture block |
 | GET | `/config/posture` | viewer | Full config push posture: every requirement, what is met, where the admin credential came from, whether the override is on. No secrets |
+| GET | `/audit` | admin | Privileged-action history, newest first. Filters `since`, `until`, `actor`, `action` (prefix), `target`, `result`; `limit`/`offset` paginated. Hashes only — never a config body or a secret |
+| GET | `/audit/verify` | admin | Recompute the hash chain. `ok: false` + `broken_at` means the log is no longer evidence; `anchored_by_checkpoint` is benign retention |
+| GET | `/audit/export` | admin | `format=jsonl` (SIEM) or `csv` (spreadsheet), oldest first, `Content-Disposition: attachment` |
 | GET | `/metrics` | | Prometheus metrics |
 
 `Role` is the minimum role; roles are ordered (`viewer` < `operator` < `approver` <
@@ -552,6 +603,13 @@ opampctl alerts get
 opampctl alerts set @alerts.json            # JSON from file (or inline JSON)
 opampctl alerts test --event-type new_agent
 
+# Audit log (#97) — who did what
+history = oc.audit_log(action="config.", limit=50)   # `action` is a prefix match
+for entry in history["entries"]:
+    print(entry["ts"], entry["actor"], entry["action"], entry["result"])
+print(oc.audit_verify())          # {"ok": True, ...} — tamper check over the hash chain
+print(oc.audit_export(format="jsonl"))   # raw text, oldest first
+
 # Admin identity and sessions (#95)
 opampctl auth status                        # auth_mode, roles, live principals
 opampctl auth whoami                        # your name, role, session expiry
@@ -603,17 +661,21 @@ opampctl --show-completion      # show the install command/instructions
 ## MCP Server (for AI agents)
 
 An [MCP](https://modelcontextprotocol.io) server (`opamp-mcp` / `python -m mcp_server`)
-exposes 21 typed tools mirroring the API: `list_agents`, `get_agent`,
+exposes 24 typed tools mirroring the API: `list_agents`, `get_agent`,
 `get_agent_metrics`, `generate_manifest`, `fleet_report`, `heavy_collectors_report`,
 `outdated_collectors_report`, `get_compliance`, `check_compliance`,
 `compliance_summary`, `list_policies`, `validate_policies`, `reload_policies`,
 `get_alerts`, `update_alerts`, `test_alerts`, `agent_report`, `health`, `auth_status`,
-`whoami`, `config_posture`.
+`whoami`, `config_posture`, `audit_log`, `audit_verify`, `audit_export`.
 
 **Identity is never delegated to MCP.** Logins, principals and sessions have no MCP
 tools at all — minting an identity is a human/IaC action, not a tool call an AI can
 be talked into. `whoami` exists so an agent can *see* which role it is acting as
 before suggesting a privileged step.
+
+**Reading the audit log is always allowed.** `audit_log`, `audit_verify` and
+`audit_export` are read-only tools and are never gated: an AI agent asked "who
+pushed this" must be able to answer from evidence, not from its own summary.
 
 **Write tools are absent, not failing.** `create_agent_token` and
 `revoke_agent_token` only exist when the MCP process is started with
@@ -675,6 +737,13 @@ token = oc.create_agent_token("4f3c2b1a...", label="prod-1")["token"]
 print(oc.get_agent("4f3c2b1a...")["credential"])
 print(oc.revoke_agent_token("4f3c2b1a..."))   # {"revoked": 1}
 
+# Audit log (#97) — who did what
+history = oc.audit_log(action="config.", limit=50)   # `action` is a prefix match
+for entry in history["entries"]:
+    print(entry["ts"], entry["actor"], entry["action"], entry["result"])
+print(oc.audit_verify())          # {"ok": True, ...} — tamper check over the hash chain
+print(oc.audit_export(format="jsonl"))   # raw text, oldest first
+
 # Admin identity and sessions (#95)
 session = oc.login("bob", "…")             # POST /auth/session -> token, role, expiry
 scoped = OpampClient(base_url="http://localhost:4320", token=session["token"])
@@ -700,7 +769,7 @@ pytest tests/ -v
 
 ```
 opamp-server-py/
-├── server/          # FastAPI server
+├── server/          # FastAPI server (audit.py = append-only audit seam, #97)
 ├── client/          # opamp_client — shared HTTP client library
 ├── cli/             # opampctl CLI (typer, JSON output)
 ├── mcp_server/      # FastMCP server (stdio/SSE) for AI agents

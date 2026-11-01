@@ -49,7 +49,7 @@ from fastapi import HTTPException, Request
 from loguru import logger
 
 from server import admin_auth
-from server.audit import audit_event
+from server.audit import AuditError, audit_event, audit_required, preflight
 from server.state import (
     SQLitePrincipalStore,
     SQLiteSessionStore,
@@ -448,20 +448,23 @@ def create_principal(
             raise ValueError("expires_at must be an ISO-8601 timestamp") from exc
 
     principal_id = "prin_" + secrets.token_hex(8)
+    # #97: record before acting. A principal that cannot be audited is not created.
+    audit_required(
+        "admin.principal.created",
+        kind="admin_auth",
+        result="ok",
+        principal=clean_name,
+        role=clean_role,
+        actor_kind="human",
+        target_kind="principal",
+        target_id=principal_id,
+    )
     record = PRINCIPALS.create(
         principal_id,
         clean_name,
         clean_role,
         hash_password(password),
         expires_at=expires_at or None,
-    )
-    audit_event(
-        "admin.principal.created",
-        kind="admin_auth",
-        result="ok",
-        principal=clean_name,
-        role=clean_role,
-        principal_id=principal_id,
     )
     logger.info(f"admin principal {clean_name!r} created with role {clean_role}")
     return _principal_view(record)
@@ -485,18 +488,21 @@ def revoke_principal(principal_id: str) -> Dict[str, Any]:
     record = PRINCIPALS.get(principal_id)
     if record is None:
         raise LookupError("principal not found")
+    # #97: pre-write, then act — a revocation that cannot be recorded must not
+    # happen, because "who still has access" is the first question after an incident.
+    audit_required(
+        "admin.principal.revoked",
+        kind="admin_auth",
+        result="noop" if record.get("revoked_at") else "ok",
+        principal=record["name"],
+        role=record["role"],
+        actor_kind="human",
+        target_kind="principal",
+        target_id=principal_id,
+    )
     revoked = PRINCIPALS.revoke(principal_id)
     sessions = SESSIONS.revoke_principal(principal_id)
     if revoked:
-        audit_event(
-            "admin.principal.revoked",
-            kind="admin_auth",
-            result="ok",
-            principal=record["name"],
-            role=record["role"],
-            principal_id=principal_id,
-            sessions_revoked=sessions,
-        )
         logger.warning(
             f"admin principal {record['name']!r} revoked; {sessions} session(s) closed"
         )
@@ -670,14 +676,21 @@ def logout(principal: Principal) -> Dict[str, Any]:
     """Revoke the caller's own session. Idempotent."""
     if not principal.session_hash:
         raise ValueError("not authenticated with a session token")
-    revoked = SESSIONS.revoke(principal.session_hash)
-    audit_event(
+    existing = SESSIONS.get(principal.session_hash)
+    already_gone = existing is None or bool(existing.get("revoked_at"))
+    # #97: one row per attempt, written before the revoke. Lookup first so the
+    # result is truthful: an idempotent second logout is `noop`, not `ok`.
+    audit_required(
         "admin.logout",
         kind="admin_auth",
-        result="ok" if revoked else "noop",
+        result="noop" if already_gone else "ok",
         principal=principal.name,
         role=principal.role,
+        actor_kind="human" if principal.method != "anonymous" else "system",
+        target_kind="session",
+        target_id=principal.session_hash[:12],
     )
+    revoked = SESSIONS.revoke(principal.session_hash)
     return {"logged_out": bool(revoked)}
 
 
@@ -702,15 +715,18 @@ def revoke_session(session_id: str) -> Dict[str, Any]:
     for session in SESSIONS.list_all():
         session_hash = session["session_hash"]
         if session_hash.startswith(prefix):
-            SESSIONS.revoke(session_hash)
             view = session_view(session, names)
-            audit_event(
+            # #97: record before revoking, so "who killed that session" always exists.
+            audit_required(
                 "admin.session.revoked",
                 kind="admin_auth",
                 result="ok",
                 principal=view.get("principal"),
-                session_id=prefix,
+                actor_kind="human",
+                target_kind="session",
+                target_id=prefix,
             )
+            SESSIONS.revoke(session_hash)
             return {"session_id": prefix, "revoked": True, **view}
     raise LookupError("session not found")
 
@@ -976,6 +992,58 @@ def require_admin(request: Request) -> bool:
     """
     require_roles(request, ROLE_ADMIN)
     return True
+
+
+# ---------------------------------------------------------------------- auditing
+
+
+def audit_action(
+    principal: Principal,
+    action: str,
+    *,
+    result: str = "ok",
+    target_kind: Optional[str] = None,
+    target_id: Optional[str] = None,
+    **fields: Any,
+) -> Dict[str, Any]:
+    """Fail-closed audit for a privileged mutation (#97).
+
+    Call it **after** validating the request and **before** performing the
+    mutation: `AuditError` then means "nothing happened", which is the whole point
+    (epic #93, T5). A failed mutation afterwards should append a second entry with
+    `result="error"` via `audit_event`.
+
+    The actor and role come from the principal, never from the request body.
+    """
+    return audit_required(
+        action,
+        principal=principal.name,
+        role=principal.role,
+        actor_kind="human" if principal.method != "system" else "system",
+        result=result,
+        target_kind=target_kind,
+        target_id=target_id,
+        **fields,
+    )
+
+
+def require_audit(action: str):
+    """FastAPI dependency: refuse a privileged route when the log is unavailable.
+
+    It writes nothing — the route calls `audit_action()` once its inputs validate,
+    which keeps `result` honest. This guard exists so a route cannot start work it
+    will be unable to record, and it lives in the dependency layer so #103's config
+    routes get it by declaration rather than by remembering (epic #93, T5).
+    """
+
+    def dependency(request: Request) -> None:
+        try:
+            preflight()
+        except AuditError as exc:
+            raise HTTPException(status_code=503, detail=str(exc))
+
+    dependency.__name__ = f"require_audit_{action.replace('.', '_')}"
+    return dependency
 
 
 # ------------------------------------------------------------------- startup

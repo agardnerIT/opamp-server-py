@@ -20,7 +20,14 @@ from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent.parent / ".env")
 
 from proto.opamp_pb2 import AgentToServer, ServerToAgent, ServerCapabilities, ServerToAgentFlags
-from server.state import AgentRegistry, AgentState, AGENT_REGISTRY, SQLiteMetricsStore, utcnow
+from server.state import (
+    AgentRegistry,
+    AgentState,
+    AGENT_REGISTRY,
+    SQLiteMetricsStore,
+    _normalise_audit_ts,
+    utcnow,
+)
 from server.manifest import (
     generate_manifest,
     generate_ocb_command,
@@ -36,12 +43,13 @@ from server.reports import (
     _is_heavy,
 )
 from server.alerts import get_alert_config, update_alert_config, send_test_alert, send_alert, ALERT_TYPES, ALERT_CONFIG, ALERT_EVENTS, send_new_agent_alert, send_stale_agent_alert, send_compliance_alert, redact_config, merge_redacted
-from server import admin_auth, agent_auth, auth, posture
+from server import admin_auth, agent_auth, audit, auth, posture
 from server.auth import (  # noqa: F401  (privileged routes below)
     ROLE_ADMIN,
     ROLE_APPROVER,
     ROLE_OPERATOR,
     ROLE_VIEWER,
+    audit_action,
     require_admin,
     require_roles,
 )
@@ -59,10 +67,37 @@ AGENT_TIMEOUT_SECONDS = int(os.environ.get("AGENT_TIMEOUT_SECONDS", 60))
 _cleanup_task = None
 
 
+def _log_audit_startup() -> None:
+    """One startup line: is the audit log on, and how much is in it (#97).
+
+    The count (not a full `verify()`) is deliberate: verification is O(n) and this
+    runs on every restart, while `/audit/verify` is the on-demand answer.
+    """
+    if not audit.enabled():
+        logger.warning(
+            "audit log is DISABLED (OPAMP_AUDIT_ENABLED=false): privileged actions are "
+            "refused and only AUDIT log lines remain"
+        )
+        return
+    try:
+        bounds = audit.STORE.bounds()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning(f"audit log unavailable at startup: {exc}")
+        return
+    logger.info(
+        f"audit log: {bounds['count']} entries"
+        + (f" ({bounds['first_ts']} .. {bounds['last_ts']})" if bounds["count"] else "")
+        + f", retention {audit.retention_days()}d; verify with GET /audit/verify"
+    )
+
+
 async def periodic_cleanup():
     while True:
         await asyncio.sleep(15)
         cleanup_stale_agents()
+        # Retention runs at most hourly (the tick is every 15s) and appends an
+        # `audit.checkpoint` row so the chain stays verifiable (#97).
+        audit.maybe_prune()
 
 
 @asynccontextmanager
@@ -81,6 +116,7 @@ async def lifespan(app: FastAPI):
     # Refuses to start (non-zero exit) when config push is enabled on an insecure
     # posture (#96). Read-only deployments are unaffected.
     posture.assert_startup_posture()
+    _log_audit_startup()
     _cleanup_task = asyncio.create_task(periodic_cleanup())
     yield
     if _cleanup_task:
@@ -144,7 +180,12 @@ app = FastAPI(
         "`GET /agents` reports each agent's credential state.\n\n"
         "**Config push:** off by default (`OPAMP_CONFIG_PUSH_ENABLED=false`); its "
         "routes 404 and no `remote_config` is ever sent until the posture is secure. "
-        "Check `GET /health` → `config_push`."
+        "Check `GET /health` → `config_push`.\n\n"
+        "**Audit log:** on by default (`OPAMP_AUDIT_ENABLED=true`) — an append-only, "
+        "hash-chained record of every privileged action in `data/opamp.db`. Read it "
+        "with `GET /audit`, check it with `GET /audit/verify`, export it with "
+        "`GET /audit/export` (all `admin`). A privileged change that cannot be "
+        "recorded is refused."
     ),
     lifespan=lifespan,
 )
@@ -395,6 +436,136 @@ def verify_auth(request: Request):
     """
     principal = require_roles(request, ROLE_VIEWER)
     return {"authenticated": principal.method != "anonymous", "role": principal.role}
+
+
+# ------------------------------------------------------------------- audit log
+
+
+def _audit_filters(
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    actor: Optional[str] = None,
+    action: Optional[str] = None,
+    target: Optional[str] = None,
+    result: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Normalise audit query parameters, answering 422 for an unparseable bound.
+
+    Bad timestamps are rejected rather than silently ignored: a filter that quietly
+    matches everything is how an operator concludes "nothing happened".
+    """
+    try:
+        return {
+            "since": _normalise_audit_ts(since),
+            "until": _normalise_audit_ts(until),
+            "actor": (actor or None),
+            "action": (action or None),
+            "target": (target or None),
+            "result": (result or None),
+        }
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422, detail=f"invalid timestamp filter: {exc}"
+        )
+
+
+@app.get("/audit", tags=["audit"], summary="Query the audit log (admin)")
+def get_audit(
+    request: Request,
+    since: Optional[str] = Query(None, description="ISO-8601 lower bound (inclusive)"),
+    until: Optional[str] = Query(None, description="ISO-8601 upper bound (inclusive)"),
+    actor: Optional[str] = Query(None, description="Exact actor, e.g. alice or agent:<id>"),
+    action: Optional[str] = Query(None, description="Action or prefix, e.g. config."),
+    target: Optional[str] = Query(None, description="Exact target_id or revision_id"),
+    result: Optional[str] = Query(None, description="ok | denied | error | noop"),
+    limit: int = Query(100, ge=1, le=1000, description="Page size"),
+    offset: int = Query(0, ge=0, description="Rows to skip from the newest entry"),
+):
+    """Privileged-action history, newest first. Requires `admin`.
+
+    Returns `{"entries": [...], "total", "count", "limit", "offset", "filters"}`.
+    Each entry has `id`, `ts`, `actor`, `actor_kind`, `role`, `action`,
+    `target_kind`, `target_id`, `revision_id`, `config_hash`, `result`,
+    `detail_json` (redacted, size-capped) and the chain fields `prev_hash` /
+    `entry_hash`. **There are no config bodies and no secrets** — hashes only, and
+    fields named like credentials are dropped at the seam.
+
+    `action` is a prefix match, so `action=config.` returns propose/approve/apply.
+    Malformed timestamps answer 422 rather than being ignored: a filter that
+    silently matches everything reads as "nothing happened". Unauthenticated
+    callers get 401; a `viewer` or `operator` gets 403 — reading the audit log is
+    an `admin` action.
+    """
+    require_roles(request, ROLE_ADMIN)
+    filters = _audit_filters(since, until, actor, action, target, result)
+    entries = audit.STORE.list_entries(**filters, limit=limit, offset=offset)
+    total = audit.STORE.count_entries(**filters)
+    return {
+        "entries": entries,
+        "total": total,
+        "count": len(entries),
+        "limit": limit,
+        "offset": offset,
+        "filters": filters,
+        "enabled": audit.enabled(),
+    }
+
+
+@app.get("/audit/verify", tags=["audit"], summary="Verify the audit chain (admin)")
+def verify_audit(request: Request):
+    """Recompute every entry hash and the chain links between them. Requires `admin`.
+
+    Returns `{"ok": bool, "entries", "checked", "broken_at", "reason",
+    "anchored_by_checkpoint", "first_id", "last_id", "first_ts", "last_ts",
+    "breaker"}`. `ok: false` means the log cannot be trusted as evidence: a row was
+    edited (`entry_hash` mismatch) or removed/reordered (`prev_hash` mismatch), and
+    `broken_at` is the id where that becomes visible. `anchored_by_checkpoint` is
+    the one benign reason the first retained entry does not chain to genesis —
+    retention (#97) pruned older rows and recorded what it cut.
+
+    This is O(n) over the retained log, so it is on demand, not per request.
+    """
+    require_roles(request, ROLE_ADMIN)
+    report = audit.STORE.verify()
+    report["breaker"] = audit.breaker_state()
+    return report
+
+
+@app.get("/audit/export", tags=["audit"], summary="Export the audit log as JSONL or CSV (admin)")
+def export_audit(
+    request: Request,
+    format: Literal["jsonl", "csv"] = Query("jsonl", description="jsonl (SIEM) or csv (spreadsheet)"),
+    since: Optional[str] = Query(None, description="ISO-8601 lower bound (inclusive)"),
+    until: Optional[str] = Query(None, description="ISO-8601 upper bound (inclusive)"),
+    limit: int = Query(100000, ge=1, le=1000000, description="Row cap"),
+):
+    """Download entries oldest-first for SIEM ingestion or a spreadsheet. Requires `admin`.
+
+    `format=jsonl` returns one JSON object per line (the shape ingest pipelines
+    expect); `format=csv` returns a fixed column set for Excel/pandas. Both are
+    `Content-Disposition: attachment`. The default cap is 100,000 rows — raise
+    `limit` for a full export, or page `GET /audit` when memory matters.
+
+    Only the retained window is exported: retention (`AUDIT_RETENTION_DAYS`) deletes
+    older entries, so an off-box copy is the operator's job if the log is evidence.
+    """
+    require_roles(request, ROLE_ADMIN)
+    filters = _audit_filters(since, until)
+    rows = list(
+        reversed(
+            audit.STORE.list_entries(
+                since=filters["since"], until=filters["until"], limit=limit
+            )
+        )
+    )
+    stamp = utcnow().strftime("%Y%m%dT%H%M%SZ")
+    body = audit.format_entries(rows, format)
+    media_type = "text/csv" if format == "csv" else "application/x-ndjson"
+    return Response(
+        content=body,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="audit-{stamp}.{format}"'},
+    )
 
 
 AGENT_METRICS: Dict[str, Dict[str, Any]] = {}
@@ -936,6 +1107,21 @@ def create_agent_token(
 
     body = body or AgentTokenRequest()
     try:
+        agent_id = agent_auth.normalize_agent_id(agent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    # #97: validated, then recorded, then acted. A credential that cannot be
+    # audited is not minted — "who could talk to this agent" must be answerable.
+    audit_action(
+        require_roles(request, ROLE_ADMIN),
+        "agent.credential.issued",
+        target_kind="agent",
+        target_id=agent_id,
+        label=body.label,
+        retire_previous=body.retire_previous,
+    )
+    try:
         token, record = agent_auth.issue_token(
             agent_id, label=body.label, retire_previous=body.retire_previous
         )
@@ -975,6 +1161,14 @@ def revoke_agent_token(agent_id: str, request: Request):
         agent_id = agent_auth.normalize_agent_id(agent_id)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
+    # #97: recorded before revoked, so the gap between "who had access" and "who
+    # ended it" is never a guess.
+    audit_action(
+        require_roles(request, ROLE_ADMIN),
+        "agent.credential.revoked",
+        target_kind="agent",
+        target_id=agent_id,
+    )
     return {"agent_id": agent_id, "revoked": agent_auth.revoke_tokens(agent_id)}
 
 
@@ -1152,22 +1346,31 @@ def check_compliance(agent_id: str, request: Request):
     Unlike `GET /agent/{id}/compliance`, this is a mutating action and fails with
     503 when OPA is not enabled. Responds 404 if the agent is unknown.
     """
-    require_roles(request, ROLE_OPERATOR)
-    
+    principal = require_roles(request, ROLE_OPERATOR)
+
     agent = AGENT_REGISTRY.get(agent_id)
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
-    
-    if OPA_ENABLED:
-        compliance_result = evaluate_agent_compliance(agent)
-        AGENT_REGISTRY.update(agent_id, compliance=compliance_result)
-        
-        if compliance_result.get("violations"):
-            send_compliance_alert(agent_id, compliance_result.get("violations", []))
-        
-        return compliance_result
-    else:
+
+    if not OPA_ENABLED:
         raise HTTPException(status_code=503, detail="OPA not enabled")
+
+    # #97: validated, recorded, then acted — a forced evaluation writes the verdict
+    # onto the agent record, so it is a mutation, not a read.
+    audit_action(
+        principal,
+        "compliance.checked",
+        target_kind="agent",
+        target_id=agent_id,
+    )
+
+    compliance_result = evaluate_agent_compliance(agent)
+    AGENT_REGISTRY.update(agent_id, compliance=compliance_result)
+
+    if compliance_result.get("violations"):
+        send_compliance_alert(agent_id, compliance_result.get("violations", []))
+
+    return compliance_result
 
 
 @app.get("/compliance/summary", tags=["compliance"], summary="Fleet-wide compliance summary")
@@ -1225,9 +1428,16 @@ def reload_policies(request: Request):
     """
     if not require_admin(request):
         raise HTTPException(status_code=401, detail="Authentication required")
-    
     if not OPA_ENABLED:
         return {"success": False, "error": "OPA not enabled"}
+
+    # #97: reloading policies changes what every later compliance verdict means.
+    audit_action(
+        require_roles(request, ROLE_ADMIN),
+        "compliance.policies_reloaded",
+        target_kind="server",
+        target_id="opa",
+    )
     
     try:
         from server.opa_client import get_opa_client
@@ -1288,8 +1498,17 @@ def put_alerts(request: Request, body: dict):
     **redacted** for the same reason `GET /alerts` is. Config persists in SQLite
     (`alert_config` table in `data/opamp.db`).
     """
-    require_roles(request, ROLE_OPERATOR)
-    config = update_alert_config(merge_redacted(body))
+    principal = require_roles(request, ROLE_OPERATOR)
+    merged = merge_redacted(body)
+    # #97: keys only, never values — a webhook URL is a credential in practice.
+    audit_action(
+        principal,
+        "alerts.updated",
+        target_kind="server",
+        target_id="alerts",
+        fields=sorted(body.keys()),
+    )
+    config = update_alert_config(merged)
     return {"config": redact_config(config)}
 
 
@@ -1303,11 +1522,19 @@ def test_alerts(request: Request, body: dict = None):
     it is filled from the stored config first. Returns `{"success": bool,
     "error": str|null}`.
     """
-    require_roles(request, ROLE_OPERATOR)
-    
+    principal = require_roles(request, ROLE_OPERATOR)
+
     if body is None:
         body = {}
     event_type = body.get("event_type", "new_agent")
+    # #97: a test alert leaves the server (it hits a webhook), so it gets a row.
+    audit_action(
+        principal,
+        "alerts.test",
+        target_kind="alert",
+        target_id=str(event_type),
+        temporary_event_config=bool(body.get("event_config")),
+    )
     event_config = body.get("event_config")
     
     if event_config:

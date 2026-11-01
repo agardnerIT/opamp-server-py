@@ -74,6 +74,11 @@ def _normalize_base_url(url: str) -> str:
     return url
 
 
+def _drop_empty(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop unset query parameters (``None`` means "do not filter", not "empty")."""
+    return {key: value for key, value in params.items() if value is not None}
+
+
 class OpampClient:
     """HTTP client for the OpAMP server. All methods return parsed JSON (dicts).
 
@@ -119,8 +124,8 @@ class OpampClient:
 
     # ------------------------------------------------------------------ core
 
-    def _request(self, method: str, path: str, **kwargs: Any) -> Any:
-        """Perform a request, returning parsed JSON. Raises structured errors."""
+    def _send(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        """Perform a request and map transport/status failures to client errors."""
         try:
             resp = self._client.request(method, path, **kwargs)
         except httpx.HTTPError as exc:
@@ -132,12 +137,26 @@ class OpampClient:
             except ValueError:
                 detail = resp.text
             raise OpampApiError(resp.status_code, detail, url=str(resp.request.url))
+        return resp
+
+    def _request(self, method: str, path: str, **kwargs: Any) -> Any:
+        """Perform a request, returning parsed JSON. Raises structured errors."""
+        resp = self._send(method, path, **kwargs)
         if not resp.content:
             return {}
         try:
             return resp.json()
         except ValueError:
             return resp.text
+
+    def _request_text(self, method: str, path: str, **kwargs: Any) -> str:
+        """Return the raw body.
+
+        Exports are `application/x-ndjson` or `text/csv`, and a one-row JSONL export
+        is also valid JSON — sniffing the body would turn a log line into a dict, so
+        the exporter asks for text explicitly.
+        """
+        return self._send(method, path, **kwargs).text
 
     def _get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
         return self._request("GET", path, params=params)
@@ -284,6 +303,76 @@ class OpampClient:
         a revoked identity cannot be silently re-created by someone else).
         """
         return self._request("DELETE", f"/auth/principals/{principal_id}")
+
+    # -------------------------------------------------------------------- audit
+
+    def audit_log(
+        self,
+        since: Optional[str] = None,
+        until: Optional[str] = None,
+        actor: Optional[str] = None,
+        action: Optional[str] = None,
+        target: Optional[str] = None,
+        result: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        """``GET /audit`` — privileged-action history, newest first (admin role).
+
+        Returns ``{"entries", "total", "count", "limit", "offset", "filters",
+        "enabled"}``. Each entry carries ``id``, ``ts``, ``actor``, ``actor_kind``
+        (``human`` | ``agent`` | ``system``), ``role``, ``action``, ``target_kind``,
+        ``target_id``, ``revision_id``, ``config_hash``, ``result`` (``ok`` |
+        ``denied`` | ``error`` | ``noop``), redacted ``detail_json`` and the chain
+        fields ``prev_hash``/``entry_hash``.
+
+        ``action`` is a **prefix** match, so ``action="config."`` returns every
+        config-push event. Never contains config bodies or secrets — hashes only.
+        """
+        return self._get(
+            "/audit",
+            params=_drop_empty(
+                {
+                    "since": since,
+                    "until": until,
+                    "actor": actor,
+                    "action": action,
+                    "target": target,
+                    "result": result,
+                    "limit": limit,
+                    "offset": offset,
+                }
+            ),
+        )
+
+    def audit_verify(self) -> Dict[str, Any]:
+        """``GET /audit/verify`` — recompute the hash chain (admin role).
+
+        ``{"ok", "entries", "checked", "broken_at", "reason",
+        "anchored_by_checkpoint", ...}``. ``ok: false`` means a row was edited or
+        removed: the log is not evidence any more. ``anchored_by_checkpoint: true``
+        is benign — retention pruned older entries and recorded what it cut.
+        """
+        return self._get("/audit/verify")
+
+    def audit_export(
+        self,
+        format: str = "jsonl",
+        since: Optional[str] = None,
+        until: Optional[str] = None,
+        limit: int = 100000,
+    ) -> str:
+        """``GET /audit/export`` — the log as text, oldest first (admin role).
+
+        ``format="jsonl"`` (one JSON object per line, what a SIEM ingests) or
+        ``"csv"`` (fixed columns, for a spreadsheet). Returns the raw body, not
+        parsed JSON — pipe it straight to a file.
+        """
+        return self._request_text(
+            "GET",
+            "/audit/export",
+            params=_drop_empty({"format": format, "since": since, "until": until, "limit": limit}),
+        )
 
     # ------------------------------------------------------------------ agents
 

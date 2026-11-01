@@ -21,6 +21,9 @@ Agents are authenticated     `OPAMP_AGENT_AUTH=token` and each agent has a
                              `server/agent_auth.py`
 The server speaks TLS        `PUBLIC_URL` is `https://`/`wss://`, or
                              `TLS_TERMINATED_UPSTREAM=true`
+The audit log is writable    `OPAMP_AUDIT_ENABLED=true` (the default, #97) and the
+                             chain is not in its failure back-off. A push nobody
+                             can account for afterwards is the T5 threat
 ===========================  ===================================================
 
 `OPAMP_ALLOW_INSECURE_CONFIG_PUSH=true` is a local-development escape hatch: it
@@ -36,7 +39,7 @@ from typing import Dict, List
 from fastapi import HTTPException
 from loguru import logger
 
-from server import admin_auth, auth
+from server import admin_auth, audit, auth
 
 # Detail used by every gated push route. 404, not 403: a server with config push
 # off should not confirm to a stranger that the surface exists at all.
@@ -96,8 +99,13 @@ def tls_enabled() -> bool:
 
 
 def audit_enabled() -> bool:
-    """Audit log availability. Reported now, implemented by #97 (always False)."""
-    return _env_flag("OPAMP_AUDIT_ENABLED")
+    """Audit log availability (#97).
+
+    Delegates to `server.audit` so the flag has exactly one reader — and so the
+    circuit breaker (log unwritable, entries only landing in the process log) shows
+    up here as `false` instead of pretending the log is fine.
+    """
+    return audit.available()
 
 
 def posture() -> Dict[str, object]:
@@ -167,6 +175,13 @@ def requirements() -> Dict[str, Dict[str, object]]:
             "detail": "set PUBLIC_URL=https://<host> behind a TLS terminator, or "
             "TLS_TERMINATED_UPSTREAM=true once the proxy is in place (see "
             "docker/nginx.conf and docker/Caddyfile)",
+        },
+        "audit": {
+            "label": "the audit log is not available",
+            "met": audit.available(),
+            "detail": "set OPAMP_AUDIT_ENABLED=true (the default) and make sure "
+            "DATA_DIR is writable; check GET /audit/verify and the server log for "
+            "the reason (#97)",
         },
     }
 
@@ -253,7 +268,8 @@ def posture_warning(push: Dict[str, object] | None = None) -> str | None:
         f"- Agent authentication: **{agent_auth_label}**\n"
         f"- TLS: **{tls_label}**\n"
         f"- Audit log: **{'on' if push.get('audit') else 'off'}**\n\n"
-        "Fix the posture (admin auth + agent auth + TLS) and unset the override. "
+        "Fix the posture (admin auth + agent auth + TLS + audit log) and unset the "
+        "override. "
         "Local development only."
     )
 

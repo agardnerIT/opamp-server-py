@@ -57,6 +57,9 @@ config_app = typer.Typer(
     help="Config push posture (remote config control plane lands in #103)",
     no_args_is_help=True,
 )
+audit_app = typer.Typer(
+    help="Audit log: query, verify, export (#97)", no_args_is_help=True
+)
 
 app.add_typer(agents_app, name="agents", help="Agent inspection commands")
 agents_app.add_typer(token_app, name="token", help="Agent credentials (admin)")
@@ -65,6 +68,7 @@ app.add_typer(compliance_app, name="compliance", help="OPA policy compliance")
 app.add_typer(alerts_app, name="alerts", help="Alert configuration (admin)")
 app.add_typer(auth_app, name="auth", help="Admin auth: mode, sessions, identities")
 app.add_typer(config_app, name="config", help="Config push posture")
+app.add_typer(audit_app, name="audit", help="Audit log: query, verify, export")
 
 
 class _Settings:
@@ -186,6 +190,13 @@ def _offline_metrics(agent_id: str) -> Dict[str, Any]:
     from server.state import SQLiteMetricsStore
 
     return SQLiteMetricsStore(_settings.db).get(agent_id) or {}
+
+
+def _offline_audit_store():
+    """Open the audit log straight from `--db` — no server, no credential (#97)."""
+    from server.state import SQLiteAuditStore
+
+    return SQLiteAuditStore(_settings.db)
 
 
 def _offline_get_state(agent_id: str) -> Any:
@@ -346,6 +357,154 @@ def auth_principals_revoke(
     not silently hand her identity to someone else.
     """
     _run(lambda oc: oc.revoke_principal(principal_id))
+
+
+# ---------------------------------------------------------------------- audit
+
+
+@audit_app.command("list")
+def audit_list(
+    since: Optional[str] = typer.Option(None, "--since", help="ISO-8601 lower bound (inclusive)"),
+    until: Optional[str] = typer.Option(None, "--until", help="ISO-8601 upper bound (inclusive)"),
+    actor: Optional[str] = typer.Option(None, "--actor", help="Exact actor, e.g. alice or agent:<id>"),
+    action: Optional[str] = typer.Option(None, "--action", help="Action or prefix, e.g. config."),
+    target: Optional[str] = typer.Option(None, "--target", help="Exact target_id or revision_id"),
+    result: Optional[str] = typer.Option(None, "--result", help="ok | denied | error | noop"),
+    limit: int = typer.Option(100, "--limit", help="Page size (max 1000)"),
+    offset: int = typer.Option(0, "--offset", help="Rows to skip from the newest entry"),
+) -> None:
+    """Privileged-action history, newest first (admin role).
+
+    Returns `{entries, total, count, limit, offset, filters, enabled}`. Each entry
+    has an actor (`agent:<id>` for agents), a role, an action, a target and a
+    result. **No config bodies and no secrets** — `config_hash` is a hash.
+
+    `--action` is a prefix match, so `--action config.` returns every config-push
+    event. Exit 1 on HTTP errors (403 means the credential is not `admin`).
+
+    Works with `--db <path>`: reads `audit_log` straight from the SQLite file, which
+    is what an on-call operator needs when the server itself is the casualty.
+    """
+    if _settings.offline:
+        store = _offline_audit_store()
+        filters = {
+            "since": since,
+            "until": until,
+            "actor": actor,
+            "action": action,
+            "target": target,
+            "result": result,
+        }
+        try:
+            entries = store.list_entries(limit=limit, offset=offset, **filters)
+            total = store.count_entries(**filters)
+        except ValueError as exc:
+            _fail(f"invalid timestamp filter: {exc}")
+        _emit(
+            {
+                "entries": entries,
+                "total": total,
+                "count": len(entries),
+                "limit": limit,
+                "offset": offset,
+                "filters": filters,
+                "source": str(_settings.db),
+            }
+        )
+        return
+    _run(
+        lambda oc: oc.audit_log(
+            since=since,
+            until=until,
+            actor=actor,
+            action=action,
+            target=target,
+            result=result,
+            limit=limit,
+            offset=offset,
+        )
+    )
+
+
+@audit_app.command("verify")
+def audit_verify() -> None:
+    """Recompute the audit chain and report tampering (admin role).
+
+    `ok: false` means the log cannot be trusted as evidence: a row was edited
+    (`entry_hash` mismatch) or removed (`prev_hash` mismatch), and `broken_at`
+    names the entry where it shows. `anchored_by_checkpoint: true` is benign —
+    retention pruned older entries and recorded exactly what it cut.
+
+    Exits non-zero when the chain is broken, so it can be a cron/CI check.
+
+    Works with `--db <path>` — verifying the file on disk is the honest check when
+    the running server is what you are worried about.
+    """
+    if _settings.offline:
+        report = _offline_audit_store().verify()
+        report["source"] = str(_settings.db)
+        _emit(report)
+        if not report["ok"]:
+            raise typer.Exit(code=1)
+        return
+    try:
+        with _client() as oc:
+            report = oc.audit_verify()
+            _emit(report)
+            if not report.get("ok", False):
+                raise typer.Exit(code=1)
+    except OpampApiError as exc:
+        _fail(f"HTTP {exc.status_code}", data={"detail": exc.detail})
+    except OpampConnectionError as exc:
+        _fail(str(exc))
+
+
+@audit_app.command("export")
+def audit_export(
+    format: str = typer.Option("jsonl", "--format", "-f", help="jsonl (SIEM) or csv (spreadsheet)"),
+    since: Optional[str] = typer.Option(None, "--since", help="ISO-8601 lower bound (inclusive)"),
+    until: Optional[str] = typer.Option(None, "--until", help="ISO-8601 upper bound (inclusive)"),
+    limit: int = typer.Option(100000, "--limit", help="Row cap (max 1000000)"),
+    output: Optional[Path] = typer.Option(None, "--output", "-o", help="Write to a file instead of stdout"),
+) -> None:
+    """Export retained entries oldest-first (admin role).
+
+    `--format jsonl` is what an ingest pipeline wants; `--format csv` opens in a
+    spreadsheet. Only the retained window is exported — retention
+    (`AUDIT_RETENTION_DAYS`) deletes older entries, so copy the log off-box if it
+    is evidence. Pipe or `--output` it; it is not printed as JSON.
+    """
+    if format not in ("jsonl", "csv"):
+        _fail("--format must be jsonl or csv")
+    if _settings.offline:
+        store = _offline_audit_store()
+        try:
+            rows = list(
+                reversed(store.list_entries(since=since, until=until, limit=limit))
+            )
+        except ValueError as exc:
+            _fail(f"invalid timestamp filter: {exc}")
+        from server.audit import format_entries
+
+        body = format_entries(rows, format)
+        if output is not None:
+            output.write_text(body, encoding="utf-8")
+            _emit({"written": str(output), "bytes": len(body), "format": format})
+            return
+        typer.echo(body, nl=False)
+        return
+    try:
+        with _client() as oc:
+            body = oc.audit_export(format=format, since=since, until=until, limit=limit)
+    except OpampApiError as exc:
+        _fail(f"HTTP {exc.status_code}", data={"detail": exc.detail})
+    except OpampConnectionError as exc:
+        _fail(str(exc))
+    if output is not None:
+        output.write_text(body, encoding="utf-8")
+        _emit({"written": str(output), "bytes": len(body), "format": format})
+        return
+    typer.echo(body, nl=False)
 
 
 # --------------------------------------------------------------------- agents

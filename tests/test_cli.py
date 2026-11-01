@@ -407,3 +407,136 @@ class TestOfflineCredentials:
 
         listed = parse(run("--db", str(offline_db), "agents", "list"))
         assert all("credential" in agent for agent in listed["agents"])
+
+
+# ------------------------------------------------------------------- audit (#97)
+
+class TestAudit:
+    def test_list_verify_export(self, live):
+        from server.audit import audit_event
+
+        audit_event("config.propose", principal="alice", role="operator")
+
+        data = parse(run("--password", ADMIN_PW, "audit", "list", "--action", "config."))
+        assert data["total"] >= 1
+        assert data["entries"][0]["action"] == "config.propose"
+        assert data["entries"][0]["actor"] == "alice"
+
+        report = parse(run("--password", ADMIN_PW, "audit", "verify"))
+        assert report["ok"] is True
+
+    def test_export_writes_a_file(self, live, tmp_path):
+        from server.audit import audit_event
+
+        audit_event("config.propose", principal="alice")
+        target = tmp_path / "audit.jsonl"
+        data = parse(
+            run(
+                "--password", ADMIN_PW,
+                "audit", "export", "--format", "jsonl", "--output", str(target),
+            )
+        )
+        assert data["bytes"] > 0
+        assert json.loads(target.read_text().strip().splitlines()[0])["actor"] == "alice"
+
+    def test_export_prints_raw_to_stdout(self, live):
+        from server.audit import audit_event
+
+        audit_event("config.propose", principal="alice")
+        result = run("--password", ADMIN_PW, "audit", "export", "--format", "csv")
+        assert result.exit_code == 0
+        assert result.output.splitlines()[0].startswith("id,ts,actor")
+
+    def test_unknown_format_is_refused(self, live):
+        result = run("--password", ADMIN_PW, "audit", "export", "--format", "xml")
+        assert result.exit_code == 1
+        assert "jsonl or csv" in result.output
+
+    def test_verify_exits_nonzero_on_a_broken_chain(self, live):
+        import sqlite3
+
+        from server import audit
+
+        audit.audit_event("config.propose", principal="alice")
+        with sqlite3.connect(audit.STORE.db_path) as conn:
+            conn.execute("UPDATE audit_log SET result='denied'")
+        result = run("--password", ADMIN_PW, "audit", "verify")
+        assert result.exit_code == 1
+        assert '"ok": false' in result.output
+
+
+# ------------------------------------------------------ offline audit (#97, --db)
+
+class TestOfflineAudit:
+    """`--db` reads the log straight from the file — what you need when the
+    server itself is the casualty (or when a third party hands you the database)."""
+
+    @pytest.fixture
+    def audit_db(self, offline_db):
+        from server.state import SQLiteAuditStore
+
+        store = SQLiteAuditStore(offline_db)
+        store.append(
+            {
+                "ts": "2026-01-01T00:00:00+00:00",
+                "actor": "alice",
+                "actor_kind": "human",
+                "role": "operator",
+                "action": "config.propose",
+                "target_kind": "agent",
+                "target_id": "aaaa1111aaaa1111",
+                "result": "ok",
+                "detail_json": None,
+            }
+        )
+        store.append(
+            {
+                "ts": "2026-01-02T00:00:00+00:00",
+                "actor": "bob",
+                "actor_kind": "human",
+                "role": "approver",
+                "action": "config.approve",
+                "result": "ok",
+                "detail_json": None,
+            }
+        )
+        return offline_db
+
+    def test_list(self, audit_db):
+        data = parse(run("--db", str(audit_db), "audit", "list"))
+        assert data["total"] == 2
+        assert data["entries"][0]["actor"] == "bob"  # newest first
+        assert data["source"] == str(audit_db)
+
+    def test_list_filter(self, audit_db):
+        data = parse(
+            run("--db", str(audit_db), "audit", "list", "--action", "config.approve")
+        )
+        assert data["total"] == 1 and data["entries"][0]["action"] == "config.approve"
+
+    def test_verify(self, audit_db):
+        data = parse(run("--db", str(audit_db), "audit", "verify"))
+        assert data["ok"] is True and data["entries"] == 2
+
+    def test_verify_exits_nonzero_when_tampered(self, audit_db):
+        import sqlite3
+
+        with sqlite3.connect(audit_db) as conn:
+            conn.execute("UPDATE audit_log SET actor='mallory'")
+        result = run("--db", str(audit_db), "audit", "verify")
+        assert result.exit_code == 1
+        assert json.loads(result.output)["ok"] is False
+
+    def test_export(self, audit_db, tmp_path):
+        target = tmp_path / "offline.jsonl"
+        data = parse(
+            run(
+                "--db", str(audit_db),
+                "audit", "export", "-f", "jsonl", "-o", str(target),
+            )
+        )
+        assert data["bytes"] > 0
+        lines = target.read_text().strip().splitlines()
+        # Oldest first, so a SIEM ingests it in the order it happened.
+        assert json.loads(lines[0])["action"] == "config.propose"
+        assert json.loads(lines[1])["action"] == "config.approve"

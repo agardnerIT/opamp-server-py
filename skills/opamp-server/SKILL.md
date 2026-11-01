@@ -96,6 +96,9 @@ opampctl agents compliance <agent-id>
 | Live sessions (admin) | `auth sessions list\|revoke` | — | `GET`/`DELETE /auth/sessions` |
 | Health + posture | `health` | `health` | `GET /health` |
 | Config push posture | `config posture` | `config_posture` | `GET /config/posture` |
+| Audit log (admin) | `audit list [--actor] [--action] [--since] [--result]` | `audit_log` | `GET /audit` |
+| Verify the audit chain (admin) | `audit verify` (exit 1 if broken) | `audit_verify` | `GET /audit/verify` |
+| Export the audit log (admin) | `audit export -f jsonl\|csv [-o file]` | `audit_export` | `GET /audit/export` |
 | Mint agent credential (admin) | `agents token create <id> [--raw]` | `create_agent_token` (write-gated) | `POST /agents/{id}/token` |
 | Revoke agent credentials (admin) | `agents token revoke <id>` | `revoke_agent_token` (write-gated) | `DELETE /agents/{id}/token` |
 | Offline (no server) | `--db data/opamp.db …` | — | — |
@@ -129,6 +132,34 @@ Rules that matter when acting on this:
 - Minting needs the admin password, and the MCP tools for it are **absent** unless
   the MCP process runs with `OPAMP_MCP_ALLOW_WRITES=true`. That is intentional.
 
+
+## Audit log (#97)
+
+Every privileged action writes one row: actor (`agent:<id>` for agents), role,
+action, target (`target_kind`/`target_id`), result (`ok|denied|error|noop`), a
+redacted `detail_json` and the chain fields `prev_hash`/`entry_hash`. Reads are
+admin-only; the MCP tools for them are **never** write-gated — an agent asked "who
+pushed this" must answer from evidence.
+
+```bash
+opampctl --password "$ADMIN_PASSWORD" audit list --action config. --limit 20
+opampctl --password "$ADMIN_PASSWORD" audit verify   # ok:false + broken_at = tampering
+```
+
+Rules that matter when acting on this:
+
+- **No bodies, no secrets.** Config bodies are never stored — only `config_hash`.
+  Do not paste configs into audit-adjacent fields; the filter drops fields *named*
+  like credentials, it cannot recognise a secret in a field called `detail`.
+- **Fail closed.** A privileged write records its decision first; if the row cannot
+  be written the write does not happen (HTTP 500, nothing mutated). If you see a 500
+  from an otherwise-fine endpoint, check the audit store before retrying blindly.
+- `ok: false` from `audit verify` means the log is no longer evidence. Do not delete
+  rows to "fix" it — export what remains and tell a human.
+- `anchored_by_checkpoint: true` is benign: retention pruned old entries and wrote a
+  checkpoint row recording exactly what it cut.
+- Turning `OPAMP_AUDIT_ENABLED` off makes the server refuse privileged writes. Do
+  not disable it to get past an error.
 
 ## Admin auth and roles (`OPAMP_ADMIN_AUTH`, #95)
 

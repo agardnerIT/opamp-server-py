@@ -1,7 +1,8 @@
 """Shared test isolation.
 
 Two globals are process-wide and default to the *repository's* `data/opamp.db`:
-the credential/principal/session stores (#94, #95) and the alert config (#50).
+the credential/principal/session/audit stores (#94, #95, #97) and the alert config
+(#50).
 Without this fixture, a test run reads whatever a developer's live server left
 behind (a real principal would flip `auth.configured()` and turn "read-only mode"
 tests green) and writes test fixtures into that same file.
@@ -16,8 +17,9 @@ import copy
 
 import pytest
 
-from server import agent_auth, alerts, auth
+from server import agent_auth, alerts, audit, auth
 from server.state import (
+    SQLiteAuditStore,
     SQLiteCredentialStore,
     SQLitePrincipalStore,
     SQLiteSessionStore,
@@ -37,9 +39,13 @@ def isolated_global_stores(monkeypatch, tmp_path):
         agent_auth, "CREDENTIALS", SQLiteCredentialStore(tmp_path / "agents.db")
     )
     monkeypatch.setattr(alerts, "DB_PATH", tmp_path / "alerts.db")
+    monkeypatch.setattr(audit, "STORE", SQLiteAuditStore(tmp_path / "audit.db"))
     monkeypatch.setattr(
         alerts, "ALERT_CONFIG", copy.deepcopy(DEFAULT_ALERT_CONFIG)
     )
     auth.reset_lockouts()
+    audit.reset_circuit_breaker()
+    audit.reset_prune_timer()
     yield
     auth.reset_lockouts()
+    audit.reset_circuit_breaker()

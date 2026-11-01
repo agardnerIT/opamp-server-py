@@ -74,12 +74,14 @@ def test_defaults_are_off_and_safe():
     assert posture.insecure() is False
     assert posture.agent_auth_mode() == "off"
     assert posture.tls_enabled() is False
-    assert posture.audit_enabled() is False
+    # #97: the audit log is real now and on by default — an audit log an operator
+    # has to remember to enable is off during every incident that matters.
+    assert posture.audit_enabled() is True
     assert posture.posture() == {
         "enabled": False,
         "insecure": False,
         "agent_auth": "off",
-        "audit": False,
+        "audit": True,
         "tls": False,
     }
 
@@ -312,7 +314,7 @@ def test_health_reports_posture(client):
         "enabled": False,
         "insecure": False,
         "agent_auth": "off",
-        "audit": False,
+        "audit": True,
         "tls": False,
     }
 
@@ -366,8 +368,14 @@ def test_config_posture_reports_every_requirement(client):
     assert body["config_push"]["enabled"] is False
     assert body["allowed"] is False
     assert body["override"] is False
-    assert set(body["requirements"]) == {"admin_auth", "agent_auth", "tls"}
-    assert all(not r["met"] for r in body["requirements"].values())
+    assert set(body["requirements"]) == {"admin_auth", "agent_auth", "tls", "audit"}
+    # #97: audit is the one requirement that is met out of the box.
+    assert body["requirements"]["audit"]["met"] is True
+    assert all(
+        not state["met"]
+        for key, state in body["requirements"].items()
+        if key != "audit"
+    )
     assert len(body["unmet"]) == 3
     assert body["http"] == {
         "public_url": None,

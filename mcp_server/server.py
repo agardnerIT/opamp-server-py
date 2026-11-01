@@ -105,6 +105,65 @@ def whoami() -> str:
 
 
 @mcp.tool()
+def audit_log(
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    actor: Optional[str] = None,
+    action: Optional[str] = None,
+    target: Optional[str] = None,
+    result: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+) -> str:
+    """Who did what, when — the audit trail for privileged actions (#97).
+
+    Newest first. `action` is a prefix match (`config.` returns every config-push
+    event). Entries name an `actor` (`agent:<id>` for agents), `actor_kind`
+    (human/agent/system), `role`, `target`, `result` (ok/denied/error/noop) and a
+    redacted `detail_json`. Config bodies and secrets are never stored — only
+    `config_hash`. Read-only tool; requires an admin credential.
+    """
+    return _tool(
+        lambda oc: oc.audit_log(
+            since=since,
+            until=until,
+            actor=actor,
+            action=action,
+            target=target,
+            result=result,
+            limit=limit,
+            offset=offset,
+        )
+    )
+
+
+@mcp.tool()
+def audit_verify() -> str:
+    """Check the audit log's hash chain for tampering (admin).
+
+    `ok: false` means a row was edited or deleted and the log is no longer
+    evidence; `broken_at` names the entry where that becomes visible.
+    `anchored_by_checkpoint: true` is benign (retention pruned older rows and
+    recorded what it cut). Read-only tool.
+    """
+    return _tool(lambda oc: oc.audit_verify())
+
+
+@mcp.tool()
+def audit_export(format: str = "jsonl", since: Optional[str] = None, until: Optional[str] = None) -> str:
+    """Export the retained audit log as JSONL or CSV text, oldest first (admin).
+
+    Returned as a JSON string (`{"format", "bytes", "content"}`) rather than a raw
+    body so the result stays parseable in an MCP client. Use `audit_log` when you
+    only need to read entries. Read-only tool.
+    """
+    def call(oc: OpampClient):
+        body = oc.audit_export(format=format, since=since, until=until)
+        return {"format": format, "bytes": len(body), "content": body}
+    return _tool(call)
+
+
+@mcp.tool()
 def config_posture() -> str:
     """Config push security posture: admin auth, agent auth, TLS, override state.
 

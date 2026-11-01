@@ -93,6 +93,7 @@ class TestRegistry:
             "get_compliance", "check_compliance", "compliance_summary",
             "list_policies", "validate_policies", "reload_policies",
             "get_alerts", "update_alerts", "test_alerts",
+            "audit_log", "audit_verify", "audit_export",
         }
         assert expected <= tools
 
@@ -334,3 +335,33 @@ class TestCredentialTools:
         mcp_srv._register_write_tools()
         tools = {t.name for t in mcp._tool_manager.list_tools()}
         assert "create_agent_token" not in tools
+
+
+# ---------------------------------------------------------------- audit (#97)
+
+class TestAuditTools:
+    def test_log_and_verify(self, wired):
+        from server.audit import audit_event
+
+        audit_event("config.propose", principal="alice", role="operator")
+
+        data = call(mcp_srv.audit_log, action="config.")
+        assert data["total"] >= 1
+        assert data["entries"][0]["action"] == "config.propose"
+
+        assert call(mcp_srv.audit_verify)["ok"] is True
+
+    def test_export_returns_parseable_content(self, wired):
+        from server.audit import audit_event
+
+        audit_event("config.propose", principal="alice")
+        data = call(mcp_srv.audit_export, format="jsonl")
+        assert data["format"] == "jsonl"
+        assert json.loads(data["content"].strip().splitlines()[0])["actor"] == "alice"
+
+    def test_tools_are_read_only_not_write_gated(self):
+        # #97/#106: reading the audit log is never a write tool, so it is always
+        # present — an AI agent must be able to answer "who did this".
+        assert not mcp_srv.writes_enabled()
+        tools = {t.name for t in mcp._tool_manager.list_tools()}
+        assert {"audit_log", "audit_verify", "audit_export"} <= tools

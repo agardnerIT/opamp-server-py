@@ -31,7 +31,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from mcp.server.fastmcp import FastMCP
 
@@ -249,19 +249,69 @@ def agent_config(agent_id: str) -> str:
 
 
 @mcp.tool()
-def validate_config(config_map: Dict[str, Any]) -> str:
+def validate_config(config_map: Dict[str, Any], agent_id: Optional[str] = None) -> str:
     """Validate a config map **without** pushing it (safe for an AI to call).
 
     Args:
         config_map: {"<object name>": {"body": "<yaml/json text>",
             "content_type": "text/yaml"}}. Use "" as the key for the single-object
             case.
+        agent_id: Optional target agent, which adds its component inventory to the
+            checks (catches "this config needs a component that agent does not
+            ship").
 
-    Returns {"valid", "errors", "warnings", "config_hash", "size_bytes",
-    "objects"}. This is the propose/validate half of the flow: MCP may check a
-    config and report the hash, but apply/approve/rollback are never exposed here.
+    Returns {"valid", "errors", "details", "warnings", "policy", "fingerprint",
+    "config_hash", "size_bytes", "objects"}. `errors` are strings, `details` carry
+    a YAML path + hint. This is the validate half of the flow: MCP may check a
+    config and report the hash, but approve/rollback/reactivate are never exposed
+    here ([#93](https://github.com/agardnerIT/opamp-server-py/issues/93), D9).
     """
-    return _tool(lambda oc: oc.validate_config(config_map))
+    return _tool(lambda oc: oc.validate_config(config_map, agent_id=agent_id))
+
+
+@mcp.tool()
+def list_config_revisions(
+    agent: Optional[str] = None,
+    status: Optional[str] = None,
+    limit: int = 50,
+) -> str:
+    """Config revision history: metadata only, never a body (read-only).
+
+    Args:
+        agent: Filter by agent id.
+        status: proposed|active|superseded|rolled_back|poisoned|rejected.
+        limit: Maximum rows.
+
+    Returns {"revisions", "count", "statuses"}. Each row carries the lifecycle
+    status, hash, author, approver, the stored validation verdict and the delivery
+    facts (`attempts`, `last_status`, `poisoned`).
+    """
+    return _tool(
+        lambda oc: oc.list_config_revisions(agent=agent, status=status, limit=limit)
+    )
+
+
+def propose_config(
+    config_map: Dict[str, Any],
+    scope: Dict[str, Any],
+    note: Optional[str] = None,
+) -> str:
+    """Propose a config revision (operator; write-gated). **Delivers nothing.**
+
+    Args:
+        config_map: {"<object name>": {"body": "...", "content_type": "text/yaml"}}.
+        scope: Exactly one of {"agent_id": id}, {"agents": [ids]} or
+            {"filter": {...}} (the GET /agents filter keys), plus an optional
+            "include_future": true on a filter scope. A missing scope is refused —
+            it is never "the whole fleet".
+        note: Why, recorded in the audit log.
+
+    Returns the proposal id, the per-agent revisions and the validation verdict. A
+    **human** approver must approve it before any agent sees it: approval is
+    deliberately not an MCP tool (D3/D9). Only present when
+    OPAMP_MCP_ALLOW_WRITES=true, because it mutates the revision store.
+    """
+    return _tool(lambda oc: oc.propose_config(config_map, scope=scope, note=note))
 
 
 # ---------------------------------------------------------------- credentials
@@ -295,6 +345,10 @@ def _register_write_tools() -> None:
         return
     mcp.tool()(create_agent_token)
     mcp.tool()(revoke_agent_token)
+    # #99/D9: MCP may *propose*. Approve, reject, reactivate and rollback are never
+    # tools here, at any setting — approval is a human role, and a client that can
+    # approve its own proposal has no separation of duties to speak of.
+    mcp.tool()(propose_config)
 
 
 # ------------------------------------------------------------------ manifests

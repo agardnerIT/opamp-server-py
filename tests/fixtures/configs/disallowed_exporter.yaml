@@ -1,0 +1,23 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+processors:
+  memory_limiter:
+    check_interval: 1s
+  batch: {}
+exporters:
+  otlphttp:
+    endpoint: https://not-allowlisted.example.org:4318
+service:
+  extensions: [opamp]
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp]
+extensions:
+  opamp: {}

@@ -43,7 +43,18 @@ from server.reports import (
     _is_heavy,
 )
 from server.alerts import get_alert_config, update_alert_config, send_test_alert, send_alert, ALERT_TYPES, ALERT_CONFIG, ALERT_EVENTS, send_new_agent_alert, send_stale_agent_alert, send_compliance_alert, redact_config, merge_redacted
-from server import admin_auth, agent_auth, audit, auth, crypto, posture, redaction, remote_config
+from server import (
+    admin_auth,
+    agent_auth,
+    audit,
+    auth,
+    config_control,
+    config_validation,
+    crypto,
+    posture,
+    redaction,
+    remote_config,
+)
 from server.redaction import redact_document
 from server.auth import (  # noqa: F401  (privileged routes below)
     ROLE_ADMIN,
@@ -107,6 +118,18 @@ async def periodic_cleanup():
             remote_config.REGISTRY.prune()
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning(f"config retention prune failed: {exc}")
+        # #99: drift is recomputed here, not on the message path — an alert is a
+        # network call and one alert per poll is the flood the issue rules out. The
+        # `include_future` sweep lives here too, so a later-joining agent inherits a
+        # proposal only when the operator explicitly opted in.
+        try:
+            config_control.sweep_drift(AGENT_REGISTRY.list_all())
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(f"config drift sweep failed: {exc}")
+        try:
+            config_control.reconcile_future(AGENT_REGISTRY.list_all())
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(f"include_future sweep failed: {exc}")
 
 
 @asynccontextmanager
@@ -1611,6 +1634,9 @@ class RemoteConfigRequest(BaseModel):
 
     config_map: Dict[str, Any]
     note: Optional[str] = None
+    # #100: moving the `opamp` endpoint away from this server is refused unless the
+    # caller says so explicitly; an approver has to confirm it again at approve time.
+    allow_endpoint_change: bool = False
 
 
 class FleetConfigRequest(RemoteConfigRequest):
@@ -1622,7 +1648,61 @@ class FleetConfigRequest(RemoteConfigRequest):
 
 
 class ValidateConfigRequest(BaseModel):
+    """Body for `POST /config/validate` (#100)."""
+
     config_map: Dict[str, Any]
+    agent_id: Optional[str] = None
+    allow_endpoint_change: bool = False
+
+
+class ConfigScope(BaseModel):
+    """Who a proposal targets. Exactly one of `agent_id`, `agents` or `filter`."""
+
+    agent_id: Optional[str] = None
+    agents: Optional[List[str]] = None
+    filter: Optional[Dict[str, Any]] = None
+    include_future: bool = False
+
+
+class ProposeConfigRequest(BaseModel):
+    """Body for `POST /config/revisions` (#99): a draft, not a delivery."""
+
+    config_map: Dict[str, Any]
+    scope: ConfigScope
+    note: Optional[str] = None
+    allow_endpoint_change: bool = False
+    override_reason: Optional[str] = None
+
+
+class ApproveConfigRequest(BaseModel):
+    """Body for approving a proposal (#99). An override needs a recorded reason."""
+
+    note: Optional[str] = None
+    confirm_endpoint_change: bool = False
+    # The selector is re-resolved at approve time; if it now covers agents the
+    # approver never saw, the approval needs this explicit acknowledgement.
+    confirm_scope_change: bool = False
+    override_reason: Optional[str] = None
+
+
+class RejectConfigRequest(BaseModel):
+    """Body for `POST /config/revisions/{id}/reject`."""
+
+    reason: Optional[str] = None
+
+
+class ReactivateConfigRequest(BaseModel):
+    """Body for `POST /config/revisions/{id}/reactivate` (poisoned revision)."""
+
+    reason: Optional[str] = None
+    confirm_endpoint_change: bool = False
+    override_reason: Optional[str] = None
+
+
+class RollbackRequest(BaseModel):
+    """Body for `POST /agent/{id}/config/rollback`."""
+
+    note: Optional[str] = None
 
 
 def _desired_view(agent_id: str, reveal: bool = False) -> Optional[Dict[str, Any]]:
@@ -1635,6 +1715,20 @@ def _desired_view(agent_id: str, reveal: bool = False) -> Optional[Dict[str, Any
         redacted, paths = config_map, []
     else:
         redacted, paths = redact_document(config_map)
+    verdict = None
+    raw_verdict = record.get("verdict_json")
+    if raw_verdict:
+        try:
+            verdict = json.loads(raw_verdict)
+        except (TypeError, ValueError):
+            verdict = None
+    scope = None
+    raw_scope = record.get("scope_json")
+    if raw_scope:
+        try:
+            scope = json.loads(raw_scope)
+        except (TypeError, ValueError):
+            scope = None
     return {
         "revision_id": record.get("revision_id"),
         "config_hash": record.get("config_hash"),
@@ -1643,6 +1737,17 @@ def _desired_view(agent_id: str, reveal: bool = False) -> Optional[Dict[str, Any
         "withdrawn": bool(record.get("withdrawn")),
         "failed_at": record.get("failed_at"),
         "failure_detail": record.get("failure_detail"),
+        # #99 lifecycle: only an `active`, unpoisoned revision is deliverable.
+        "status": record.get("status"),
+        "proposal_id": record.get("proposal_id"),
+        "approved_by": record.get("approved_by"),
+        "approved_at": record.get("approved_at"),
+        "note": record.get("note"),
+        "parent_revision_id": record.get("parent_revision_id"),
+        "scope_kind": record.get("scope_kind"),
+        "scope": scope,
+        "verdict": verdict,
+        "deliverable": remote_config.deliverable(record),
         "config_map": redacted,
         "redacted": bool(paths),
         "redacted_paths": paths,
@@ -1691,6 +1796,13 @@ def get_agent_config(agent_id: str, request: Request, reveal: bool = False):
     it is **poisoned** and will not be retried (epic #93, D6) — push a new revision
     or roll back.
 
+    `desired.status` is the #99 lifecycle (`proposed`, `active`, `superseded`,
+    `rolled_back`, `poisoned`, `rejected`); only `active` is deliverable, and
+    `desired.deliverable` says so directly. `assignment` is the delivery record:
+    what we last put on the wire, how many attempts it took, what the agent last
+    said. `drift` answers "is the agent running what we approved?" — `true`,
+    `false`, or `null` when it cannot be known yet — with the missing YAML paths.
+
     `history` lists revision metadata (hash, author, timestamps) without bodies, so
     "who changed this and when" is answerable without shipping config in a listing.
     """
@@ -1725,6 +1837,10 @@ def get_agent_config(agent_id: str, request: Request, reveal: bool = False):
             "config_hash": row["config_hash"],
             "author": row["author"],
             "created_at": row["created_at"],
+            "status": row.get("status"),
+            "proposal_id": row.get("proposal_id"),
+            "approved_by": row.get("approved_by"),
+            "parent_revision_id": row.get("parent_revision_id"),
             "withdrawn": bool(row.get("withdrawn")),
             "failed_at": row.get("failed_at"),
             "body_pruned_at": row.get("body_pruned_at"),
@@ -1732,6 +1848,7 @@ def get_agent_config(agent_id: str, request: Request, reveal: bool = False):
         for row in remote_config.REGISTRY.history(agent_id, limit=20)
     ]
 
+    record = remote_config.REGISTRY.get(agent_id)
     response = JSONResponse(
         {
             "agent_id": agent_id,
@@ -1742,6 +1859,8 @@ def get_agent_config(agent_id: str, request: Request, reveal: bool = False):
                 "last_remote_config_hash": state.last_remote_config_hash if state else None,
                 "error": state.remote_config_error if state else None,
             },
+            "assignment": remote_config.REGISTRY.delivery_record(agent_id),
+            "drift": config_control.drift_for(record, state),
             "history": history,
             "config_push_allowed": posture.push_allowed(),
         }
@@ -1787,17 +1906,28 @@ def put_agent_config(
         agent_id = remote_config.normalize_agent_id(agent_id)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
-    if AGENT_REGISTRY.get(agent_id) is None:
+    state = AGENT_REGISTRY.get(agent_id)
+    if state is None:
         raise HTTPException(status_code=404, detail=f"agent {agent_id} not found")
 
-    try:
-        config_map, warnings = remote_config.validate_config_map(body.config_map)
-    except remote_config.ConfigValidationError as exc:
+    verdict = config_control.validate_for_targets(
+        body.config_map,
+        agents=[state],
+        allow_endpoint_change=body.allow_endpoint_change,
+    )
+    if not verdict.ok:
         PROM_CONFIG_PUSHES.labels(result="invalid").inc()
         raise HTTPException(
             status_code=422,
-            detail={"message": "config validation failed", "errors": exc.errors},
+            detail={
+                "message": "config validation failed",
+                "errors": verdict.error_messages,
+                "details": [finding.to_dict() for finding in verdict.errors],
+                "warnings": verdict.warning_messages,
+                "policy": verdict.policy,
+            },
         )
+    config_map, warnings = verdict.normalised, verdict.warning_messages
 
     config_hash = remote_config.compute_hash(config_map)
     revision_id = remote_config.new_revision_id()
@@ -1815,7 +1945,12 @@ def put_agent_config(
     )
     try:
         record = remote_config.REGISTRY.push(
-            agent_id, config_map, principal.name, revision_id=revision_id
+            agent_id,
+            config_map,
+            principal.name,
+            revision_id=revision_id,
+            note=body.note,
+            verdict=verdict,
         )
     except Exception as exc:
         audit.audit_event(
@@ -1837,7 +1972,9 @@ def put_agent_config(
         "revision_id": record["revision_id"],
         "config_hash": record["config_hash"],
         "objects": len(config_map),
+        "status": record.get("status"),
         "warnings": warnings,
+        "verdict": verdict.to_dict(),
         "delivery": "queued — sent on the agent's next status report",
     }
 
@@ -1918,15 +2055,6 @@ def apply_config_fleet(
             ),
         )
 
-    try:
-        config_map, warnings = remote_config.validate_config_map(body.config_map)
-    except remote_config.ConfigValidationError as exc:
-        PROM_CONFIG_PUSHES.labels(result="invalid").inc()
-        raise HTTPException(
-            status_code=422,
-            detail={"message": "config validation failed", "errors": exc.errors},
-        )
-
     if body.agents:
         targets = []
         for raw_id in body.agents:
@@ -1962,6 +2090,28 @@ def apply_config_fleet(
     if not targets:
         raise HTTPException(status_code=404, detail="no agents matched the selector")
 
+    # #100: validate with the resolved targets in scope, so the inventory warnings
+    # are about the agents this request is actually about.
+    targets_states = [AGENT_REGISTRY.get(target) for target in targets]
+    verdict = config_control.validate_for_targets(
+        body.config_map,
+        agents=[state for state in targets_states if state is not None],
+        allow_endpoint_change=body.allow_endpoint_change,
+    )
+    if not verdict.ok:
+        PROM_CONFIG_PUSHES.labels(result="invalid").inc()
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "config validation failed",
+                "errors": verdict.error_messages,
+                "details": [finding.to_dict() for finding in verdict.errors],
+                "warnings": verdict.warning_messages,
+                "policy": verdict.policy,
+            },
+        )
+    config_map, warnings = verdict.normalised, verdict.warning_messages
+
     config_hash = remote_config.compute_hash(config_map)
     audit_action(
         principal,
@@ -1979,7 +2129,12 @@ def apply_config_fleet(
         revision_id = remote_config.new_revision_id()
         try:
             record = remote_config.REGISTRY.push(
-                target, config_map, principal.name, revision_id=revision_id
+                target,
+                config_map,
+                principal.name,
+                revision_id=revision_id,
+                note=body.note,
+                verdict=verdict,
             )
             results.append({"agent_id": target, "revision_id": record["revision_id"], "ok": True})
             PROM_CONFIG_PUSHES.labels(result="ok").inc()
@@ -2017,26 +2172,414 @@ def validate_config(body: ValidateConfigRequest, request: Request):
     function, not replace it.
     """
     require_roles(request, ROLE_VIEWER)
-    try:
-        normalised, warnings = remote_config.validate_config_map(body.config_map)
-    except remote_config.ConfigValidationError as exc:
+    agents = []
+    if body.agent_id:
+        try:
+            agent_id = remote_config.normalize_agent_id(body.agent_id)
+        except ValueError as exc:
+            return {
+                "valid": False,
+                "errors": [str(exc)],
+                "details": [],
+                "warnings": [],
+                "policy": {"status": "skipped", "violations": []},
+                "config_hash": None,
+                "size_bytes": None,
+                "objects": None,
+            }
+        state = AGENT_REGISTRY.get(agent_id)
+        if state is not None:
+            agents.append(state)
+
+    verdict = config_validation.check_config_map(
+        body.config_map,
+        agents=agents,
+        allow_endpoint_change=body.allow_endpoint_change,
+    )
+    if not verdict.ok:
         return {
             "valid": False,
-            "errors": exc.errors,
-            "warnings": [],
-            "config_hash": None,
-            "size_bytes": None,
-            "objects": None,
+            "errors": verdict.error_messages,
+            "details": [finding.to_dict() for finding in verdict.errors],
+            "warnings": verdict.warning_messages,
+            "warning_details": [finding.to_dict() for finding in verdict.warnings],
+            "policy": verdict.policy,
+            "fingerprint": verdict.fingerprint(),
+            "config_hash": remote_config.compute_hash(verdict.normalised)
+            if verdict.normalised
+            else None,
+            "size_bytes": _config_size(verdict.normalised),
+            "objects": len(verdict.normalised) or None,
         }
-    size = sum(len((entry.get("body") or "").encode("utf-8")) for entry in normalised.values())
+    size = _config_size(verdict.normalised)
     return {
         "valid": True,
         "errors": [],
-        "warnings": warnings,
-        "config_hash": remote_config.compute_hash(normalised),
+        "details": [],
+        "warnings": verdict.warning_messages,
+        "warning_details": [finding.to_dict() for finding in verdict.warnings],
+        "policy": verdict.policy,
+        "fingerprint": verdict.fingerprint(),
+        "config_hash": remote_config.compute_hash(verdict.normalised),
         "size_bytes": size,
-        "objects": len(normalised),
+        "objects": len(verdict.normalised),
     }
+
+
+def _config_size(config_map: Dict[str, Dict[str, Any]]) -> Optional[int]:
+    if not config_map:
+        return None
+    return sum(len((entry.get("body") or "").encode("utf-8")) for entry in config_map.values())
+
+
+# ------------------------------------------------------ config control plane (#99)
+
+
+def _control_error(exc: "config_control.ConfigControlError") -> HTTPException:
+    """Translate a lifecycle refusal into the HTTP answer, keeping its detail."""
+    return HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+@app.post(
+    "/config/revisions",
+    tags=["config"],
+    summary="Propose a config revision (operator)",
+)
+def propose_config_revision(
+    body: ProposeConfigRequest,
+    request: Request,
+    _gate=Depends(posture.config_push_gate),
+    _audit=Depends(require_audit("config.propose")),
+):
+    """Draft a config revision for one agent, a list, a selector or the fleet. Requires `operator`.
+
+    **Proposing delivers nothing.** It runs the #100 validation pipeline, resolves the
+    scope *now*, and stores one immutable `proposed` revision per target agent under a
+    single `proposal_id`. An approver then approves or rejects it
+    (`POST /config/revisions/{proposal_id}/approve`), which is what makes "who
+    approved this?" answerable and the approval a real second pair of eyes (D3).
+
+    Refused with 422 when the config is broken (unparseable, structurally invalid,
+    missing the `opamp` extension, oversized, redacted) or when the **policy gate**
+    rejects it and no `override_reason` was supplied. Proposal does not move the
+    agent's assignment: a proposal that is never approved changes nothing.
+
+    `scope.include_future` only applies to a `filter` scope; when set, agents that
+    match the filter *later* inherit the config (the sweep in the periodic tick
+    attaches them). Without it, a later-joining agent inherits nothing — silent
+    inheritance is how a fleet-wide config reaches a machine nobody thought about.
+    """
+    principal = require_roles(request, ROLE_OPERATOR)
+    try:
+        scope = config_control.parse_scope(body.scope.model_dump())
+        prepared = config_control.prepare(
+            body.config_map,
+            scope=scope,
+            agents=AGENT_REGISTRY.list_all(),
+            allow_endpoint_change=body.allow_endpoint_change,
+            override_reason=body.override_reason,
+        )
+    except config_control.ConfigControlError as exc:
+        raise _control_error(exc)
+
+    proposal_id = remote_config.new_proposal_id()
+    audit_action(
+        principal,
+        "config.propose",
+        target_kind="proposal",
+        target_id=proposal_id,
+        config_hash=prepared["config_hash"],
+        agent_count=len(prepared["targets"]),
+        objects=len(prepared["config_map"]),
+        scope_kind=prepared["scope_kind"],
+        override_reason=body.override_reason,
+        note=body.note,
+    )
+    result = config_control.propose(
+        prepared, author=principal.name, proposal_id=proposal_id, note=body.note
+    )
+    PROM_CONFIG_PUSHES.labels(result="proposed").inc()
+    return result
+
+
+@app.get(
+    "/config/revisions",
+    tags=["config"],
+    summary="List config revisions (viewer)",
+)
+def list_config_revisions(
+    request: Request,
+    agent: Optional[str] = Query(None, description="Filter by agent id"),
+    status: Optional[str] = Query(
+        None,
+        description="proposed|active|superseded|rolled_back|poisoned|rejected",
+    ),
+    limit: int = Query(100, ge=1, le=1000),
+):
+    """Revision metadata across the fleet, newest first. Requires `viewer`.
+
+    **No config bodies.** Hashes, authors, timestamps, lifecycle status, the stored
+    validation verdict and the delivery facts only — a listing is not a place to
+    leak a fleet's credentials (D8). Read one agent's desired body through
+    `GET /agent/{id}/config`, which is redacted and audited.
+    """
+    require_roles(request, ROLE_VIEWER)
+    if agent:
+        try:
+            agent = remote_config.normalize_agent_id(agent)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+    try:
+        return config_control.list_proposals(agent_id=agent, status=status, limit=limit)
+    except config_control.ConfigControlError as exc:
+        raise _control_error(exc)
+
+
+@app.get(
+    "/config/revisions/{proposal_id}",
+    tags=["config"],
+    summary="One proposal with its revisions and verdicts (viewer)",
+)
+def get_config_proposal(proposal_id: str, request: Request):
+    """Proposal detail: every per-agent revision, its status, verdict and delivery facts.
+
+    Requires `viewer`. Bodies are excluded (D8); use `GET /agent/{id}/config`.
+    `status` is the rollup: one status when every revision agrees, `mixed` while an
+    approval is partially applied, and `statuses` always lists what is present.
+    """
+    require_roles(request, ROLE_VIEWER)
+    try:
+        return config_control.proposal_view(proposal_id)
+    except config_control.ConfigControlError as exc:
+        raise _control_error(exc)
+
+
+@app.post(
+    "/config/revisions/{proposal_id}/approve",
+    tags=["config"],
+    summary="Approve a proposed revision (approver)",
+)
+def approve_config_revision(
+    proposal_id: str,
+    body: ApproveConfigRequest,
+    request: Request,
+    _gate=Depends(posture.config_push_gate),
+    _audit=Depends(require_audit("config.approve")),
+):
+    """Approve and activate a proposal. Requires `approver` — a different duty from `operator`.
+
+    Re-runs the full validation pipeline against each target before activating (#100:
+    a config approved on Monday must not be delivered on Friday unchecked). A
+    *blocking* change (the config is now invalid, or the `opamp` endpoint would move
+    without `confirm_endpoint_change`) refuses with `409 re-validate`. A **policy**
+    violation refuses too, unless `override_reason` is supplied — that override is
+    recorded in the audit log as `config.override`.
+
+    Approving supersedes each agent's previous active revision (kept for rollback) and
+    resets the delivery record, so the revision is delivered exactly once per agent.
+
+    Because the selector is resolved again here, an approval can cover *more* agents
+    than it did at propose time. If it does, the request must repeat with
+    `confirm_scope_change: true` — an approval that quietly widens its own blast
+    radius is the failure this flow exists to prevent. The response lists `added`
+    and `dropped` agents.
+    """
+    principal = require_roles(request, ROLE_APPROVER)
+    try:
+        info = config_control.summary(proposal_id)
+    except config_control.ConfigControlError as exc:
+        raise _control_error(exc)
+    audit_action(
+        principal,
+        "config.approve",
+        target_kind="proposal",
+        target_id=proposal_id,
+        config_hash=info["config_hash"],
+        # The pre-write row records what was *proposed*; the selector is resolved
+        # again inside the approval, so the authoritative per-agent record is each
+        # revision's own `approved_by`/`approved_at` (#99 rule 4).
+        proposed_agent_count=len(info["agents"]),
+        confirm_endpoint_change=body.confirm_endpoint_change,
+        confirm_scope_change=body.confirm_scope_change,
+        override_reason=body.override_reason,
+        note=body.note,
+    )
+    try:
+        result = config_control.approve(
+            proposal_id,
+            approver=principal.name,
+            agents=AGENT_REGISTRY.list_all(),
+            allow_endpoint_change_confirmed=body.confirm_endpoint_change,
+            confirm_scope_change=body.confirm_scope_change,
+            override_reason=body.override_reason,
+            note=body.note,
+        )
+    except config_control.ConfigControlError as exc:
+        audit.audit_event(
+            "config.approve",
+            principal=principal.name,
+            role=principal.role,
+            result="error",
+            target_kind="proposal",
+            target_id=proposal_id,
+            config_hash=info["config_hash"],
+            error=str(exc.detail),
+        )
+        raise _control_error(exc)
+    if body.override_reason:
+        audit_action(
+            principal,
+            "config.override",
+            target_kind="proposal",
+            target_id=proposal_id,
+            config_hash=info["config_hash"],
+            reason=body.override_reason,
+        )
+    PROM_CONFIG_PUSHES.labels(result="approved").inc()
+    return result
+
+
+@app.post(
+    "/config/revisions/{proposal_id}/reject",
+    tags=["config"],
+    summary="Reject a proposed revision (approver)",
+)
+def reject_config_revision(
+    proposal_id: str,
+    body: RejectConfigRequest,
+    request: Request,
+    _gate=Depends(posture.config_push_gate),
+    _audit=Depends(require_audit("config.reject")),
+):
+    """Reject a proposal. Requires `approver`.
+
+    The revision is **kept**, marked `rejected`: a config somebody proposed and a
+    human refused is evidence, and deleting it would make "we never proposed that"
+    unfalsifiable. Only `proposed` revisions can be rejected; an active one is
+    withdrawn or rolled back instead.
+    """
+    principal = require_roles(request, ROLE_APPROVER)
+    try:
+        info = config_control.summary(proposal_id)
+    except config_control.ConfigControlError as exc:
+        raise _control_error(exc)
+    audit_action(
+        principal,
+        "config.reject",
+        target_kind="proposal",
+        target_id=proposal_id,
+        config_hash=info["config_hash"],
+        reason=body.reason,
+    )
+    try:
+        return config_control.reject(
+            proposal_id, approver=principal.name, reason=body.reason
+        )
+    except config_control.ConfigControlError as exc:
+        raise _control_error(exc)
+
+
+@app.post(
+    "/config/revisions/{proposal_id}/reactivate",
+    tags=["config"],
+    summary="Reactivate a poisoned revision (approver)",
+)
+def reactivate_config_revision(
+    proposal_id: str,
+    body: ReactivateConfigRequest,
+    request: Request,
+    _gate=Depends(posture.config_push_gate),
+    _audit=Depends(require_audit("config.reactivate")),
+):
+    """Re-approve a poisoned revision and resume delivery. Requires `approver`.
+
+    A `FAILED` report or a detected auto-revert poisons a revision permanently (D6):
+    nothing reactivates on a timer, because "try it again and hope" against a live
+    fleet is how a partial outage becomes a loop. Reactivation re-runs the validation
+    pipeline first — the reason it failed may have been fixed since — and is audited.
+    """
+    principal = require_roles(request, ROLE_APPROVER)
+    try:
+        info = config_control.summary(proposal_id)
+    except config_control.ConfigControlError as exc:
+        raise _control_error(exc)
+    audit_action(
+        principal,
+        "config.reactivate",
+        target_kind="proposal",
+        target_id=proposal_id,
+        config_hash=info["config_hash"],
+        reason=body.reason,
+        override_reason=body.override_reason,
+    )
+    try:
+        return config_control.reactivate(
+            proposal_id,
+            approver=principal.name,
+            agents=AGENT_REGISTRY.list_all(),
+            reason=body.reason,
+            allow_endpoint_change_confirmed=body.confirm_endpoint_change,
+            override_reason=body.override_reason,
+        )
+    except config_control.ConfigControlError as exc:
+        raise _control_error(exc)
+
+
+@app.post(
+    "/agent/{agent_id}/config/rollback",
+    tags=["config"],
+    summary="Roll an agent back to its previous revision (approver)",
+)
+def rollback_agent_config(
+    agent_id: str,
+    body: RollbackRequest,
+    request: Request,
+    _gate=Depends(posture.config_push_gate),
+    _audit=Depends(require_audit("config.rollback")),
+):
+    """Roll back to the agent's previous revision. Requires `approver`.
+
+    Rollback is a **new revision** whose body is the previous one and whose
+    `parent_revision_id` names it (D4: revisions are immutable, so rollback cannot be
+    a pointer move that makes the audit trail lie). The revision it replaces is
+    marked `rolled_back`, and the previous config is re-validated before delivery
+    because the protected invariants and the agent's inventory may have moved.
+    """
+    principal = require_roles(request, ROLE_APPROVER)
+    try:
+        agent_id = remote_config.normalize_agent_id(agent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    store = remote_config.REGISTRY.store
+    if store.current(agent_id) is None and AGENT_REGISTRY.get(agent_id) is None:
+        raise HTTPException(status_code=404, detail=f"agent {agent_id} not found")
+    previous = store.previous(agent_id)
+    if previous is None:
+        raise HTTPException(
+            status_code=409,
+            detail=f"agent {agent_id} has no previous revision to roll back to",
+        )
+    revision_id = remote_config.new_revision_id()
+    audit_action(
+        principal,
+        "config.rollback",
+        target_kind="agent",
+        target_id=agent_id,
+        revision_id=revision_id,
+        config_hash=previous.get("config_hash"),
+        parent_revision_id=previous["revision_id"],
+        note=body.note,
+    )
+    try:
+        return config_control.rollback(
+            agent_id,
+            author=principal.name,
+            agents=AGENT_REGISTRY.list_all(),
+            note=body.note,
+            revision_id=revision_id,
+        )
+    except config_control.ConfigControlError as exc:
+        raise _control_error(exc)
 
 
 @app.get("/health", tags=["ops"], summary="Health check")
@@ -2103,6 +2646,16 @@ def config_posture(request: Request):
             "revisions": remote_config.REGISTRY.count(),
             "max_bytes": remote_config.max_bytes(),
             "retention_days": remote_config.retention_days(),
+            # #99/#100: the delivery and validation bounds, so an operator can see
+            # *why* an agent stopped being offered a config.
+            "max_delivery_attempts": remote_config.max_delivery_attempts(),
+            "revert_grace_seconds": remote_config.revert_grace_seconds(),
+            "validation": {
+                "max_aliases": config_validation.max_aliases(),
+                "max_depth": config_validation.max_depth(),
+                "max_nodes": config_validation.max_nodes(),
+                "allowed_exporter_hosts": list(config_validation.allowed_exporter_hosts()),
+            },
         },
     }
 

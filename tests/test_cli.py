@@ -617,6 +617,86 @@ class TestConfigCommands:
         )
         assert ok["succeeded"] == 1
 
+    def test_cli_propose_approve_rollback(self, live, push_env, tmp_path):
+        register_agent("11" * 16)
+        path = tmp_path / "collector.yaml"
+        path.write_text(CONFIG_FILE_BODY)
+
+        proposed = parse(
+            run("--password", ADMIN_PW, "config", "propose", "--file", str(path),
+                "--agent", "11" * 16, "--note", "cli propose")
+        )
+        assert proposed["status"] == "proposed"
+        proposal_id = proposed["proposal_id"]
+
+        listing = parse(run("--password", ADMIN_PW, "config", "revisions",
+                            "--agent", "11" * 16))
+        assert listing["count"] == 1 and listing["revisions"][0]["status"] == "proposed"
+
+        shown = parse(run("--password", ADMIN_PW, "config", "show", proposal_id))
+        assert shown["proposal_id"] == proposal_id
+        assert "config_map" not in json.dumps(shown)
+
+        approved = parse(
+            run("--password", ADMIN_PW, "config", "approve", proposal_id, "--note", "ok")
+        )
+        assert approved["status"] == "active"
+
+        # A second revision, then rollback to the first.
+        parse(run("--password", ADMIN_PW, "agents", "config", "set", "11" * 16,
+                  "--file", str(path)))
+        rolled = parse(
+            run("--password", ADMIN_PW, "agents", "config", "rollback", "11" * 16,
+                "--note", "undo")
+        )
+        assert rolled["parent_revision_id"]
+
+    def test_cli_reject_then_approve_is_409(self, live, push_env, tmp_path):
+        register_agent("22" * 16)
+        path = tmp_path / "collector.yaml"
+        path.write_text(CONFIG_FILE_BODY)
+        proposal = parse(
+            run("--password", ADMIN_PW, "config", "propose", "--file", str(path),
+                "--agent", "22" * 16)
+        )
+        rejected = parse(
+            run("--password", ADMIN_PW, "config", "reject", proposal["proposal_id"],
+                "--reason", "wrong tenant")
+        )
+        assert rejected["status"] == "rejected"
+        result = run("--password", ADMIN_PW, "config", "approve", proposal["proposal_id"])
+        assert result.exit_code == 1
+        assert "409" in json.loads(result.output)["error"]
+
+    def test_cli_propose_needs_a_scope(self, live, push_env, tmp_path):
+        path = tmp_path / "collector.yaml"
+        path.write_text(CONFIG_FILE_BODY)
+        result = run("--password", ADMIN_PW, "config", "propose", "--file", str(path))
+        assert result.exit_code == 1
+        assert "exactly one scope" in json.loads(result.output)["error"]
+
+    def test_offline_revisions_and_show(self, live, push_env, offline_db, tmp_path):
+        from server.state import SQLiteDesiredConfigStore
+
+        register_agent("33" * 16)
+        path = tmp_path / "collector.yaml"
+        path.write_text(CONFIG_FILE_BODY)
+        # Store a revision directly in the offline database the CLI reads.
+        from server import remote_config
+
+        store = SQLiteDesiredConfigStore(offline_db)
+        remote_config.DesiredConfigRegistry(store).push(
+            "33" * 16,
+            {"": {"body": CONFIG_FILE_BODY, "content_type": "text/yaml"}},
+            "alice",
+            proposal_id="prop-offline-1",
+        )
+        listing = parse(run("--db", str(offline_db), "config", "revisions"))
+        assert listing["count"] >= 1
+        assert "offline" in listing["note"]
+        shown = parse(run("--db", str(offline_db), "config", "show", "prop-offline-1"))
+        assert shown["proposal_id"] == "prop-offline-1"
+
     def test_offline_get_is_always_redacted(self, offline_db):
         data = parse(run("--db", str(offline_db), "agents", "config", "get", "aaaa1111aaaa1111"))
         assert data["effective"]["redacted"] is True or data["effective"]["config"] is not None

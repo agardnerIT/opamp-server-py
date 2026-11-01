@@ -15,24 +15,25 @@ hashes a **length-prefixed, key-sorted** encoding of the config map (SHA-256), w
 is unambiguous: two different maps cannot serialise to the same bytes, and field
 order in the request body cannot change the hash.
 
-**Validation.** Deliberately minimal — structural checks only, and the seam for
-#100's full pipeline (protected invariants, OPA). The two checks that earn their
-place today are the ones whose failure mode is a dead collector:
-
-* a body that claims to be YAML and does not parse leaves the collector down until
-  someone restarts it by hand (upstream says so explicitly), and
-* a **redacted** body must be impossible to push (#98). Pushing one silently wipes
-  every credential in the fleet, and it is a one-click mistake in a UI.
+**Validation** is the pipeline in `server.config_validation` (#100): shape and size,
+bounded parse, structural rules, protected invariants, inventory warnings and the
+OPA policy gate. It is re-run at approve/apply time, because the schema, the
+policies and an agent's component inventory can all move between Monday and Friday.
 
 **Delivery.** A pure decision function, ``offer_for()``, so the HTTP and WebSocket
-transports cannot diverge: offer iff push is allowed, the agent advertises
-`AcceptsRemoteConfig`, a revision exists, the revision is not poisoned, and the
-agent's reported hash differs from ours. That last clause is the spec's MUST and
-also the thing that prevents a re-push loop.
+transports cannot diverge. It offers only when push is allowed by the posture, the
+agent advertises `AcceptsRemoteConfig`, the assignment points at a revision that is
+`active` and not poisoned, and the agent's reported hash differs from ours. On top
+of #81's hash comparison it now carries #99's lifecycle guards: a delivery counter
+(an agent that never reports back is not re-pushed forever), an auto-revert detector
+(T9: an agent that reports a *different* config after we delivered ours has restored
+its last working config, so re-pushing is the infinite loop), and delivery
+bookkeeping that survives a restart.
 
-Nothing here writes to SQLite on the message path: `DesiredConfigRegistry` keeps the
-decoded current revision in memory (loaded at startup, updated on push) because
-#109 measured what a per-message write costs.
+Nothing here writes to SQLite on the steady-state message path: `DesiredConfigRegistry`
+keeps the assignment in memory (loaded at startup, updated on push) because #109
+measured what a per-message write costs. Writes happen only when a fact changes
+(a delivery was made, a status changed, a revision was poisoned).
 """
 
 from __future__ import annotations
@@ -44,9 +45,9 @@ import os
 import re
 import struct
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-import yaml
 from loguru import logger
 
 from proto.opamp_pb2 import (
@@ -55,7 +56,8 @@ from proto.opamp_pb2 import (
     AgentRemoteConfig,
     RemoteConfigStatuses,
 )
-from server import audit, crypto, posture, redaction
+from server import audit, config_validation, crypto, posture
+from server.config_validation import ConfigValidationError  # noqa: F401  (re-export)
 from server.state import SQLiteDesiredConfigStore, utcnow
 
 HASH_ALGORITHM = "sha256"
@@ -63,12 +65,17 @@ HASH_DOMAIN = b"opamp-config-map-v1\x00"
 
 # 1 MiB by default. A collector config is kilobytes; the cap exists so a typo
 # cannot put a megabyte into every agent's response and into every SQLite write.
-DEFAULT_MAX_BYTES = 1024 * 1024
+DEFAULT_MAX_BYTES = config_validation.DEFAULT_MAX_BYTES
 
-# Alias/anchor guard. `yaml.safe_load` expands aliases, so a small document can
-# still ask for gigabytes ("billion laughs"). #100 owns real limits; this refuses
-# the obvious shape today.
-MAX_ANCHORS = 500
+# How many frames we will put on the wire for one assignment before deciding the
+# agent is never going to acknowledge it. Not poisoning: the revision may be fine
+# and the agent wedged, so this surfaces as `unconfirmed` and stops the loop.
+DEFAULT_MAX_DELIVERY_ATTEMPTS = 5
+
+# How long a supervisor gets to apply a config and report before a repeated
+# "different hash" report is treated as an auto-revert (T9). SIGHUP plus a restart
+# is not instantaneous, and poisoning a healthy rollout is its own incident.
+DEFAULT_REVERT_GRACE_SECONDS = 120
 
 STATUS_NAMES = {
     RemoteConfigStatuses.RemoteConfigStatuses_UNSET: "UNSET",
@@ -81,14 +88,6 @@ STATUS_FAILED = "FAILED"
 STATUS_APPLIED = "APPLIED"
 
 _REVISION_PREFIX = "rev"
-
-
-class ConfigValidationError(ValueError):
-    """The payload is not a config map we are willing to store or deliver."""
-
-    def __init__(self, errors: List[str]):
-        self.errors = list(errors)
-        super().__init__("; ".join(self.errors))
 
 
 # ---------------------------------------------------------------------- settings
@@ -110,7 +109,23 @@ def _env_int(name: str, default: int) -> int:
 
 
 def max_bytes() -> int:
-    return _env_int("CONFIG_MAX_BYTES", DEFAULT_MAX_BYTES)
+    return config_validation.max_bytes()
+
+
+def max_delivery_attempts() -> int:
+    return _env_int("CONFIG_MAX_DELIVERY_ATTEMPTS", DEFAULT_MAX_DELIVERY_ATTEMPTS)
+
+
+def revert_grace_seconds() -> int:
+    """`CONFIG_REVERT_GRACE_SECONDS`; `0` disables the window (tests, fast labs)."""
+    raw = (os.environ.get("CONFIG_REVERT_GRACE_SECONDS") or "").strip()
+    if not raw:
+        return DEFAULT_REVERT_GRACE_SECONDS
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_REVERT_GRACE_SECONDS
+    return value if value >= 0 else DEFAULT_REVERT_GRACE_SECONDS
 
 
 def retention_days() -> int:
@@ -168,116 +183,24 @@ def hash_from_wire(value: Optional[str]) -> Optional[str]:
 # --------------------------------------------------------------------- validation
 
 
-def _parse_bodies(config_map: Dict[str, Dict[str, Any]]) -> Tuple[List[str], List[str]]:
-    """Return `(errors, warnings)` from parsing each body as its declared type."""
-    errors: List[str] = []
-    warnings: List[str] = []
-    for key, entry in config_map.items():
-        body = entry.get("body", "")
-        if not isinstance(body, str):
-            continue
-        content_type = (entry.get("content_type") or "").lower()
-        looks_yaml = "yaml" in content_type or "yml" in content_type
-        looks_json = "json" in content_type
-        if not (looks_yaml or looks_json):
-            # Undeclared type: try anyway, but a failure is only a warning. A body
-            # that is not a config fragment at all (a PEM certificate, a shell
-            # script) must not be rejected because it is not YAML.
-            looks_yaml = True
-        if looks_yaml or looks_json:
-            anchors = body.count("&") + body.count("*")
-            if anchors > MAX_ANCHORS:
-                errors.append(
-                    f"{key or '(default)'}: body contains {anchors} YAML anchors/aliases, "
-                    f"over the limit of {MAX_ANCHORS} (possible alias bomb)"
-                )
-                continue
-            try:
-                yaml.safe_load(body)
-            except yaml.YAMLError as exc:
-                message = f"{key or '(default)'}: body is not valid {content_type or 'YAML'}: {exc}"
-                # An *undeclared* type is advisory: the body may legitimately not be
-                # YAML at all. A declared `text/yaml` that does not parse is an error,
-                # because the collector will stay down until someone restarts it.
-                if looks_yaml and "yaml" in content_type:
-                    errors.append(message)
-                else:
-                    warnings.append(message)
-    return errors, warnings
-
-
 def validate_config_map(
     config_map: Any,
     allow_empty: bool = False,
+    **kwargs: Any,
 ) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
     """Validate a `{key: {body, content_type}}` payload. Returns `(normalised, warnings)`.
 
     Raises `ConfigValidationError` naming **every** problem at once — an operator
-    fixing one error per request is how a config push takes an afternoon.
+    fixing one error per request is how a config push takes an afternoon. The full
+    pipeline (and the structured verdict) lives in `server.config_validation`; this
+    wrapper keeps #81's call signature and string-shaped messages.
     """
-    errors: List[str] = []
-    warnings: List[str] = []
+    return config_validation.validate_config_map(config_map, allow_empty, **kwargs)
 
-    if not isinstance(config_map, dict):
-        raise ConfigValidationError(["config_map must be an object mapping names to config bodies"])
-    if not config_map and not allow_empty:
-        raise ConfigValidationError(
-            ["config_map is empty: use DELETE to withdraw a config, not an empty push"]
-        )
 
-    normalised: Dict[str, Dict[str, Any]] = {}
-    total = 0
-    for key, entry in config_map.items():
-        label = key or "(default)"
-        if not isinstance(key, str):
-            errors.append(f"{label}: config map keys must be strings")
-            continue
-        if not isinstance(entry, dict):
-            errors.append(f"{label}: expected an object with a 'body' field")
-            continue
-        body = entry.get("body")
-        if isinstance(body, (bytes, bytearray)):
-            body = bytes(body).decode("utf-8", "replace")
-        if not isinstance(body, str):
-            errors.append(f"{label}: 'body' is required and must be a string")
-            continue
-        content_type = entry.get("content_type") or ""
-        if not isinstance(content_type, str):
-            errors.append(f"{label}: 'content_type' must be a string")
-            continue
-        if "role" in entry:
-            # The v0.20.0 `AgentConfigObject.role` field is not in this repo's proto
-            # yet (#66). Silently dropping it would make a config look accepted but
-            # deliver something else.
-            errors.append(
-                f"{label}: 'role' is not supported by this build's protocol version; "
-                "it arrives with the v0.20.0 proto sync (#66)"
-            )
-            continue
-        total += len(body.encode("utf-8"))
-        normalised[key] = {"body": body, "content_type": content_type}
-
-    if total > max_bytes():
-        errors.append(
-            f"config map is {total} bytes, over CONFIG_MAX_BYTES={max_bytes()}"
-        )
-
-    # #98: the most dangerous foot-gun in the whole feature.
-    if redaction.contains_redaction(config_map):
-        errors.append(
-            "config body contains a redaction marker ('<redacted>' or the #98 marker): "
-            "a redacted document is a display artefact and pushing it would wipe "
-            "credentials across the fleet. Submit the real body."
-        )
-
-    if errors:
-        raise ConfigValidationError(errors)
-
-    parse_errors, parse_warnings = _parse_bodies(normalised)
-    if parse_errors:
-        raise ConfigValidationError(parse_errors)
-    warnings.extend(parse_warnings)
-    return normalised, warnings
+def check_config_map(config_map: Any, **kwargs: Any) -> config_validation.Verdict:
+    """The whole #100 pipeline as a structured verdict (never raises)."""
+    return config_validation.check_config_map(config_map, **kwargs)
 
 
 # -------------------------------------------------------------------- protobuf
@@ -309,6 +232,11 @@ def new_revision_id() -> str:
 # ---------------------------------------------------------------------- registry
 
 
+def new_proposal_id() -> str:
+    """Id shared by every per-agent revision one propose/approve call creates."""
+    return f"prop-{utcnow().strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}"
+
+
 class DesiredConfigRegistry:
     """In-memory view of the current desired config per agent, backed by SQLite.
 
@@ -316,12 +244,20 @@ class DesiredConfigRegistry:
     the database (#109): the decoded config map is cached at load and replaced on
     push. A push is a human-scale event, so the cache is refreshed from the store
     afterwards rather than patched by hand.
+
+    Each cache entry is the agent's **assignment** — revision content plus the
+    delivery facts (`delivered_hash`, `attempts`, `poisoned`, `last_status`) — because
+    a second lookup on the message path would be a second SQLite read (#109).
     """
 
     def __init__(self, store: Optional[SQLiteDesiredConfigStore] = None):
         self._store = store or SQLiteDesiredConfigStore()
         self._cache: Dict[str, Dict[str, Any]] = {}
         self.reload()
+
+    @property
+    def store(self) -> SQLiteDesiredConfigStore:
+        return self._store
 
     # -- cache ---------------------------------------------------------------
 
@@ -359,11 +295,38 @@ class DesiredConfigRegistry:
     def get(self, agent_id: str) -> Optional[Dict[str, Any]]:
         return self._cache.get(agent_id)
 
+    def all(self) -> Dict[str, Dict[str, Any]]:
+        """Snapshot of every assignment (drift sweeps, diagnostics)."""
+        return dict(self._cache)
+
     def history(self, agent_id: str, limit: int = 50) -> List[Dict[str, Any]]:
         return self._store.history(agent_id, limit)
 
+    def decode_revision(self, revision_id: str) -> Optional[Dict[str, Dict[str, Any]]]:
+        """Decode *any* revision's body (approve/rollback re-validate history).
+
+        Not on the message path: this reads SQLite, which is why `get()` is the only
+        method the delivery decision may call (#109).
+        """
+        record = self._store.revision(revision_id)
+        decoded = self._decode(record)
+        return decoded.get("config_map") if decoded else None
+
     def count(self) -> int:
         return len(self._cache)
+
+    def delivery_record(self, agent_id: str) -> Dict[str, Any]:
+        """The assignment/delivery facts the API and the drift check report (#99)."""
+        record = self._cache.get(agent_id) or {}
+        return {
+            "delivered_hash": record.get("delivered_hash"),
+            "delivered_at": record.get("delivered_at"),
+            "last_status": record.get("last_status"),
+            "last_error": record.get("last_error"),
+            "attempts": int(record.get("attempts") or 0),
+            "poisoned": bool(record.get("poisoned")),
+            "unconfirmed": bool(record.get("unconfirmed")),
+        }
 
     # -- writes --------------------------------------------------------------
 
@@ -374,11 +337,22 @@ class DesiredConfigRegistry:
         author: str,
         withdrawn: bool = False,
         revision_id: Optional[str] = None,
+        *,
+        status: str = SQLiteDesiredConfigStore.STATUS_ACTIVE,
+        proposal_id: Optional[str] = None,
+        scope_kind: Optional[str] = None,
+        scope_json: Optional[str] = None,
+        note: Optional[str] = None,
+        parent_revision_id: Optional[str] = None,
+        verdict: Optional[config_validation.Verdict] = None,
+        make_current: bool = True,
     ) -> Dict[str, Any]:
-        """Store a new revision and make it current. Returns the new record.
+        """Store a new revision, optionally making it current. Returns the record.
 
         `revision_id` is passed in by the API so the audit row written *before* the
         mutation can name the revision it authorised (#97's pre-write contract).
+        `make_current=False` is the propose step: the revision exists and is
+        validated, but no agent is pointed at it until an approver assigns it.
         """
         config_hash = compute_hash(config_map)
         revision_id = revision_id or new_revision_id()
@@ -389,11 +363,28 @@ class DesiredConfigRegistry:
             config_hash=config_hash,
             author=author,
             withdrawn=withdrawn,
+            status=status,
+            proposal_id=proposal_id,
+            scope_kind=scope_kind,
+            scope_json=scope_json,
+            note=note,
+            parent_revision_id=parent_revision_id,
+            verdict_json=json.dumps(verdict.to_dict(), sort_keys=True) if verdict else None,
+            make_current=make_current,
         )
+        if make_current:
+            decoded = self._decode(record)
+            if decoded is not None:
+                self._cache[agent_id] = decoded
+        return record
+
+    def activate(self, agent_id: str, revision_id: str) -> None:
+        """Approve-time assignment, refreshing the cache without re-reading SQLite."""
+        self._store.assign(agent_id, revision_id)
+        record = self._store.current(agent_id)
         decoded = self._decode(record)
         if decoded is not None:
             self._cache[agent_id] = decoded
-        return record
 
     def withdraw(
         self, agent_id: str, author: str, revision_id: Optional[str] = None
@@ -409,20 +400,94 @@ class DesiredConfigRegistry:
             agent_id, {}, author, withdrawn=True, revision_id=revision_id
         )
 
-    def rollback(self, agent_id: str, author: str) -> Optional[Dict[str, Any]]:
-        """Re-push the previous revision's content as a **new** revision (D4)."""
+    def rollback(
+        self,
+        agent_id: str,
+        author: str,
+        revision_id: Optional[str] = None,
+        note: Optional[str] = None,
+        proposal_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Re-push the previous revision's content as a **new** revision (D4).
+
+        The new revision names its parent, so the chain "what replaced what, and why"
+        is answerable from the revisions alone rather than from an audit row a
+        retention policy might one day prune.
+        """
         previous = self._store.previous(agent_id)
         decoded = self._decode(previous)
         if decoded is None:
             return None
-        return self.push(agent_id, decoded["config_map"], author)
+        return self.push(
+            agent_id,
+            decoded["config_map"],
+            author,
+            revision_id=revision_id,
+            note=note or f"rollback to {previous['revision_id']}",
+            parent_revision_id=previous["revision_id"],
+            proposal_id=proposal_id,
+        )
+
+    def record_delivery(self, agent_id: str, revision_id: str) -> int:
+        """One frame was put on the wire; returns the assignment's attempt count."""
+        attempts = self._store.record_delivery(agent_id, revision_id)
+        record = self._cache.get(agent_id)
+        if record is not None and record.get("revision_id") == revision_id:
+            record["attempts"] = attempts
+            record["delivered_hash"] = record.get("config_hash")
+            record["delivered_at"] = utcnow().isoformat()
+        return attempts
+
+    def note_report(
+        self,
+        agent_id: str,
+        status: Optional[str],
+        error: str = "",
+    ) -> bool:
+        """Record the agent's latest word on its assignment. Returns True if written.
+
+        Only writes when the value actually changes: an agent reports the same
+        `APPLIED` on every heartbeat, and a SQLite write per message is exactly what
+        #109 removed from this path.
+        """
+        record = self._cache.get(agent_id)
+        if record is None:
+            return False
+        short = (status or "")[:40] or None
+        message = (error or "")[:2000] or None
+        if record.get("last_status") == short and record.get("last_error") == message:
+            return False
+        self._store.note_report(agent_id, short, message)
+        record["last_status"] = short
+        record["last_error"] = message
+        return True
+
+    def poison(self, agent_id: str, revision_id: str, detail: str = "") -> None:
+        """Poison a revision and the assignment that points at it (D6)."""
+        self._store.poison_revision(revision_id, detail)
+        record = self._cache.get(agent_id)
+        if record is not None and record.get("revision_id") == revision_id:
+            record["status"] = SQLiteDesiredConfigStore.STATUS_POISONED
+            record["failed_at"] = record.get("failed_at") or utcnow().isoformat()
+            record["failure_detail"] = detail
+            record["poisoned"] = True
+            record["last_error"] = detail
 
     def mark_failed(self, revision_id: str, detail: str = "") -> None:
-        self._store.mark_failed(revision_id, detail)
-        for record in self._cache.values():
+        """Backwards-compatible alias for `poison` (#81 call sites)."""
+        for agent_id, record in self._cache.items():
             if record.get("revision_id") == revision_id:
-                record["failed_at"] = record.get("failed_at") or utcnow().isoformat()
-                record["failure_detail"] = detail
+                self.poison(agent_id, revision_id, detail)
+                return
+        self._store.poison_revision(revision_id, detail)
+
+    def mark_unconfirmed(self, agent_id: str, detail: str = "") -> None:
+        """Stop re-pushing a revision the agent never acknowledged (#99)."""
+        self._store.mark_unconfirmed(agent_id, detail)
+        record = self._cache.get(agent_id)
+        if record is not None:
+            record["unconfirmed"] = True
+            record["last_error"] = detail
 
     def prune(self) -> int:
         """Apply `CONFIG_RETENTION_DAYS` to superseded revision bodies (#98)."""
@@ -447,20 +512,47 @@ REGISTRY = DesiredConfigRegistry()
 # ---------------------------------------------------------------------- delivery
 
 
+def deliverable(record: Optional[Dict[str, Any]]) -> bool:
+    """True when this assignment may be put on the wire right now.
+
+    Four reasons not to deliver, and they are all "stop", never "try again":
+
+    * the revision is not `active` (proposed, rejected, superseded, rolled back);
+    * the revision is poisoned, by a `FAILED` report or an auto-revert (D6);
+    * the agent never acknowledged the last delivery (`unconfirmed`), so re-pushing
+      is noise, not recovery;
+    * the revision body is gone (retention pruned a row that is somehow current) —
+      delivering an empty map would silently wipe the agent's config.
+    """
+    if not record:
+        return False
+    if record.get("status") != SQLiteDesiredConfigStore.STATUS_ACTIVE:
+        return False
+    if record.get("failed_at") or record.get("poisoned") or record.get("unconfirmed"):
+        return False
+    return True
+
+
 def offer_for(
     agent_id: str,
     capabilities: int,
     status: Optional[Dict[str, Any]] = None,
 ) -> Optional[AgentRemoteConfig]:
-    """Build the `remote_config` offer for one message, or None (#81).
+    """Build the `remote_config` offer for one message, or None (#81, #99).
 
-    Conditions, in the order the spec states them:
+    Conditions, in order:
 
     1. config push is allowed by the posture (#96) — a capability bit is a promise;
     2. the agent advertises `AcceptsRemoteConfig` — the spec's MUST;
-    3. a revision exists and has not been poisoned by a failure (D6);
+    3. the assignment is deliverable (see :func:`deliverable`);
     4. the agent's reported hash differs from ours — the spec's MUST, and what
-       stops a server from re-pushing a config the agent already has.
+       stops a server from re-pushing a config the agent already has;
+    5. the delivery budget is not exhausted — an agent that never reports back is
+       surfaced as `unconfirmed` instead of being re-pushed forever.
+
+    Delivery bookkeeping (one write per frame, never per message) is recorded here
+    so a restart cannot double-deliver: `delivered_hash` is persisted, and a
+    re-delivery is only justified by a hash mismatch, not by a lost in-memory flag.
     """
     if not posture.push_allowed():
         return None
@@ -468,20 +560,70 @@ def offer_for(
         return None
 
     record = REGISTRY.get(agent_id)
-    if record is None:
+    if not deliverable(record):
         return None
-    if record.get("failed_at"):
-        # Poisoned: never auto-retry. Re-approval creates a new revision.
+    if not record.get("config_map") and not record.get("withdrawn"):
+        logger.warning(
+            f"agent {agent_id}: revision {record.get('revision_id')} has no decoded body; "
+            "nothing to deliver"
+        )
         return None
 
     reported = hash_from_wire((status or {}).get("lastRemoteConfigHash"))
     if reported == record["config_hash"]:
         return None
 
+    revision_id = record["revision_id"]
+    attempts = int(record.get("attempts") or 0)
+    limit = max_delivery_attempts()
+    if attempts >= limit:
+        detail = (
+            f"delivered {attempts} times and the agent never reported hash "
+            f"{record['config_hash'][:12]}…; delivery stopped"
+        )
+        REGISTRY.mark_unconfirmed(agent_id, detail)
+        logger.warning(f"agent {agent_id}: {detail}")
+        return None
+
     offer = AgentRemoteConfig()
     offer.config.CopyFrom(build_config_map(record.get("config_map") or {}))
     offer.config_hash = hash_bytes(record["config_hash"])
+    REGISTRY.record_delivery(agent_id, revision_id)
     return offer
+
+
+def _delivered_at(record: Dict[str, Any]) -> Optional[datetime]:
+    raw = record.get("delivered_at")
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _poison(agent_id: str, record: Dict[str, Any], reason: str, detail: str) -> Dict[str, Any]:
+    """Poison and audit in one place, so every path logs the same words (#99, T9)."""
+    revision_id = record["revision_id"]
+    REGISTRY.poison(agent_id, revision_id, detail)
+    logger.error(
+        f"agent {agent_id}: remote config revision {revision_id} poisoned ({reason}): "
+        f"{detail} — nothing more will be delivered for it; push a new revision or "
+        "roll back"
+    )
+    return audit.audit_event(
+        "config.apply.failed",
+        principal="system",
+        actor_kind="system",
+        result="error",
+        target_kind="agent",
+        target_id=agent_id,
+        revision_id=revision_id,
+        config_hash=record.get("config_hash"),
+        error=detail,
+        reason=reason,
+    )
 
 
 def note_status(
@@ -492,35 +634,53 @@ def note_status(
 ) -> Optional[Dict[str, Any]]:
     """React to a reported `RemoteConfigStatus`; returns an audit row if notable.
 
-    Only a `FAILED` for **our** revision poisons it. A failure the agent reports for
-    some other config is not ours to punish, and treating it as ours would stop
-    delivery for a config that never caused it.
+    Three cases matter (epic #93, T9):
+
+    1. **`FAILED` for our revision** — poison it. Never retried (D6).
+    2. **A different hash after we delivered ours** — the OpAMP Supervisor restores
+       `last_working_remote_config.dat` when a new config fails, so an agent that
+       reports "APPLIED, hash = something else" after we sent ours has auto-reverted.
+       Re-pushing that revision is the infinite loop T9 describes. Poison it once the
+       grace window has passed and we have had to deliver more than once; a single
+       stale report during a restart is not an auto-revert.
+    3. Anything else is just status — recorded, not punished. A failure the agent
+       reports for a config we never sent is not ours to punish.
     """
-    if status_name != STATUS_FAILED:
-        return None
     record = REGISTRY.get(agent_id)
     if record is None:
         return None
+    ours = record["config_hash"]
     reported = hash_from_wire(reported_hash_b64)
-    if reported != record["config_hash"]:
-        return None
-    detail = error_message or "agent reported FAILED without an error message"
-    REGISTRY.mark_failed(record["revision_id"], detail)
-    logger.error(
-        f"agent {agent_id}: remote config revision {record['revision_id']} FAILED: {detail} "
-        "(revision is now poisoned; it will not be retried — push a new revision or roll back)"
-    )
-    return audit.audit_event(
-        "config.apply.failed",
-        principal="system",
-        actor_kind="system",
-        result="error",
-        target_kind="agent",
-        target_id=agent_id,
-        revision_id=record["revision_id"],
-        config_hash=record["config_hash"],
-        error=detail,
-    )
+
+    if status_name == STATUS_FAILED and reported == ours:
+        detail = error_message or "agent reported FAILED without an error message"
+        return _poison(agent_id, record, "failed", detail)
+
+    delivered = bool(record.get("delivered_hash")) and record.get("delivered_hash") == ours
+    mismatched = bool(reported) and reported != ours
+
+    # The history lookup is inside the suspicious branch on purpose: it is a SQLite
+    # read, and `note_status` runs on every status report (#109).
+    if mismatched and delivered and reported in set(
+        REGISTRY.store.hashes_for_agent(agent_id)
+    ):
+        # The agent is back on a config of ours that is not the current one.
+        delivered_at = _delivered_at(record)
+        waited = (
+            delivered_at is None
+            or (utcnow() - delivered_at).total_seconds() >= revert_grace_seconds()
+        )
+        attempts = int(record.get("attempts") or 0)
+        if status_name == STATUS_FAILED or (waited and attempts >= 2):
+            detail = (
+                error_message
+                or f"agent reverted to an earlier revision (reported {reported[:12]}…, "
+                f"expected {ours[:12]}…)"
+            )
+            return _poison(agent_id, record, "auto_reverted", detail)
+
+    REGISTRY.note_report(agent_id, status_name, error_message)
+    return None
 
 
 def short_status(name: Any) -> Optional[str]:

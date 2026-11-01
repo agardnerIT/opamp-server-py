@@ -13,11 +13,15 @@ from server.state import DB_PATH
 ALERT_EVENT_NEW_AGENT = "new_agent"
 ALERT_EVENT_AGENT_DISCONNECTED = "agent_disconnected"
 ALERT_EVENT_COMPLIANCE_VIOLATION = "compliance_violation"
+# #99: the agent is not running the config we approved. One alert per (agent,
+# revision) drift, not one per poll — the dedupe lives in `server.config_control`.
+ALERT_EVENT_CONFIG_DRIFT = "config_drift"
 
 ALERT_EVENTS = [
     ALERT_EVENT_NEW_AGENT,
     ALERT_EVENT_AGENT_DISCONNECTED,
     ALERT_EVENT_COMPLIANCE_VIOLATION,
+    ALERT_EVENT_CONFIG_DRIFT,
 ]
 
 ALERT_TYPE_WEBHOOK = "webhook"
@@ -38,6 +42,7 @@ ALERT_CONFIG = {
         ALERT_EVENT_NEW_AGENT: DEFAULT_EVENT_CONFIG.copy(),
         ALERT_EVENT_AGENT_DISCONNECTED: DEFAULT_EVENT_CONFIG.copy(),
         ALERT_EVENT_COMPLIANCE_VIOLATION: DEFAULT_EVENT_CONFIG.copy(),
+        ALERT_EVENT_CONFIG_DRIFT: DEFAULT_EVENT_CONFIG.copy(),
     },
 }
 
@@ -259,6 +264,26 @@ def send_stale_agent_alert(agent_id: str) -> tuple[bool, str]:
 def send_compliance_alert(agent_id: str, violations: list) -> tuple[bool, str]:
     violations_text = ", ".join(violations)
     return send_alert(f"**Compliance violation:** {agent_id} - {violations_text}", ALERT_EVENT_COMPLIANCE_VIOLATION)
+
+
+def send_config_drift_alert(
+    agent_id: str, revision_id: str = "", missing: Optional[list] = None
+) -> tuple[bool, str]:
+    """One alert per (agent, revision) that is not running its approved config (#99).
+
+    The message names the revision and the first few missing paths — never a config
+    body, because an alert payload is a log sink with a webhook at the end of it
+    (D8).
+    """
+    detail = ""
+    if missing:
+        detail = " — missing: " + ", ".join(str(item) for item in missing)
+    revision = f" revision {revision_id}" if revision_id else ""
+    return send_alert(
+        f"**Config drift:** {agent_id} is not running{revision or ' its assigned config'}"
+        f"{detail}",
+        ALERT_EVENT_CONFIG_DRIFT,
+    )
 
 
 def send_test_alert(event_type: str = ALERT_EVENT_NEW_AGENT) -> tuple[bool, str]:

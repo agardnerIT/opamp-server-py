@@ -54,7 +54,7 @@ auth_app = typer.Typer(
     help="Admin auth: mode, sessions and identities (#95)", no_args_is_help=True
 )
 config_app = typer.Typer(
-    help="Remote config: posture, validate, push, withdraw (#81, #98)",
+    help="Remote config: propose, approve, revise, roll back (#81, #99, #100)",
     no_args_is_help=True,
 )
 agent_config_app = typer.Typer(
@@ -71,7 +71,7 @@ app.add_typer(reports_app, name="reports", help="Markdown fleet reports")
 app.add_typer(compliance_app, name="compliance", help="OPA policy compliance")
 app.add_typer(alerts_app, name="alerts", help="Alert configuration (admin)")
 app.add_typer(auth_app, name="auth", help="Admin auth: mode, sessions, identities")
-app.add_typer(config_app, name="config", help="Config push posture")
+app.add_typer(config_app, name="config", help="Remote config control plane")
 app.add_typer(audit_app, name="audit", help="Audit log: query, verify, export")
 
 
@@ -256,6 +256,198 @@ def config_validate(
     """
     config_map = {"": {"body": file.read_text(), "content_type": content_type}}
     _run(lambda oc: oc.validate_config(config_map))
+
+
+@config_app.command("propose")
+def config_propose(
+    file: Path = typer.Option(..., "--file", "-f", exists=True, dir_okay=False,
+                              help="Config body to propose"),
+    content_type: str = typer.Option("text/yaml", "--content-type",
+                                     help="MIME type of the body"),
+    agent: Optional[str] = typer.Option(None, "--agent", "-a", help="Target agent id"),
+    agents: Optional[str] = typer.Option(None, "--agents",
+                                         help="Comma-separated target agent ids"),
+    attr: List[str] = typer.Option([], "--attr",
+                                   help="Selector: --attr environment=prod (repeatable)"),
+    include_future: bool = typer.Option(
+        False, "--include-future",
+        help="With a selector: also apply to agents that match it later",
+    ),
+    allow_endpoint_change: bool = typer.Option(
+        False, "--allow-endpoint-change",
+        help="Permit moving the opamp endpoint away from this server (approver confirms again)",
+    ),
+    override_reason: Optional[str] = typer.Option(
+        None, "--override-reason",
+        help="Record why a policy violation is acceptable (audited)",
+    ),
+    note: Optional[str] = typer.Option(None, "--note", help="Reason, recorded in the audit log"),
+) -> None:
+    """Propose a config revision — drafts it, delivers nothing (operator).
+
+    One of `--agent`, `--agents` or `--attr` is required: a missing selector is
+    never "every agent". The #100 pipeline runs here (YAML parse, structural rules,
+    protected invariants, agent inventory, OPA) and the structured verdict comes
+    back. An approver must run `opampctl config approve <proposal_id>` before any
+    agent receives it.
+    """
+    config_map = _read_config_file(file)
+    config_map[""]["content_type"] = content_type
+
+    resolved_agents = [item.strip() for item in (agents or "").split(",") if item.strip()]
+    filters: Dict[str, Any] = {}
+    for item in attr:
+        key, _, value = item.partition("=")
+        filters.setdefault(key, []).append(value)
+
+    chosen = sum(1 for value in (agent, resolved_agents or None, filters or None) if value)
+    if chosen != 1:
+        _fail(
+            "provide exactly one scope: --agent <id>, --agents a,b or --attr key=value",
+            data={"hint": "a missing scope is never \"all agents\""},
+        )
+
+    if agent:
+        scope: Dict[str, Any] = {"agent_id": agent}
+    elif resolved_agents:
+        scope = {"agents": resolved_agents}
+    else:
+        scope = {"filter": filters, "include_future": include_future}
+
+    _run(
+        lambda oc: oc.propose_config(
+            config_map,
+            scope=scope,
+            note=note,
+            allow_endpoint_change=allow_endpoint_change,
+            override_reason=override_reason,
+        )
+    )
+
+
+@config_app.command("revisions")
+def config_revisions(
+    agent: Optional[str] = typer.Option(None, "--agent", "-a", help="Filter by agent id"),
+    status: Optional[str] = typer.Option(
+        None, "--status",
+        help="proposed|active|superseded|rolled_back|poisoned|rejected",
+    ),
+    limit: int = typer.Option(100, "--limit", "-n", help="Maximum rows"),
+) -> None:
+    """Revision history: metadata, status, verdict and delivery facts (viewer).
+
+    **No config bodies** — hashes only (the bodies are secrets). Works offline
+    (`--db`), which is what makes "what did we push and when" answerable from a
+    backup.
+    """
+    if _settings.offline:
+        from server import config_control
+        from server.state import SQLiteDesiredConfigStore
+
+        store = SQLiteDesiredConfigStore(_settings.db)
+        rows = store.list_revisions(agent_id=agent, status=status, limit=limit)
+        _emit(
+            {
+                "revisions": [config_control.revision_view(row) for row in rows],
+                "count": len(rows),
+                "statuses": list(SQLiteDesiredConfigStore.STATUSES),
+                "note": "offline: revision metadata only, never a config body",
+            }
+        )
+        return
+    _run(lambda oc: oc.list_config_revisions(agent=agent, status=status, limit=limit))
+
+
+@config_app.command("show")
+def config_show(proposal_id: str = typer.Argument(..., help="Proposal id (prop-…)")) -> None:
+    """One proposal: every per-agent revision, its status, verdict and delivery record.
+
+    Works offline (`--db`). Bodies are never included; read one agent's desired
+    config with `opampctl agents config get <id>`.
+    """
+    if _settings.offline:
+        from server import config_control
+        from server.state import SQLiteDesiredConfigStore
+
+        store = SQLiteDesiredConfigStore(_settings.db)
+        rows = store.by_proposal(proposal_id)
+        if not rows:
+            _fail(f"Proposal {proposal_id!r} not found in {_settings.db}")
+        statuses = {row.get("status") for row in rows}
+        _emit(
+            {
+                "proposal_id": proposal_id,
+                "status": next(iter(statuses)) if len(statuses) == 1 else "mixed",
+                "statuses": sorted(status for status in statuses if status),
+                "revisions": [config_control.revision_view(row) for row in rows],
+                "agents": len({row["agent_id"] for row in rows}),
+                "config_hash": rows[0].get("config_hash"),
+                "note": "offline: metadata only",
+            }
+        )
+        return
+    _run(lambda oc: oc.get_config_proposal(proposal_id))
+
+
+@config_app.command("approve")
+def config_approve(
+    proposal_id: str = typer.Argument(..., help="Proposal id (prop-…)" ),
+    note: Optional[str] = typer.Option(None, "--note", help="Reason, recorded in the audit log"),
+    override_reason: Optional[str] = typer.Option(
+        None, "--override-reason",
+        help="Approve despite a policy violation (recorded and audited)",
+    ),
+    confirm_endpoint_change: bool = typer.Option(
+        False, "--confirm-endpoint-change",
+        help="Confirm that moving the opamp endpoint is intended",
+    ),
+    confirm_scope_change: bool = typer.Option(
+        False, "--confirm-scope-change",
+        help="Approve even though the selector now matches agents it did not at propose time",
+    ),
+) -> None:
+    """Approve and activate a proposal (approver, live server only).
+
+    Re-resolves the selector and re-runs validation. A config that no longer
+    validates is refused with `re-validate: …` (409); a policy violation needs
+    `--override-reason`. Supersedes each agent's previous revision, which stays
+    available for `opampctl agents config rollback`.
+    """
+    _run(
+        lambda oc: oc.approve_config(
+            proposal_id,
+            note=note,
+            confirm_endpoint_change=confirm_endpoint_change,
+            confirm_scope_change=confirm_scope_change,
+            override_reason=override_reason,
+        )
+    )
+
+
+@config_app.command("reject")
+def config_reject(
+    proposal_id: str = typer.Argument(..., help="Proposal id (prop-…)" ),
+    reason: Optional[str] = typer.Option(None, "--reason", help="Why it was refused"),
+) -> None:
+    """Reject a proposal (approver, live server only). The revision is kept as evidence."""
+    _run(lambda oc: oc.reject_config(proposal_id, reason=reason))
+
+
+@config_app.command("reactivate")
+def config_reactivate(
+    proposal_id: str = typer.Argument(..., help="Proposal id (prop-…)" ),
+    reason: Optional[str] = typer.Option(None, "--reason", help="Why it may be retried now"),
+    override_reason: Optional[str] = typer.Option(
+        None, "--override-reason", help="Override a policy violation (recorded and audited)"
+    ),
+) -> None:
+    """Re-approve a **poisoned** revision and resume delivery (approver, live server only).
+
+    Nothing comes back on a timer: a revision poisoned by `FAILED` or by a detected
+    auto-revert only returns through this explicit decision, and it is validated again
+    first.
+    """
+    _run(lambda oc: oc.reactivate_config(proposal_id, reason=reason, override_reason=override_reason))
 
 
 @config_app.command("apply")
@@ -808,6 +1000,19 @@ def agents_config_set(
     config_map = _read_config_file(file)
     config_map[""]["content_type"] = content_type
     _run(lambda oc: oc.set_agent_config(agent_id, config_map, note=note))
+
+
+@agent_config_app.command("rollback")
+def agents_config_rollback(
+    agent_id: str = typer.Argument(..., help="Agent instance UID (hex)"),
+    note: Optional[str] = typer.Option(None, "--note", help="Reason, recorded in the audit log"),
+) -> None:
+    """Roll an agent back to its previous revision (approver, live server only).
+
+    Rollback is a new revision whose body is the previous one, so history stays
+    append-only and the chain (`parent_revision_id`) records what replaced what.
+    """
+    _run(lambda oc: oc.rollback_agent_config(agent_id, note=note))
 
 
 @agent_config_app.command("withdraw")

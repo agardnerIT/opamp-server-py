@@ -422,9 +422,98 @@ How delivery works:
   with the v0.20.0 proto sync (#66). Protected invariants and the OPA policy gate
   are #100.
 
-Two-phase propose/approve (#99/#103) is not built yet: today a push *is* the
-approval, which is why it needs the `approver` role. The revision store this uses
-is the one those issues will extend — there will not be a second delivery path.
+### Propose → approve → roll back (#99)
+
+A direct push is approval-by-fiat: the caller holds `approver`. The two-phase flow
+separates the duties, which is the point of having roles at all.
+
+```bash
+# 1. Propose: validates, drafts one immutable revision per target agent, delivers
+#    NOTHING. Operator role. One of --agent / --agents / --attr is required.
+opampctl --password "$ADMIN_PASSWORD" config propose --file collector.yaml \
+  --attr environment=prod --note "add otlp receiver"
+# {"proposal_id": "prop-…", "status": "proposed", "agents": 3, "verdict": {...}}
+
+# 2. Review the blast radius and the verdict (metadata only, never a body)
+opampctl --password "$ADMIN_PASSWORD" config show prop-…
+opampctl --password "$ADMIN_PASSWORD" config revisions --status proposed
+
+# 3. Approve: re-resolves the selector, re-runs validation, supersedes and activates
+opampctl --password "$ADMIN_PASSWORD" config approve prop-… --note "reviewed"
+
+# 4. Something went wrong: roll back to the previous revision (a new revision,
+#    so history stays append-only and the chain records what replaced what)
+opampctl --password "$ADMIN_PASSWORD" agents config rollback <agent-id> --note "v2 broke tracing"
+
+# 5. A poisoned revision never returns on a timer — an approver decides
+opampctl --password "$ADMIN_PASSWORD" config reactivate prop-… --reason "component now installed"
+```
+
+Lifecycle: `proposed → active → superseded | rolled_back | poisoned`, plus
+`rejected` from `proposed`. Only `active`, unpoisoned revisions are deliverable.
+
+- **Immutable revisions.** Nothing edits a body. Rollback creates a new revision
+  whose `parent_revision_id` names the old one.
+- **One active revision per agent.** Approving supersedes the previous one, which
+  stays available for rollback for `CONFIG_RETENTION_DAYS`.
+- **The selector resolves at approve time**, and the resolved list is stored. An
+  agent that starts matching between propose and approve is captured — but if that
+  widens the set, the approval is refused until the approver repeats it with
+  `confirm_scope_change: true` (`added` / `dropped` report the diff). An agent that
+  stops matching is skipped. Agents that arrive *after* approval inherit nothing
+  unless the proposer set `include_future` on a selector scope.
+- **Auto-revert detection (T9).** The OpAMP Supervisor restores
+  `last_working_remote_config.dat` when a new config fails and then reports the
+  *old* hash. A naive hash comparison re-pushes the broken config forever. The
+  server records `delivered_hash` per agent and treats "a known older revision
+  reported after we delivered ours" (past a grace window, or on an explicit
+  `FAILED`) as an auto-revert: it poisons the revision and stops sending
+  (`config.apply.failed` with `reason: auto_reverted`).
+- **Delivery is bounded.** `CONFIG_MAX_DELIVERY_ATTEMPTS` frames per assignment;
+  an agent that never acknowledges is surfaced as `unconfirmed` instead of being
+  re-pushed forever.
+- **Drift** is visible per agent (`GET /agent/{id}/config` → `drift` with the
+  missing YAML paths) and fires **one** `config_drift` alert per (agent, revision),
+  never one per poll.
+
+### What validation can and cannot promise (#100)
+
+The server cannot prove a config will not crash a collector — that is why rollout
+staging (#101) and the supervisor's auto-revert exist. It *can* refuse the
+recognisable mistakes, and it does, in this order:
+
+1. **Shape and size** — `CONFIG_MAX_BYTES` (1 MiB), and a **redacted** body is
+   always refused (pushing one would wipe every credential in the fleet).
+2. **Bounded parse** — `yaml.safe_load` only, via a loader that enforces an alias
+   budget, a depth budget (`CONFIG_MAX_DEPTH`), an expanded-node ceiling
+   (`CONFIG_MAX_NODES`, the alias-bomb guard) and **rejects duplicate keys**
+   instead of PyYAML's silent last-wins.
+3. **Structural rules** (for a complete config — one with a `service` section):
+   every pipeline has at least one receiver and one exporter, and every referenced
+   `receivers|processors|exporters|extensions` id exists in the matching section.
+   A body with no `service` is treated as a fragment and only warned about; a body
+   with no collector sections at all (a PEM file, a routing table) is not judged.
+4. **Protected invariants (D7)** — `extensions.opamp` must exist **and** `opamp`
+   must be in `service.extensions`, otherwise the agent loses its control channel
+   and can never be fixed remotely. Moving the `opamp` endpoint away from this
+   server is refused unless the request sets `allow_endpoint_change` **and** the
+   approver confirms it.
+5. **Warnings that do not block** — no `memory_limiter`, no `batch`, telemetry
+   removed, an exporter host outside `CONFIG_ALLOWED_EXPORTER_HOSTS`, and any
+   component the target agent does not ship (its reported
+   `available_components`).
+6. **Policy gate** — the project's OPA policies run against the proposed config.
+   Violations block; an `approver` may override with a recorded reason (audited
+   as `config.override`). When OPA is disabled the verdict says `skipped`, never
+   "passed".
+
+Validation runs at **propose** and again at **approve**: a config approved on
+Monday must not be delivered on Friday without re-checking, because the schema,
+the policies and the agent's inventory may all have changed (`409 re-validate: …`).
+
+The verdict is `{ok, errors: [{path, message, hint, severity}], warnings, policy,
+fingerprint, checked_at}` with YAML paths (`service.pipelines.traces.receivers[0]`)
+so a UI or CLI can point at the problem.
 
 ## Capacity and deployment topology
 
@@ -508,6 +597,7 @@ Configure via UI at `/alerts` endpoint. Webhook sends JSON with `event_type` and
 | `new_agent` | New agent connects |
 | `agent_disconnected` | Agent becomes stale |
 | `compliance_violation` | OPA policy fails |
+| `config_drift` | An agent is not running its approved config. Fires **once** per (agent, revision), not once per poll (#99) |
 
 ## OPA (Optional)
 
@@ -660,8 +750,15 @@ secret only) or `disabled` (read-only mode).
 | GET | `/agent/{id}/config` | viewer | Desired (pushed) + effective (reported) config, **redacted** with `redacted_paths`. `?reveal=true` needs `approver`, is audited (`config.reveal`) and sets `Cache-Control: no-store`. Includes revision `history` (metadata only) |
 | PUT | `/agent/{id}/config` | approver | Push a desired config: `{"config_map": {"": {"body": "<yaml>", "content_type": "text/yaml"}}, "note": "…"}`. 404 when push is disabled, 422 with every validation error, including a redacted body. Creates an immutable revision |
 | DELETE | `/agent/{id}/config` | approver | Withdraw by pushing an **empty** config map (agent falls back to its local config). Delivered once |
+| POST | `/agent/{id}/config/rollback` | approver | Return to the previous revision as a **new** revision with `parent_revision_id` set. 409 when there is nothing to roll back to |
 | POST | `/config/apply` | admin | Push one config to many agents: `{"config_map", "agents": [...] \| "filter": {...}, "confirm": true}`. No selector is a 400 — never "all agents" |
-| POST | `/config/validate` | viewer | Validate a config map without storing it. Always 200: `{"valid", "errors", "warnings", "config_hash", "size_bytes", "objects"}` |
+| POST | `/config/revisions` | operator | **Propose** a revision — validates and drafts it, delivers nothing: `{"config_map", "scope": {"agent_id" \| "agents" \| "filter", "include_future"}, "note"}`. Returns `proposal_id`, per-agent revisions and the full verdict. 422 with every structured error |
+| GET | `/config/revisions` | viewer | Revision metadata (no bodies): `?agent=`, `?status=proposed\|active\|superseded\|rolled_back\|poisoned\|rejected`, `?limit=` |
+| GET | `/config/revisions/{proposal_id}` | viewer | One proposal: each revision's status, stored verdict and delivery record (`attempts`, `last_status`, `poisoned`) |
+| POST | `/config/revisions/{id}/approve` | approver | Re-resolve the selector, **re-run validation**, supersede and activate. 409 `re-validate: …` when the config no longer passes, and 409 when the selector now matches *more* agents (repeat with `confirm_scope_change: true`); `override_reason` overrides a policy violation (audited as `config.override`) |
+| POST | `/config/revisions/{id}/reject` | approver | Refuse a proposal; the revision is kept as evidence |
+| POST | `/config/revisions/{id}/reactivate` | approver | Resume a **poisoned** revision after a fresh validation pass. Nothing retries on a timer |
+| POST | `/config/validate` | viewer | Validate a config map without storing it: `{"config_map", "agent_id"?, "allow_endpoint_change"?}`. Always 200: `{valid, errors, details, warnings, policy, fingerprint, config_hash, size_bytes, objects}` |
 | GET | `/reports/fleet` | | Full fleet summary report (markdown, same as the UI Reports page) |
 | GET | `/reports/heavy-collectors` | | Collectors with many unused components. Param: `threshold` (0–1, default 0.5) |
 | GET | `/reports/outdated-collectors` | | Collectors with components older than `version` (default `0.149.0`) |
@@ -723,9 +820,19 @@ opampctl agents config get <agent-id>        # desired + effective, REDACTED
 opampctl agents config get <agent-id> --reveal   # real values: approver role, audited
 opampctl agents config set <agent-id> --file collector.yaml --note "add otlp receiver"
 opampctl agents config withdraw <agent-id>   # empty config map: run the local config
-opampctl config validate --file collector.yaml   # side-effect-free check + hash
+opampctl config validate --file collector.yaml   # side-effect-free check + hash + verdict
 opampctl config apply --file collector.yaml --attr environment=prod --confirm  # admin
 opampctl config rotate-key --db data/opamp.db    # re-encrypt under the current key
+
+# Config control plane (#99/#100): propose -> approve -> roll back
+opampctl config propose --file collector.yaml --attr environment=prod --note "why"
+opampctl config revisions --status proposed      # metadata only, never a body
+opampctl config show prop-…                      # one proposal, per-agent verdicts
+opampctl config approve prop-… --note "reviewed" # approver: re-resolves + re-validates
+opampctl config reject prop-… --reason "wrong tenant"
+opampctl config reactivate prop-… --reason "component now installed"
+opampctl agents config rollback <agent-id> --note "v2 broke tracing"
+opampctl --db data/opamp.db config revisions     # offline: read the store directly
 
 # Reports
 opampctl reports fleet --raw
@@ -802,12 +909,13 @@ opampctl --show-completion      # show the install command/instructions
 ## MCP Server (for AI agents)
 
 An [MCP](https://modelcontextprotocol.io) server (`opamp-mcp` / `python -m mcp_server`)
-exposes 24 typed tools mirroring the API: `list_agents`, `get_agent`,
+exposes 26 typed tools mirroring the API: `list_agents`, `get_agent`,
 `get_agent_metrics`, `generate_manifest`, `fleet_report`, `heavy_collectors_report`,
 `outdated_collectors_report`, `get_compliance`, `check_compliance`,
 `compliance_summary`, `list_policies`, `validate_policies`, `reload_policies`,
 `get_alerts`, `update_alerts`, `test_alerts`, `agent_report`, `health`, `auth_status`,
-`whoami`, `config_posture`, `audit_log`, `audit_verify`, `audit_export`.
+`whoami`, `config_posture`, `agent_config`, `validate_config`,
+`list_config_revisions`, `audit_log`, `audit_verify`, `audit_export`.
 
 **Identity is never delegated to MCP.** Logins, principals and sessions have no MCP
 tools at all — minting an identity is a human/IaC action, not a tool call an AI can
@@ -818,11 +926,17 @@ before suggesting a privileged step.
 `audit_export` are read-only tools and are never gated: an AI agent asked "who
 pushed this" must be able to answer from evidence, not from its own summary.
 
-**Write tools are absent, not failing.** `create_agent_token` and
-`revoke_agent_token` only exist when the MCP process is started with
+**Write tools are absent, not failing.** `create_agent_token`, `revoke_agent_token`
+and `propose_config` only exist when the MCP process is started with
 `OPAMP_MCP_ALLOW_WRITES=true` (#94 introduced this gate for credential minting;
 #106 applies it to every write tool). An agent that cannot see a tool will not
 try to use it.
+
+**An AI may propose, never approve.** `propose_config` creates a *draft* revision —
+nothing is delivered until a human with the `approver` role approves it in the CLI,
+UI or API. There is no MCP tool for approve, reject, reactivate, rollback, apply or
+withdraw at any setting: a client that can approve its own proposal has no
+separation of duties (D3/D9).
 
 Transport is **stdio** by default (works with every local MCP client); use
 `--transport sse --port 8765` for remote agents. Configure with the same env vars
@@ -879,6 +993,14 @@ oc.set_agent_config(agent_id, {"": {"body": yaml_text, "content_type": "text/yam
 print(oc.get_agent_config(agent_id)["desired"]["revision_id"])
 oc.delete_agent_config(agent_id)          # withdraw
 oc.apply_agent_config(config_map, agents=[agent_id], confirm=True)
+
+# Config control plane (#99/#100): propose -> approve -> roll back
+proposal = oc.propose_config(config_map, scope={"agent_id": agent_id}, note="why")
+print(proposal["verdict"])                # {ok, errors, warnings, policy, fingerprint}
+oc.approve_config(proposal["proposal_id"], note="reviewed")   # approver role
+print(oc.get_agent_config(agent_id)["drift"])                 # is it running it?
+oc.rollback_agent_config(agent_id, note="v2 broke tracing")
+print(oc.list_config_revisions(status="poisoned"))            # metadata only
 
 # Agent credentials (admin) — the token is returned once
 token = oc.create_agent_token("4f3c2b1a...", label="prod-1")["token"]

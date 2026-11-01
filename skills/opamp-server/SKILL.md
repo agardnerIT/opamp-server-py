@@ -105,6 +105,13 @@ opampctl agents compliance <agent-id>
 | Push a config (approver) | `agents config set <id> --file f.yaml` | — (never exposed) | `PUT /agent/{id}/config` |
 | Withdraw a config (approver) | `agents config withdraw <id>` | — | `DELETE /agent/{id}/config` |
 | Validate a config (safe) | `config validate --file f.yaml` | `validate_config` | `POST /config/validate` |
+| Propose a revision (draft) | `config propose --file f.yaml --attr env=prod` | `propose_config` (write-gated) | `POST /config/revisions` |
+| Revision history (metadata) | `config revisions [--agent] [--status]` | `list_config_revisions` | `GET /config/revisions` |
+| One proposal | `config show prop-…` | — | `GET /config/revisions/{id}` |
+| Approve (approver) | `config approve prop-…` | — (never exposed) | `POST /config/revisions/{id}/approve` |
+| Reject (approver) | `config reject prop-… --reason …` | — | `POST /config/revisions/{id}/reject` |
+| Reactivate poisoned (approver) | `config reactivate prop-… --reason …` | — | `POST /config/revisions/{id}/reactivate` |
+| Roll back one agent (approver) | `agents config rollback <id>` | — | `POST /agent/{id}/config/rollback` |
 | Fleet push (admin, confirmed) | `config apply --file f.yaml --attr env=prod --confirm` | — | `POST /config/apply` |
 | Re-encrypt stored bodies | `config rotate-key --db data/opamp.db` | — | — |
 | Offline (no server) | `--db data/opamp.db …` | — | — |
@@ -227,13 +234,64 @@ Rules that matter when acting on this:
 - **`--reveal` is a privileged, audited action** (`approver` role, `config.reveal`
   row, `Cache-Control: no-store`). Do not reveal to debug something you could check
   with `redacted_paths`.
-- **MCP can validate and read, never apply.** `validate_config` + `agent_config`
-  exist; there is no push/approve/rollback tool and there never will be (epic #93,
-  D9). Propose the config and its hash to a human instead.
+- **MCP can validate and read, never approve.** `validate_config`, `agent_config`
+  and `list_config_revisions` are always available; `propose_config` only exists
+  with `OPAMP_MCP_ALLOW_WRITES=true`. There is no approve/reject/reactivate/
+  rollback/apply tool and there never will be (epic #93, D3/D9). Propose the config
+  and its hash to a human instead.
 - **Fleet-wide needs `--confirm` and an explicit selector.** A missing selector is a
   400 — it never means "all agents".
 - **`config get` offline (`--db`)** shows metadata only and always redacts; there is
   no credential and no audit trail offline, so there is no reveal.
+
+### Two-phase flow: propose → approve → roll back (#99/#100)
+
+Use this when the change matters. A direct `agents config set` is approval-by-fiat
+(it needs the `approver` role); propose/approve separates the duties.
+
+```bash
+opampctl --password "$ADMIN_PASSWORD" config propose --file collector.yaml \
+  --attr environment=prod --note "why"
+# {"proposal_id": "prop-…", "status": "proposed", "agents": 3, "verdict": {…}}
+opampctl --password "$ADMIN_PASSWORD" config approve prop-… --note "reviewed"
+opampctl agents config get <id>                 # drift + assignment + verdict
+opampctl --password "$ADMIN_PASSWORD" agents config rollback <id> --note "why"
+```
+
+- **Proposing delivers nothing.** It validates and drafts one immutable revision per
+  target. Approving re-resolves the selector and **re-runs validation** — a config
+  that no longer passes is `409 re-validate: …`. If the selector now matches *more*
+  agents than it did at propose time, the approval is refused until you repeat it
+  with `confirm_scope_change` (`added` / `dropped` in the response show the diff).
+- **Statuses:** `proposed → active → superseded | rolled_back | poisoned`, plus
+  `rejected`. Only `active`, unpoisoned revisions are deliverable. Read the status
+  from `desired.status`, never assume "pushed" meant "live".
+- **`include_future` is opt-in and only on a selector scope.** Without it a
+  later-joining agent inherits nothing. Never set it when the intent is "these three
+  hosts".
+- **A policy violation needs `--override-reason`**, which is recorded and audited as
+  `config.override`. Do not supply a reason you cannot defend in a postmortem.
+- **`poisoned` is permanent until an approver runs `config reactivate`.** That is
+  deliberate: retry loops against a live fleet are worse than a stale config.
+- **Drift** in `agents config get` is `true | false | null` plus `missing` YAML
+  paths. `null` means "cannot tell yet" (no effective config reported, or the
+  revision is not active) — do not read it as healthy.
+
+### What validation checks (#100)
+
+`config validate` is side-effect-free and always exits 0. It refuses: malformed
+YAML, duplicate keys, an alias bomb, a pipeline referencing a component that is not
+defined, an empty `service.pipelines`, a config that drops `extensions.opamp` or
+removes `opamp` from `service.extensions` (that orphans the agent with no remote
+way back), a body over `CONFIG_MAX_BYTES`, and a redacted body. It warns (never
+blocks) about: a missing `memory_limiter` or `batch`, missing
+`service.telemetry`, an exporter host outside `CONFIG_ALLOWED_EXPORTER_HOSTS`, and a
+component the target agent does not ship. Moving the `opamp` endpoint needs
+`allow_endpoint_change` **and** an approver confirmation.
+
+A body with no `service` section is a *fragment*: structural checks are skipped with
+a warning. A body with no collector sections at all is not judged (it may be a
+certificate or a routing table).
 
 ## Gotchas
 

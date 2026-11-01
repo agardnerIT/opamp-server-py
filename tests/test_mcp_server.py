@@ -327,8 +327,11 @@ class TestCredentialTools:
             assert created["token"].startswith("opamp_agent_")
             assert call(mcp_srv.revoke_agent_token, "abcd" * 8)["revoked"] == 1
         finally:
-            mcp._tool_manager.remove_tool("create_agent_token")
-            mcp._tool_manager.remove_tool("revoke_agent_token")
+            for name in ("create_agent_token", "revoke_agent_token", "propose_config"):
+                try:
+                    mcp._tool_manager.remove_tool(name)
+                except Exception:
+                    pass
 
     def test_disabled_flag_keeps_tools_absent(self, monkeypatch):
         monkeypatch.setenv("OPAMP_MCP_ALLOW_WRITES", "false")
@@ -417,7 +420,44 @@ class TestRemoteConfigTools:
             "delete_agent_config",
             "withdraw_config",
             "approve_config",
+            "reject_config",
+            "reactivate_config",
             "rollback_config",
+            "rollback_agent_config",
         }
         assert not (names & forbidden)
-        assert {"agent_config", "validate_config"} <= names
+        assert {"agent_config", "validate_config", "list_config_revisions"} <= names
+
+    def test_propose_config_is_a_write_gated_tool(self, wired, push_env, monkeypatch):
+        """#99/D9: an MCP client may propose (a draft), but only with writes enabled."""
+        monkeypatch.delenv("OPAMP_MCP_ALLOW_WRITES", raising=False)
+        mcp_srv._register_write_tools()
+        assert not mcp_srv.writes_enabled()
+        assert "propose_config" not in {
+            tool.name for tool in mcp._tool_manager.list_tools()
+        }
+
+        monkeypatch.setenv("OPAMP_MCP_ALLOW_WRITES", "true")
+        try:
+            mcp_srv._register_write_tools()
+            assert "propose_config" in {tool.name for tool in mcp._tool_manager.list_tools()}
+            agent_id = "cd" * 16
+            register_agent(agent_id)
+            proposed = call(
+                mcp_srv.propose_config,
+                CONFIG_MAP,
+                {"agent_id": agent_id},
+            )
+            assert proposed["status"] == "proposed"
+        finally:
+            for name in ("propose_config", "create_agent_token", "revoke_agent_token"):
+                try:
+                    mcp._tool_manager.remove_tool(name)
+                except Exception:
+                    pass
+
+    def test_validate_can_target_one_agent(self, wired, push_env):
+        agent_id = "ef" * 16
+        register_agent(agent_id)
+        verdict = call(mcp_srv.validate_config, CONFIG_MAP, agent_id)
+        assert verdict["valid"] is True

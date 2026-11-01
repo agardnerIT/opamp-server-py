@@ -433,6 +433,7 @@ class OpampClient:
         agent_id: str,
         config_map: Dict[str, Any],
         note: Optional[str] = None,
+        allow_endpoint_change: bool = False,
     ) -> Dict[str, Any]:
         """``PUT /agent/{id}/config`` — push a desired config (approver).
 
@@ -441,12 +442,20 @@ class OpampClient:
         and ``config_hash``. Delivery happens on the agent's next status report and
         only when its reported hash differs — never automatically retried.
 
+        This is approval-by-fiat: the caller holds the approver role. For the
+        two-phase flow use :meth:`propose_config` + :meth:`approve_config`.
+        ``allow_endpoint_change=True`` is required if the body moves the `opamp`
+        extension's endpoint away from this server (see #100).
+
         404 means config push is disabled (not forbidden): the surface does not
-        exist until the posture is secure. 422 lists every validation error.
+        exist until the posture is secure. 422 lists every validation error with a
+        YAML path.
         """
         body: Dict[str, Any] = {"config_map": config_map}
         if note:
             body["note"] = note
+        if allow_endpoint_change:
+            body["allow_endpoint_change"] = True
         return self._put(f"/agent/{agent_id}/config", json=body)
 
     def delete_agent_config(self, agent_id: str) -> Dict[str, Any]:
@@ -481,15 +490,167 @@ class OpampClient:
             body["note"] = note
         return self._post("/config/apply", json=body)
 
-    def validate_config(self, config_map: Dict[str, Any]) -> Dict[str, Any]:
+    def validate_config(
+        self,
+        config_map: Dict[str, Any],
+        agent_id: Optional[str] = None,
+        allow_endpoint_change: bool = False,
+    ) -> Dict[str, Any]:
         """``POST /config/validate`` — check a config map without storing it.
 
-        Returns ``{"valid", "errors", "warnings", "config_hash", "size_bytes",
-        "objects"}``. Always 200: an invalid config is an answer, not an error. This
-        is the call an AI agent should make before proposing anything (MCP may
-        validate and propose, never apply).
+        Returns ``{"valid", "errors", "details", "warnings", "policy",
+        "fingerprint", "config_hash", "size_bytes", "objects"}``. ``errors`` are
+        strings; ``details`` carry a YAML path, message and hint so a UI/CLI can
+        point at the problem. Always 200: an invalid config is an answer, not an
+        error. This is the call an AI agent should make before proposing anything
+        (MCP may validate and propose, never approve or apply).
+
+        ``agent_id`` adds that agent's component inventory to the checks, which is
+        what catches "this config needs a component the agent does not ship".
         """
-        return self._post("/config/validate", json={"config_map": config_map})
+        body: Dict[str, Any] = {"config_map": config_map}
+        if agent_id:
+            body["agent_id"] = agent_id
+        if allow_endpoint_change:
+            body["allow_endpoint_change"] = True
+        return self._post("/config/validate", json=body)
+
+    # ------------------------------------------------- config control plane (#99)
+
+    def propose_config(
+        self,
+        config_map: Dict[str, Any],
+        scope: Dict[str, Any],
+        note: Optional[str] = None,
+        allow_endpoint_change: bool = False,
+        override_reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """``POST /config/revisions`` — draft a revision (operator). **Delivers nothing.**
+
+        ``scope`` is exactly one of ``{"agent_id": id}``, ``{"agents": [ids]}`` or
+        ``{"filter": {...}}`` (the ``GET /agents`` filter keys), plus an optional
+        ``include_future: true`` on a filter scope. A missing scope is a 400: it is
+        never "the whole fleet".
+
+        Returns the ``proposal_id``, the per-agent revisions and the structured
+        validation verdict. An approver must call :meth:`approve_config` before any
+        agent sees it.
+        """
+        body: Dict[str, Any] = {"config_map": config_map, "scope": scope}
+        if note:
+            body["note"] = note
+        if allow_endpoint_change:
+            body["allow_endpoint_change"] = True
+        if override_reason:
+            body["override_reason"] = override_reason
+        return self._post("/config/revisions", json=body)
+
+    def list_config_revisions(
+        self,
+        agent: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 100,
+    ) -> Dict[str, Any]:
+        """``GET /config/revisions`` — revision metadata, newest first (viewer).
+
+        **No config bodies** — hashes, authors, timestamps, lifecycle status, the
+        stored verdict and delivery facts only. ``status`` filters on the lifecycle
+        (``proposed``, ``active``, ``superseded``, ``rolled_back``, ``poisoned``,
+        ``rejected``).
+        """
+        params: Dict[str, Any] = {"limit": limit}
+        if agent:
+            params["agent"] = agent
+        if status:
+            params["status"] = status
+        return self._get("/config/revisions", params=params)
+
+    def get_config_proposal(self, proposal_id: str) -> Dict[str, Any]:
+        """``GET /config/revisions/{proposal_id}`` — one proposal with its revisions.
+
+        Per-agent lifecycle status, the stored verdict and the delivery record
+        (``delivered_hash``, ``attempts``, ``last_status``, ``poisoned``). Bodies are
+        excluded; read one agent's desired config through :meth:`get_agent_config`.
+        """
+        return self._get(f"/config/revisions/{proposal_id}")
+
+    def approve_config(
+        self,
+        proposal_id: str,
+        note: Optional[str] = None,
+        confirm_endpoint_change: bool = False,
+        confirm_scope_change: bool = False,
+        override_reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """``POST /config/revisions/{id}/approve`` — activate a proposal (approver).
+
+        Re-resolves the selector and re-runs the validation pipeline; a blocking
+        change is a 409 (``re-validate: ...``), and a policy violation needs
+        ``override_reason``, which is recorded and audited as ``config.override``.
+        Supersedes each agent's previous revision (kept for rollback).
+
+        If the selector now matches agents it did not at propose time, the call is
+        refused until ``confirm_scope_change=True``: an approval that quietly widens
+        its own blast radius is what the two-phase flow exists to prevent.
+        """
+        body: Dict[str, Any] = {}
+        if note:
+            body["note"] = note
+        if confirm_endpoint_change:
+            body["confirm_endpoint_change"] = True
+        if confirm_scope_change:
+            body["confirm_scope_change"] = True
+        if override_reason:
+            body["override_reason"] = override_reason
+        return self._post(f"/config/revisions/{proposal_id}/approve", json=body)
+
+    def reject_config(self, proposal_id: str, reason: Optional[str] = None) -> Dict[str, Any]:
+        """``POST /config/revisions/{id}/reject`` — refuse a proposal (approver).
+
+        The revision is kept, marked ``rejected``: a proposed-and-refused config is
+        evidence. Only ``proposed`` revisions can be rejected; an active one is
+        withdrawn or rolled back instead (409).
+        """
+        body: Dict[str, Any] = {}
+        if reason:
+            body["reason"] = reason
+        return self._post(f"/config/revisions/{proposal_id}/reject", json=body)
+
+    def reactivate_config(
+        self,
+        proposal_id: str,
+        reason: Optional[str] = None,
+        confirm_endpoint_change: bool = False,
+        override_reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """``POST /config/revisions/{id}/reactivate`` — resume a poisoned revision.
+
+        A `FAILED` report or a detected auto-revert poisons a revision permanently;
+        nothing retries on a timer. This is an approver's explicit decision, and it
+        re-runs validation first (409 when the config still does not pass).
+        """
+        body: Dict[str, Any] = {}
+        if reason:
+            body["reason"] = reason
+        if confirm_endpoint_change:
+            body["confirm_endpoint_change"] = True
+        if override_reason:
+            body["override_reason"] = override_reason
+        return self._post(f"/config/revisions/{proposal_id}/reactivate", json=body)
+
+    def rollback_agent_config(
+        self, agent_id: str, note: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """``POST /agent/{id}/config/rollback`` — return to the previous revision (approver).
+
+        Rollback is a **new** revision whose body is the previous one and whose
+        ``parent_revision_id`` names it (revisions are immutable, so a pointer move
+        would make the audit trail lie). 409 when there is nothing to roll back to.
+        """
+        body: Dict[str, Any] = {}
+        if note:
+            body["note"] = note
+        return self._post(f"/agent/{agent_id}/config/rollback", json=body)
 
     # ------------------------------------------------------------- credentials
 

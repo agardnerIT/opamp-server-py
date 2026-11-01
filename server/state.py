@@ -650,7 +650,7 @@ class SQLiteSessionStore:
 
 
 class SQLiteDesiredConfigStore:
-    """Desired (remote) collector config per agent (#81).
+    """Desired (remote) collector config per agent (#81) with its lifecycle (#99).
 
     Two tables, on purpose:
 
@@ -659,17 +659,72 @@ class SQLiteDesiredConfigStore:
         log points at, what a rollout refers to, and what retention prunes. The
         body is sealed with `server.crypto` under AAD ``revision:<id>`` (#98), so
         copying a blob into another row fails to decrypt rather than handing an
-        agent someone else's config.
+        agent someone else's config. ``status`` is the lifecycle:
+        ``proposed → active → superseded | rolled_back | poisoned``, or
+        ``rejected`` from ``proposed``.
 
     ``desired_configs``
-        One row per agent: *which* revision is current, plus the one before it so
-        a rollback is a pointer move and not a re-upload. Rollback still creates a
-        new revision — the pointer is bookkeeping, not a second code path.
+        One row per agent and **this is #99's `config_assignments`**: *which*
+        revision the agent should run plus the delivery facts (`delivered_hash`,
+        `delivered_at`, `last_status`, `attempts`, `poisoned`). Keeping the pointer
+        and the delivery facts in one row is what makes "what should it run?" and
+        "did it get it?" impossible to disagree. ``previous_revision_id`` is kept
+        so a rollback is a pointer move, not a re-upload — rollback still creates a
+        new revision, because revisions are immutable.
 
-    Revisions are never updated in place except by retention (which nulls the
-    body and keeps hash + metadata) and by ``mark_failed`` (a status fact, not
-    content). That is what makes "what did we push, when, to whom" answerable.
+    Revisions are never updated in place except by retention (which nulls the body
+    and keeps hash + metadata) and by lifecycle transitions (a status fact, not
+    content). That is what makes "what did we push, when, to whom, and what did it
+    do" answerable.
     """
+
+    # Lifecycle statuses. Only `active` is deliverable, and only while it is not
+    # poisoned (epic #93, D6: never auto-retry a failure).
+    STATUS_PROPOSED = "proposed"
+    STATUS_ACTIVE = "active"
+    STATUS_SUPERSEDED = "superseded"
+    STATUS_ROLLED_BACK = "rolled_back"
+    STATUS_REJECTED = "rejected"
+    STATUS_POISONED = "poisoned"
+    STATUSES = (
+        STATUS_PROPOSED,
+        STATUS_ACTIVE,
+        STATUS_SUPERSEDED,
+        STATUS_ROLLED_BACK,
+        STATUS_REJECTED,
+        STATUS_POISONED,
+    )
+    DELIVERABLE_STATUSES = (STATUS_ACTIVE,)
+
+    # Columns added after the first release. `ALTER TABLE ... ADD COLUMN` is the
+    # migration: SQLite cannot add a NOT NULL column without a default, so every
+    # one of these carries one (or is nullable).
+    _REVISION_COLUMNS = {
+        "status": "TEXT NOT NULL DEFAULT 'active'",
+        "proposal_id": "TEXT",
+        "scope_kind": "TEXT",
+        "scope_json": "TEXT",
+        "note": "TEXT",
+        "approved_by": "TEXT",
+        "approved_at": "TEXT",
+        "parent_revision_id": "TEXT",
+        "verdict_json": "TEXT",
+        "superseded_at": "TEXT",
+    }
+    _ASSIGNMENT_COLUMNS = {
+        "delivered_hash": "TEXT",
+        "delivered_at": "TEXT",
+        "last_status": "TEXT",
+        "last_error": "TEXT",
+        "attempts": "INTEGER NOT NULL DEFAULT 0",
+        "poisoned": "INTEGER NOT NULL DEFAULT 0",
+        "unconfirmed": "INTEGER NOT NULL DEFAULT 0",
+    }
+    # Delivery facts joined onto the current revision. One query per agent gives the
+    # message path everything it needs without a second lookup (#109).
+    _ASSIGNMENT_SELECT = ", ".join(
+        f"d.{column} AS {column}" for column in _ASSIGNMENT_COLUMNS
+    )
 
     def __init__(self, db_path: Path = DB_PATH):
         self.db_path = db_path
@@ -701,7 +756,30 @@ class SQLiteDesiredConfigStore:
                     updated_at TEXT NOT NULL
                 )
             """)
+            self._migrate(conn)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS config_revisions_proposal_idx "
+                "ON config_revisions(proposal_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS config_revisions_status_idx "
+                "ON config_revisions(status, created_at)"
+            )
             conn.execute("PRAGMA journal_mode=WAL")
+
+    @classmethod
+    def _migrate(cls, conn: sqlite3.Connection) -> None:
+        """Add the #99 columns to a database created by an earlier release."""
+        for table, columns in (
+            ("config_revisions", cls._REVISION_COLUMNS),
+            ("desired_configs", cls._ASSIGNMENT_COLUMNS),
+        ):
+            existing = {
+                row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            for name, declaration in columns.items():
+                if name not in existing:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path, timeout=5.0)
@@ -712,9 +790,14 @@ class SQLiteDesiredConfigStore:
     @staticmethod
     def _row(row) -> Dict[str, Any]:
         record = {key: row[key] for key in row.keys()}
-        if "withdrawn" in record:
-            record["withdrawn"] = bool(record["withdrawn"])
+        for flag in ("withdrawn", "poisoned", "unconfirmed"):
+            if flag in record:
+                record[flag] = bool(record[flag])
+        if "attempts" in record:
+            record["attempts"] = int(record["attempts"] or 0)
         return record
+
+    # ------------------------------------------------------------------ writes
 
     def put(
         self,
@@ -724,44 +807,245 @@ class SQLiteDesiredConfigStore:
         config_hash: str,
         author: str,
         withdrawn: bool = False,
+        *,
+        status: str = STATUS_ACTIVE,
+        proposal_id: Optional[str] = None,
+        scope_kind: Optional[str] = None,
+        scope_json: Optional[str] = None,
+        note: Optional[str] = None,
+        parent_revision_id: Optional[str] = None,
+        verdict_json: Optional[str] = None,
+        make_current: bool = True,
     ) -> Dict[str, Any]:
-        """Append a revision and make it the desired state for `agent_id`.
+        """Append a revision, optionally making it the desired state for `agent_id`.
 
-        `config_map` is stored sealed; `config_hash` is stored in the clear because
-        it is not a secret (it is the value the agent echoes back and the value the
-        audit log records).
+        `make_current=False` is the propose step (#99): the revision exists, is
+        auditable and validated, but no agent is pointed at it until an approver
+        assigns it. `config_map` is stored sealed; `config_hash` is stored in the
+        clear because it is not a secret (it is the value the agent echoes back and
+        the value the audit log records).
         """
+        if status not in self.STATUSES:
+            raise ValueError(f"unknown revision status {status!r}")
         blob = crypto.seal_if_configured(
             json.dumps({"config_map": config_map}, sort_keys=True),
             f"revision:{revision_id}",
         )
         now = utcnow().isoformat()
         with self._connect() as conn:
-            previous = conn.execute(
-                "SELECT revision_id FROM desired_configs WHERE agent_id=?", (agent_id,)
+            conn.execute(
+                "INSERT INTO config_revisions (revision_id, agent_id, config_blob, "
+                "config_hash, author, created_at, withdrawn, status, proposal_id, "
+                "scope_kind, scope_json, note, parent_revision_id, verdict_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    revision_id,
+                    agent_id,
+                    blob,
+                    config_hash,
+                    author,
+                    now,
+                    int(withdrawn),
+                    status,
+                    proposal_id,
+                    scope_kind,
+                    scope_json,
+                    note,
+                    parent_revision_id,
+                    verdict_json,
+                ),
+            )
+            if make_current:
+                self._assign_on(conn, agent_id, revision_id, now)
+        # `current()` for a made-current revision (it carries the delivery facts);
+        # the new row itself when the caller is only proposing.
+        if make_current:
+            return self.current(agent_id) or self.revision(revision_id) or {}
+        return self.revision(revision_id) or {}
+
+    def _assign_on(
+        self,
+        conn: sqlite3.Connection,
+        agent_id: str,
+        revision_id: str,
+        now: Optional[str] = None,
+    ) -> None:
+        """Point `agent_id` at `revision_id`, resetting the delivery facts.
+
+        `previous_revision_id` is the rollback target, so it only moves when the
+        assignment actually changes. The delivery counters reset because they
+        describe *this* assignment, not the agent.
+        """
+        now = now or utcnow().isoformat()
+        previous = conn.execute(
+            "SELECT revision_id FROM desired_configs WHERE agent_id=?", (agent_id,)
+        ).fetchone()
+        previous_id = previous["revision_id"] if previous else None
+        if previous_id and previous_id != revision_id:
+            # #99 rule 3, enforced here so *every* path keeps it (direct push,
+            # withdrawal, fleet apply, approve): one active revision per agent. A
+            # poisoned or rolled-back revision keeps its status — only `active` is
+            # replaced, so the reason the old one is gone is never overwritten.
+            conn.execute(
+                "UPDATE config_revisions SET status='superseded', superseded_at=? "
+                "WHERE revision_id=? AND status='active'",
+                (now, previous_id),
+            )
+        conn.execute(
+            "INSERT INTO desired_configs "
+            "(agent_id, revision_id, previous_revision_id, updated_at) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(agent_id) DO UPDATE SET "
+            "revision_id=excluded.revision_id, "
+            "previous_revision_id=CASE "
+            "  WHEN desired_configs.revision_id = excluded.revision_id "
+            "  THEN desired_configs.previous_revision_id "
+            "  ELSE desired_configs.revision_id END, "
+            "delivered_hash=NULL, delivered_at=NULL, last_status=NULL, last_error=NULL, "
+            "attempts=0, unconfirmed=0, updated_at=excluded.updated_at",
+            (agent_id, revision_id, previous_id, now),
+        )
+
+    def assign(self, agent_id: str, revision_id: str) -> None:
+        """Approve-time assignment: make `revision_id` the agent's desired config."""
+        with self._connect() as conn:
+            self._assign_on(conn, agent_id, revision_id)
+
+    def set_status(
+        self,
+        revision_id: str,
+        status: str,
+        **fields: Any,
+    ) -> None:
+        """One lifecycle transition on a revision (content is never touched).
+
+        `fields` must be real columns; the allowed set is fixed so a caller cannot
+        write `config_blob` here — immutability (D4) is enforced by the shape of
+        this method, not by discipline.
+        """
+        if status not in self.STATUSES:
+            raise ValueError(f"unknown revision status {status!r}")
+        allowed = {
+            "approved_by",
+            "approved_at",
+            "superseded_at",
+            "failed_at",
+            "failure_detail",
+            "verdict_json",
+            "note",
+            "scope_json",
+        }
+        assignments = ["status=?"]
+        values: List[Any] = [status]
+        for name, value in fields.items():
+            if name not in allowed:
+                raise ValueError(f"cannot set {name!r} on a revision")
+            assignments.append(f"{name}=?")
+            values.append(value)
+        values.append(revision_id)
+        with self._connect() as conn:
+            conn.execute(
+                f"UPDATE config_revisions SET {', '.join(assignments)} WHERE revision_id=?",
+                tuple(values),
+            )
+
+    def poison_revision(self, revision_id: str, detail: str = "") -> None:
+        """Mark a revision permanently undeliverable (D6).
+
+        Poisoning is a fact about that revision id, not a mood: retrying means a new
+        revision, which is the human decision the epic requires.
+        """
+        now = utcnow().isoformat()
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE config_revisions SET status=?, failed_at=COALESCE(failed_at, ?), "
+                "failure_detail=COALESCE(failure_detail, ?) WHERE revision_id=?",
+                (self.STATUS_POISONED, now, detail[:2000], revision_id),
+            )
+            conn.execute(
+                "UPDATE desired_configs SET poisoned=1, last_error=?, updated_at=? "
+                "WHERE revision_id=?",
+                (detail[:2000], now, revision_id),
+            )
+
+    def clear_poison(self, revision_id: str) -> None:
+        """Reactivation after explicit approver re-approval (#99 rule 5)."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE config_revisions SET status=?, failed_at=NULL, failure_detail=NULL "
+                "WHERE revision_id=?",
+                (self.STATUS_ACTIVE, revision_id),
+            )
+            conn.execute(
+                "UPDATE desired_configs SET poisoned=0, last_error=NULL, attempts=0 "
+                "WHERE revision_id=?",
+                (revision_id,),
+            )
+
+    def record_delivery(self, agent_id: str, revision_id: str) -> int:
+        """Count one delivery of the current revision; returns the new attempt count.
+
+        Called once per frame we put on the wire, so an agent that never reports back
+        cannot be re-pushed forever (`CONFIG_MAX_DELIVERY_ATTEMPTS`).
+        """
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE desired_configs SET delivered_hash=("
+                "  SELECT config_hash FROM config_revisions WHERE revision_id=?"
+                "), delivered_at=?, attempts=attempts+1, updated_at=? "
+                "WHERE agent_id=? AND revision_id=?",
+                (revision_id, utcnow().isoformat(), utcnow().isoformat(), agent_id, revision_id),
+            )
+            row = conn.execute(
+                "SELECT attempts FROM desired_configs WHERE agent_id=?", (agent_id,)
             ).fetchone()
+        return int(row["attempts"] or 0) if row else 0
+
+    def note_report(
+        self,
+        agent_id: str,
+        status: Optional[str],
+        error: Optional[str] = None,
+    ) -> None:
+        """Record what the agent says about the config we assigned it (no content)."""
+        with self._connect() as conn:
             conn.execute(
-                "INSERT INTO config_revisions "
-                "(revision_id, agent_id, config_blob, config_hash, author, created_at, withdrawn) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (revision_id, agent_id, blob, config_hash, author, now, int(withdrawn)),
+                "UPDATE desired_configs SET last_status=?, last_error=?, updated_at=? "
+                "WHERE agent_id=?",
+                (
+                    (status or "")[:40] or None,
+                    (error or "")[:2000] or None,
+                    utcnow().isoformat(),
+                    agent_id,
+                ),
             )
+
+    def mark_unconfirmed(self, agent_id: str, detail: str = "") -> None:
+        """Stop delivering: the agent never acknowledged this revision.
+
+        Not poisoning — the revision may be fine and the agent wedged. The operator
+        sees `unconfirmed: true`, and a new revision (or a reactivation) clears it.
+        """
+        with self._connect() as conn:
             conn.execute(
-                "INSERT INTO desired_configs "
-                "(agent_id, revision_id, previous_revision_id, updated_at) "
-                "VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(agent_id) DO UPDATE SET "
-                "revision_id=excluded.revision_id, "
-                "previous_revision_id=desired_configs.revision_id, "
-                "updated_at=excluded.updated_at",
-                (agent_id, revision_id, previous["revision_id"] if previous else None, now),
+                "UPDATE desired_configs SET unconfirmed=1, last_error=?, updated_at=? "
+                "WHERE agent_id=?",
+                (detail[:2000], utcnow().isoformat(), agent_id),
             )
-        return self.current(agent_id) or {}
+
+    def clear(
+        self, agent_id: str) -> None:
+        """Forget the desired state (used by tests and by a hard withdrawal)."""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM desired_configs WHERE agent_id=?", (agent_id,))
+
+    # ------------------------------------------------------------------- reads
 
     def current(self, agent_id: str) -> Optional[Dict[str, Any]]:
+        """The agent's assignment: current revision **plus** the delivery facts."""
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT r.* FROM desired_configs d "
+                f"SELECT r.*, {self._ASSIGNMENT_SELECT} FROM desired_configs d "
                 "JOIN config_revisions r ON r.revision_id = d.revision_id "
                 "WHERE d.agent_id=?",
                 (agent_id,),
@@ -789,32 +1073,71 @@ class SQLiteDesiredConfigStore:
         with self._connect() as conn:
             rows = conn.execute(
                 "SELECT * FROM config_revisions WHERE agent_id=? "
-                "ORDER BY created_at DESC LIMIT ?",
+                "ORDER BY created_at DESC, rowid DESC LIMIT ?",
                 (agent_id, limit),
             ).fetchall()
         return [self._row(row) for row in rows]
 
-    def load_current(self) -> Dict[str, Dict[str, Any]]:
-        """Every agent's current revision, for the in-memory cache."""
+    def list_revisions(
+        self,
+        agent_id: Optional[str] = None,
+        status: Optional[str] = None,
+        proposal_id: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """Revision metadata for the admin surfaces (#99 item 5), newest first."""
+        where: List[str] = []
+        values: List[Any] = []
+        if agent_id:
+            where.append("agent_id=?")
+            values.append(agent_id)
+        if status:
+            where.append("status=?")
+            values.append(status)
+        if proposal_id:
+            where.append("proposal_id=?")
+            values.append(proposal_id)
+        clause = f" WHERE {' AND '.join(where)}" if where else ""
+        values.append(max(1, min(int(limit), 1000)))
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT r.* FROM desired_configs d "
+                "SELECT * FROM config_revisions" + clause +
+                " ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                tuple(values),
+            ).fetchall()
+        return [self._row(row) for row in rows]
+
+    def by_proposal(self, proposal_id: str) -> List[Dict[str, Any]]:
+        """Every per-agent revision created by one propose/approve call (#99)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM config_revisions WHERE proposal_id=? "
+                "ORDER BY created_at, rowid",
+                (proposal_id,),
+            ).fetchall()
+        return [self._row(row) for row in rows]
+
+    def hashes_for_agent(self, agent_id: str) -> List[str]:
+        """Hash of every revision this agent has ever been assigned (T9 detection)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT DISTINCT config_hash FROM config_revisions WHERE agent_id=?",
+                (agent_id,),
+            ).fetchall()
+        return [row["config_hash"] for row in rows]
+
+    def load_current(self) -> Dict[str, Dict[str, Any]]:
+        """Every agent's assignment, for the in-memory cache."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT r.*, {self._ASSIGNMENT_SELECT} FROM desired_configs d "
                 "JOIN config_revisions r ON r.revision_id = d.revision_id"
             ).fetchall()
         return {row["agent_id"]: self._row(row) for row in rows}
 
     def mark_failed(self, revision_id: str, detail: str = "") -> None:
-        with self._connect() as conn:
-            conn.execute(
-                "UPDATE config_revisions SET failed_at=?, failure_detail=? "
-                "WHERE revision_id=? AND failed_at IS NULL",
-                (utcnow().isoformat(), detail[:2000], revision_id),
-            )
-
-    def clear(self, agent_id: str) -> None:
-        """Forget the desired state (used by tests and by a hard withdrawal)."""
-        with self._connect() as conn:
-            conn.execute("DELETE FROM desired_configs WHERE agent_id=?", (agent_id,))
+        """Backwards-compatible alias for `poison_revision` (#81 call sites)."""
+        self.poison_revision(revision_id, detail)
 
     def sealed_revisions(self) -> List[Dict[str, Any]]:
         """Sealed bodies still present — the rotation job's work list (#98)."""

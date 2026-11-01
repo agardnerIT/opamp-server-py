@@ -1,0 +1,32 @@
+# The baseline every other fixture is a mutation of: a complete collector config
+# that keeps the opamp extension wired to this server (#100).
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 400
+  batch: {}
+exporters:
+  otlphttp:
+    endpoint: https://backend.example.com:4318
+service:
+  extensions: [opamp]
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      level: basic
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp]
+extensions:
+  opamp:
+    server:
+      ws:
+        endpoint: wss://opamp.example.com/v1/opamp

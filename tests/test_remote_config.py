@@ -22,6 +22,36 @@ from server.state import SQLiteDesiredConfigStore
 AGENT = "ab" * 16
 YAML = "receivers:\n  otlp:\n    protocols:\n      grpc:\n"
 
+# A complete collector config: `service` present, the `opamp` extension kept and
+# pointing at this server, memory_limiter + batch in the pipeline. That is what
+# passes the #100 pipeline without warnings.
+FULL_YAML = """receivers:
+  otlp:
+    protocols:
+      grpc:
+exporters:
+  debug:
+processors:
+  memory_limiter:
+    check_interval: 1s
+  batch: {}
+service:
+  extensions: [opamp]
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug]
+extensions:
+  opamp:
+    server:
+      ws:
+        endpoint: wss://opamp.example.com/v1/opamp
+"""
+
 
 @pytest.fixture(autouse=True)
 def _push_on(monkeypatch, tmp_path):
@@ -86,9 +116,21 @@ def test_hash_wire_forms_round_trip():
 
 
 def test_valid_config_map_normalises_and_warns_nothing():
+    normalised, warnings = remote_config.validate_config_map(_map(body=FULL_YAML))
+    assert normalised == {"": {"body": FULL_YAML, "content_type": "text/yaml"}}
+    assert warnings == []
+
+
+def test_a_fragment_only_warns_about_the_missing_service_section():
+    """A body without `service` is a fragment: we cannot tell if it is the whole config.
+
+    #100's structural and protected-invariant checks need a runnable config to check,
+    so they are skipped with a warning rather than guessed at.
+    """
     normalised, warnings = remote_config.validate_config_map(_map())
     assert normalised == {"": {"body": YAML, "content_type": "text/yaml"}}
-    assert warnings == []
+    assert len(warnings) == 1
+    assert "no `service` section" in warnings[0]
 
 
 def test_multiple_objects_and_non_empty_keys_are_supported():

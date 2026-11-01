@@ -580,3 +580,89 @@ class TestRemoteConfig:
         assert exc.value.status_code == 400
         ok = oc.apply_agent_config(CONFIG_MAP, agents=[agent_id], confirm=True)
         assert ok["succeeded"] == 1
+
+
+FULL_CONFIG_MAP = {
+    "": {
+        "body": (
+            "receivers:\n  otlp:\n    protocols:\n      grpc:\n"
+            "processors:\n  memory_limiter:\n    check_interval: 1s\n  batch: {}\n"
+            "exporters:\n  debug: {}\n"
+            "service:\n  extensions: [opamp]\n  telemetry:\n    logs:\n      level: info\n"
+            "  pipelines:\n    traces:\n      receivers: [otlp]\n"
+            "      processors: [memory_limiter, batch]\n      exporters: [debug]\n"
+            "extensions:\n  opamp:\n    server:\n      ws:\n"
+            "        endpoint: wss://opamp.example.com/v1/opamp\n"
+        ),
+        "content_type": "text/yaml",
+    }
+}
+
+
+class TestConfigControlPlane:
+    """The #99/#100 flow through the shared client: propose → approve → rollback."""
+
+    def test_propose_then_approve(self, oc, push_env):
+        agent_id = register_agent("34" * 16)
+        proposed = oc.propose_config(FULL_CONFIG_MAP, scope={"agent_id": agent_id})
+        assert proposed["status"] == "proposed"
+        assert proposed["verdict"]["ok"] is True
+
+        listing = oc.list_config_revisions(agent=agent_id)
+        assert listing["count"] == 1
+        assert "config_map" not in listing["revisions"][0]
+
+        proposal = oc.get_config_proposal(proposed["proposal_id"])
+        assert proposal["status"] == "proposed"
+
+        approved = oc.approve_config(proposed["proposal_id"], note="ship it")
+        assert approved["status"] == "active"
+        assert approved["agents"] == 1
+
+        detail = oc.get_agent_config(agent_id)
+        assert detail["desired"]["status"] == "active"
+        assert detail["desired"]["deliverable"] is True
+        assert detail["assignment"]["attempts"] == 0
+
+    def test_reject_and_reactivate_shapes(self, oc, push_env):
+        agent_id = register_agent("56" * 16)
+        proposal = oc.propose_config(FULL_CONFIG_MAP, scope={"agent_id": agent_id})
+        rejected = oc.reject_config(proposal["proposal_id"], reason="wrong tenant")
+        assert rejected["status"] == "rejected"
+        with pytest.raises(OpampApiError) as exc:
+            oc.approve_config(proposal["proposal_id"])
+        assert exc.value.status_code == 409
+        with pytest.raises(OpampApiError) as reactivate:
+            oc.reactivate_config(proposal["proposal_id"], reason="nothing poisoned")
+        assert reactivate.value.status_code == 409
+
+    def test_rollback_returns_to_the_previous_revision(self, oc, push_env):
+        agent_id = register_agent("78" * 16)
+        first = oc.set_agent_config(agent_id, CONFIG_MAP)
+        oc.set_agent_config(agent_id, CONFIG_MAP)
+        rolled = oc.rollback_agent_config(agent_id, note="undo")
+        assert rolled["config_hash"] == first["config_hash"]
+        assert rolled["parent_revision_id"] == first["revision_id"]
+
+    def test_rollback_without_history_is_409(self, oc, push_env):
+        agent_id = register_agent("9a" * 16)
+        oc.set_agent_config(agent_id, CONFIG_MAP)
+        with pytest.raises(OpampApiError) as exc:
+            oc.rollback_agent_config(agent_id)
+        assert exc.value.status_code == 409
+
+    def test_a_broken_config_is_422_with_structured_details(self, oc, push_env):
+        agent_id = register_agent("bc" * 16)
+        with pytest.raises(OpampApiError) as exc:
+            oc.propose_config(
+                {"": {"body": "receivers: [unclosed", "content_type": "text/yaml"}},
+                scope={"agent_id": agent_id},
+            )
+        assert exc.value.status_code == 422
+        assert "errors" in exc.value.detail
+
+    def test_validate_reports_policy_and_fingerprint(self, oc, push_env):
+        verdict = oc.validate_config(FULL_CONFIG_MAP)
+        assert verdict["valid"] is True
+        assert verdict["policy"]["status"] in ("skipped", "pass")
+        assert len(verdict["fingerprint"]) == 64

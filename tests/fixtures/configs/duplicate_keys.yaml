@@ -1,0 +1,13 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+exporters:
+  debug: {}
+  debug:
+    verbosity: detailed
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [debug]

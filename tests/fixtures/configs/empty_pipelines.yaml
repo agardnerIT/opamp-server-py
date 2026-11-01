@@ -1,0 +1,18 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+processors:
+  memory_limiter:
+    check_interval: 1s
+  batch: {}
+exporters:
+  debug: {}
+service:
+  extensions: [opamp]
+  telemetry:
+    logs:
+      level: info
+  pipelines: {}
+extensions:
+  opamp: {}

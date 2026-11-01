@@ -591,6 +591,14 @@ AUDITED_ROUTES = {
     ("PUT", "/agent/{agent_id}/config"): "config.push",
     ("DELETE", "/agent/{agent_id}/config"): "config.withdraw",
     ("POST", "/config/apply"): "config.apply",
+    # #99: the control plane. Propose records the intent (and its verdict), approve
+    # records the human decision before anything is delivered, reject/reactivate
+    # keep the record complete, and rollback names the parent it returns to.
+    ("POST", "/config/revisions"): "config.propose",
+    ("POST", "/config/revisions/{proposal_id}/approve"): "config.approve",
+    ("POST", "/config/revisions/{proposal_id}/reject"): "config.reject",
+    ("POST", "/config/revisions/{proposal_id}/reactivate"): "config.reactivate",
+    ("POST", "/agent/{agent_id}/config/rollback"): "config.rollback",
 }
 
 EXPLAINED_ROUTES = {

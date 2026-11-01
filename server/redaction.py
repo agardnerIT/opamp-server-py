@@ -367,15 +367,27 @@ def scrub_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
 # ------------------------------------------------------------------- log lines
 
 
-def _redact_key_value(match: "re.Match[str]") -> str:
-    """Mask the value of an `identifier: value` pair whose identifier is secret."""
+def _redact_key_value(match: "re.Match[str]", depth: int = 0) -> str:
+    """Mask the value of an `identifier: value` pair whose identifier is secret.
+
+    When the identifier is *not* secret, the value is re-scanned once. The generic
+    regex is leftmost-first, so `RuntimeError: password=hunter2` matches the whole
+    phrase with `RuntimeError: ` as the key — without this, the secret hides inside
+    the value of a match that was rejected, which is precisely the traceback case a
+    log filter must catch. The recursion is depth-limited and operates on a shorter
+    string each time.
+    """
     key = match.group("key")
-    if not _SECRET_WORD_RE.search(key):
+    if _SECRET_WORD_RE.search(key):
+        return f"{key}{SENTINEL}"
+    if depth >= 4:
         return match.group(0)
-    return f"{key}{SENTINEL}"
+    value = match.group("value")
+    rescanned = scrub_text(value, _depth=depth + 1)
+    return match.group(0) if rescanned == value else f"{key}{rescanned}"
 
 
-def scrub_text(text: str) -> str:
+def scrub_text(text: str, _depth: int = 0) -> str:
     """Scrub secrets out of already-formatted text (log messages, tracebacks).
 
     Regex-based and therefore best-effort: it exists to catch the careless
@@ -391,7 +403,7 @@ def scrub_text(text: str) -> str:
     scrubbed = _TEXT_HEADER_RE.sub(
         lambda m: f"{m.group('prefix')}{SENTINEL}", scrubbed
     )
-    return _TEXT_KEY_RE.sub(_redact_key_value, scrubbed)
+    return _TEXT_KEY_RE.sub(lambda match: _redact_key_value(match, _depth), scrubbed)
 
 
 def install_log_filter() -> None:

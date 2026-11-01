@@ -8,6 +8,9 @@ from pathlib import Path
 from typing import Optional
 from loguru import logger
 
+from server import tracing
+from urllib.parse import urlsplit
+
 from server.state import DB_PATH
 
 ALERT_EVENT_NEW_AGENT = "new_agent"
@@ -226,11 +229,37 @@ def _send_webhook(message: str, config: dict, event_type: str):
         except json.JSONDecodeError:
             pass
     
+    # #108: `alert.send` span and event. The target *host* only — a webhook URL can
+    # carry a token in its query string or userinfo, and a span is exported to a
+    # third-party collector just like a log line (#98).
     try:
-        resp = requests.post(url, data=body.encode(), headers=headers, timeout=10)
-        return resp.status_code < 400, f"status: {resp.status_code}"
-    except Exception as e:
-        return False, str(e)
+        host = urlsplit(url).hostname or "unknown"
+    except Exception:
+        host = "unknown"
+    with tracing.span("alert.send", event_type=event_type, target_host=host) as span:
+        try:
+            resp = requests.post(url, data=body.encode(), headers=headers, timeout=10)
+            ok = resp.status_code < 400
+            tracing.set_span_attributes(span, http_status=resp.status_code, delivered=ok)
+            if not ok:
+                logger.bind(
+                    event="alert.dispatch.failed",
+                    event_type=event_type,
+                    target_host=host,
+                    status=resp.status_code,
+                ).warning(
+                    f"alert webhook to {host} answered {resp.status_code}"
+                )
+            return ok, f"status: {resp.status_code}"
+        except Exception as e:
+            tracing.set_span_attributes(span, delivered=False, error=type(e).__name__)
+            logger.bind(
+                event="alert.dispatch.failed",
+                event_type=event_type,
+                target_host=host,
+                error=type(e).__name__,
+            ).warning(f"alert webhook to {host} failed: {e}")
+            return False, str(e)
 
 
 DISPATCHERS = {
@@ -249,7 +278,9 @@ def send_alert(message: str, event_type: str = ALERT_EVENT_NEW_AGENT) -> tuple[b
     if not dispatcher:
         return False, "no dispatcher"
     
-    logger.info(f"Sending {event_type} alert: {message}")
+    logger.bind(event="alert.send", event_type=event_type).info(
+        f"Sending {event_type} alert: {message}"
+    )
     return dispatcher(message, event_config, event_type)
 
 

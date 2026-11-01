@@ -904,6 +904,12 @@ def require_roles(request: Request, required: str) -> Principal:
         wait = locked_for(key)
         if wait:
             PROM_ADMIN_AUTH_FAILURES.labels(reason=REASON_LOCKED_OUT).inc()
+            logger.bind(
+                event="admin.auth.failed",
+                reason=REASON_LOCKED_OUT,
+                required_role=required,
+                retry_after=wait,
+            ).warning(f"admin auth refused ({REASON_LOCKED_OUT}) for {required}")
             audit_event(
                 "admin.auth.locked_out",
                 kind="admin_auth",
@@ -929,6 +935,11 @@ def require_roles(request: Request, required: str) -> Principal:
             if role_satisfies(ROLE_VIEWER, required):
                 return Principal(name="anonymous", role=ROLE_VIEWER, method="anonymous")
             PROM_ADMIN_AUTH_FAILURES.labels(reason=REASON_MISSING).inc()
+            logger.bind(
+                event="admin.auth.failed",
+                reason="read_only_mode",
+                required_role=required,
+            ).warning(f"admin auth refused (read_only_mode) for {required}")
             audit_event(
                 "admin.auth.denied",
                 kind="admin_auth",
@@ -947,6 +958,9 @@ def require_roles(request: Request, required: str) -> Principal:
             )
         if reason:
             PROM_ADMIN_AUTH_FAILURES.labels(reason=reason).inc()
+            logger.bind(
+                event="admin.auth.failed", reason=reason, required_role=required
+            ).warning(f"admin auth refused ({reason}) for {required}")
         raise HTTPException(
             status_code=401,
             detail="invalid credentials",
@@ -955,6 +969,13 @@ def require_roles(request: Request, required: str) -> Principal:
 
     if not role_satisfies(principal.role, required):
         PROM_ADMIN_AUTH_FAILURES.labels(reason=REASON_ROLE).inc()
+        logger.bind(
+            event="admin.auth.failed",
+            reason=REASON_ROLE,
+            principal=principal.name,
+            role=principal.role,
+            required_role=required,
+        ).warning(f"admin auth refused ({REASON_ROLE}) for {required}")
         audit_event(
             "admin.auth.denied",
             kind="admin_auth",

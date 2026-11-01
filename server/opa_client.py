@@ -4,6 +4,8 @@ import requests
 from typing import Optional, Dict, Any, List
 from loguru import logger
 
+from server import tracing
+
 
 OPA_URL = os.environ.get("OPA_URL", "http://localhost:8181")
 OPA_ENABLED = os.environ.get("OPA_ENABLED", "false").lower() in ("true", "1", "yes")
@@ -115,7 +117,9 @@ class OPAClient:
                 "policy_results": policy_results,
             }
         except Exception as e:
-            logger.warning(f"OPA evaluation error: {e}")
+            logger.bind(event="opa.evaluate.failed", error=str(e)).warning(
+                f"OPA evaluation error: {e}"
+            )
             return {"compliant": None, "violations": [], "error": str(e)}
 
     def reload(self) -> bool:
@@ -245,8 +249,18 @@ def evaluate_agent_compliance(agent_state) -> Dict[str, Any]:
         "agent_id": agent_state.agent_id,
         "description": agent_state.description,
     }
-    
-    result = client.evaluate(input_data)
-    result["evaluated_at"] = None
-    
-    return result
+
+    # #108: one span per policy evaluation. Counts and outcome only — never the
+    # agent's effective config, which is what the policy sees (#98).
+    with tracing.span("opa.evaluate", agent_id=agent_state.agent_id) as span:
+        result = client.evaluate(input_data)
+        result["evaluated_at"] = None
+        tracing.set_span_attributes(
+            span,
+            **{
+                "opa.policies": len(result.get("policy_results") or []),
+                "opa.violations": len(result.get("violations") or []),
+                "opa.compliant": result.get("compliant"),
+            },
+        )
+        return result

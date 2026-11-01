@@ -41,6 +41,14 @@ services:
       - TRUST_PROXY_HEADERS=${TRUST_PROXY_HEADERS:-false}
       # Config push (#96): off unless the whole posture is secure.
       - OPAMP_CONFIG_PUSH_ENABLED=${OPAMP_CONFIG_PUSH_ENABLED:-false}
+      # Observability (#108)
+      - LOG_FORMAT=${LOG_FORMAT:-json}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_FILE=${LOG_FILE:-}
+      - OPAMP_TRACING_ENABLED=${OPAMP_TRACING_ENABLED:-false}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-opamp-server}
+      - OTEL_TRACES_SAMPLER=${OTEL_TRACES_SAMPLER:-parentbased_always_on}
       - OPAMP_ALLOW_INSECURE_CONFIG_PUSH=${OPAMP_ALLOW_INSECURE_CONFIG_PUSH:-false}
       # Agent auth (#94): off by default. Set to token and mint a credential per
       # agent (`opampctl agents token create <agent-id>`, then paste the returned

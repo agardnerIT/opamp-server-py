@@ -155,7 +155,14 @@ def compute_hash(config_map: Dict[str, Dict[str, Any]]) -> str:
         body = entry.get("body", "")
         if isinstance(body, str):
             body = body.encode("utf-8")
-        for part in (key.encode("utf-8"), (entry.get("content_type") or "").encode("utf-8"), body):
+        parts = [key.encode("utf-8"), (entry.get("content_type") or "").encode("utf-8"), body]
+        role = entry.get("role") or ""
+        if role:
+            # Appended only when set, and length-prefixed like every other part, so a
+            # config without a role keeps the hash it had before #68 — otherwise every
+            # stored revision would look changed on upgrade and be re-pushed fleet-wide.
+            parts.append(str(role).encode("utf-8"))
+        for part in parts:
             digest.update(struct.pack(">I", len(part)))
             digest.update(part)
     return digest.hexdigest()
@@ -211,18 +218,21 @@ def build_config_map(config_map: Dict[str, Dict[str, Any]]) -> AgentConfigMap:
     for key, entry in config_map.items():
         message.config_map[key].body = (entry.get("body") or "").encode("utf-8")
         message.config_map[key].content_type = entry.get("content_type") or ""
+        message.config_map[key].role = entry.get("role") or ""
     return message
 
 
 def to_wire_config_map(config_map: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     """JSON shape of a config map for API responses (bodies decoded to text)."""
-    return {
-        key: {
+    wire = {}
+    for key, entry in config_map.items():
+        wire[key] = {
             "body": entry.get("body", ""),
             "content_type": entry.get("content_type", ""),
         }
-        for key, entry in config_map.items()
-    }
+        if entry.get("role"):
+            wire[key]["role"] = entry["role"]
+    return wire
 
 
 def new_revision_id() -> str:

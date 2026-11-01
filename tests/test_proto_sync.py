@@ -233,30 +233,32 @@ def test_stub_and_type_hint_were_generated_together():
     assert "attributes: _containers.RepeatedCompositeFieldContainer" in hints
 
 
-def test_push_pipeline_refuses_role_until_it_can_carry_it():
-    """The proto can express `role`; the push pipeline cannot yet.
+def test_role_can_be_pushed_once_the_pipeline_carries_it():
+    """The proto field is only useful if it survives validation → hash → wire (#68).
 
-    `compute_hash()` and `build_config_map()` both see only body+content_type, so
-    accepting `role` would approve one object and deliver another (#68 wires it).
+    `role` was refused while the push pipeline dropped it; this pins the other side:
+    an object that declares a role is accepted and the role reaches the agent.
     """
+    from server import remote_config
     from server.config_validation import check_config_map
 
-    verdict = check_config_map(
-        {"raw": {"body": "a: 1\n", "content_type": "text/yaml", "role": "raw"}}
-    )
-    assert not verdict.ok
-    assert any("role" in message for message in verdict.error_messages)
+    payload = {"raw": {"body": "a: 1\n", "content_type": "text/yaml", "role": "raw"}}
+    verdict = check_config_map(payload)
+    assert verdict.ok, verdict.error_messages
+    assert verdict.normalised["raw"]["role"] == "raw"
+    assert remote_config.build_config_map(verdict.normalised).config_map["raw"].role == "raw"
 
-    # Without `role` the same object passes, so the refusal is not collateral.
-    assert check_config_map({"raw": {"body": "a: 1\n", "content_type": "text/yaml"}}).ok
+    # A role is a name, not a payload: it is bounded.
+    too_long = {"raw": {"body": "a: 1\n", "role": "r" * 500}}
+    assert not check_config_map(too_long).ok
 
 
 def test_v020_agent_message_stores_exactly_as_before():
     """A v0.20.0 collector's status must land in the registry unchanged.
 
-    The sync is only safe if the *server* is indifferent to the new fields: an
-    agent that sends `content_type`-bearing config objects with a `role`, and
-    health attributes, keeps the same stored shape as one that does not.
+    The sync is only safe if the *server* is indifferent to the new fields: an agent
+    that sends `content_type`-bearing config objects with a `role`, and health
+    attributes, keeps the same stored shape as one that does not.
     """
     from fastapi.testclient import TestClient
 

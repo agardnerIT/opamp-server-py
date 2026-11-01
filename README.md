@@ -342,6 +342,36 @@ break; deleting rows *before* the checkpoint still shows up as tampering.
 | `error` | recorded, then the mutation failed (see the second row for the outcome) |
 | `noop` | idempotent no-change (e.g. logging out twice) |
 
+## Config objects (#68)
+
+`EffectiveConfig.config_map` holds **configuration objects**, and their keys are
+agent-implementation-defined: `""` is valid and has no privileged meaning
+([spec v0.20.0 §Configuration Objects](https://github.com/open-telemetry/opamp-spec/blob/v0.20.0/specification.md)).
+`otelcol-contrib` with `reports_raw_config: true` reports two — the expanded config
+under `""` and the raw config under `"raw"` — and other agents use `"collector"`,
+`"config"`, … `AgentConfigObject` also carries an optional `role`, which is likewise
+agent-defined.
+
+`server/effective_config.py` is the one reader (`server/state.py` and the UI both go
+through it, and `ui/config_view.py` renders it):
+
+- **Every object is read.** Components reported by different objects are unioned, so a
+  partial or alternative representation cannot hide a receiver, and none is counted
+  twice.
+- **Non-YAML is skipped, never raised.** A content type that is set and is not YAML, a
+  body that is not UTF-8, a body that does not parse, a document that is not a mapping
+  — each is skipped with a debug log naming the key, and the rest are still read.
+- **Parsing is bounded** (the same loader the config validator uses: alias, depth and
+  expansion budgets; duplicate keys refused), because the document comes from an agent.
+- **`""` is preferred for display.** The "Collector Configuration" panel shows the `""`
+  object when it parses, otherwise the first parseable object, untagged before
+  role-tagged. A role marks an alternative representation, not the primary one.
+
+A role is carried end-to-end by the push path too: validated (and bounded to 128
+characters), included in the canonical hash **only when set** — so revisions stored
+before v0.20.0 keep their hash and are not re-pushed after an upgrade — and set on the
+`AgentConfigObject` delivered to the agent.
+
 ## Config data and secrets
 
 Config bodies are the most sensitive data this server holds: exporter auth

@@ -54,6 +54,8 @@ DEFAULT_MAX_DEPTH = 50
 # Expanded-node ceiling for one parsed document. A real collector config is a few
 # thousand nodes; this only ever trips on an alias bomb.
 DEFAULT_MAX_NODES = 100_000
+# `AgentConfigObject.role` names a representation ("raw", "expanded"), not a payload.
+MAX_ROLE_CHARS = 128
 
 # Top-level sections of a collector config. `service` is what makes it runnable.
 COMPONENT_SECTIONS = (
@@ -876,16 +878,18 @@ def check_shape(
         if not isinstance(content_type, str):
             verdict.add_error(key, "'content_type' must be a string")
             continue
-        if "role" in entry:
-            # The proto gained `AgentConfigObject.role` in v0.20.0 (#66), but the rest
-            # of the push pipeline (canonical hash, delivery, API round-trip) still
-            # carries body+content_type only. Accepting `role` here would report a
-            # successful push and deliver a different object than the one approved.
+        # v0.20.0 `AgentConfigObject.role` (#66/#68): agent-defined, so it is carried
+        # through uninterpreted — but it is bounded, because the size cap below only
+        # counts bodies and an unbounded role string would ride to the agent outside it.
+        role = entry.get("role") or ""
+        if not isinstance(role, str):
+            verdict.add_error(key, "'role' must be a string")
+            continue
+        if len(role) > MAX_ROLE_CHARS:
             verdict.add_error(
                 key,
-                "'role' cannot be carried by the config push pipeline yet (see #68)",
-                "omit 'role' until the push pipeline round-trips it; dropping it "
-                "silently would deliver a config the approver never saw",
+                f"'role' is {len(role)} characters, over MAX_ROLE_CHARS={MAX_ROLE_CHARS}",
+                "a role names a representation ('raw', 'expanded'); it is not data",
             )
             continue
         try:
@@ -899,6 +903,9 @@ def check_shape(
             continue
         total += len(encoded)
         normalised[key] = {"body": body, "content_type": content_type}
+        if role:
+            # Only when set, so a role-less map hashes and stores exactly as before.
+            normalised[key]["role"] = role
 
     limit = max_bytes()
     if total > limit:

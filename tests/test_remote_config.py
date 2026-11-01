@@ -152,9 +152,8 @@ def test_multiple_objects_and_non_empty_keys_are_supported():
         ({"": {"content_type": "text/yaml"}}, "'body' is required"),
         ({"": {"body": 42}}, "'body' is required"),
         ({"": {"body": "x", "content_type": 1}}, "'content_type' must be a string"),
-        # The proto expresses `role` (v0.20.0) but the push pipeline cannot carry it
-        # yet: accepting it would deliver an object the approver never saw (#68).
-        ({"": {"body": "x", "role": "main"}}, "'role' cannot be carried"),
+        ({"": {"body": "x", "role": 1}}, "'role' must be a string"),
+        ({"": {"body": "x", "role": "r" * 5000}}, "over MAX_ROLE_CHARS"),
     ],
 )
 def test_invalid_shapes_are_rejected_with_a_reason(payload, fragment):
@@ -166,9 +165,43 @@ def test_invalid_shapes_are_rejected_with_a_reason(payload, fragment):
 def test_all_errors_are_reported_at_once():
     with pytest.raises(remote_config.ConfigValidationError) as exc:
         remote_config.validate_config_map(
-            {"a": {"body": "x", "role": "r"}, "b": {"content_type": "text/yaml"}}
+            {"a": {"body": 1, "role": "r"}, "b": {"content_type": "text/yaml"}}
         )
     assert len(exc.value.errors) == 2
+
+
+def test_role_is_carried_through_normalisation_hash_and_wire():
+    """v0.20.0 `AgentConfigObject.role` survives every step of the push pipeline."""
+    with_role = {"raw": {"body": "a: 1\n", "content_type": "text/yaml", "role": "raw"}}
+    normalised, _ = remote_config.validate_config_map(with_role)
+    assert normalised["raw"]["role"] == "raw"
+
+    # It reaches the agent, or the approver approved an object nobody receives.
+    wire = remote_config.build_config_map(normalised).config_map["raw"]
+    assert (wire.role, wire.content_type, wire.body) == ("raw", "text/yaml", b"a: 1\n")
+
+    # ...and it changes the hash: two objects with the same body but different roles
+    # are different configurations.
+    bare = {"raw": {"body": "a: 1\n", "content_type": "text/yaml"}}
+    assert remote_config.compute_hash(normalised) != remote_config.compute_hash(bare)
+
+
+def test_a_role_less_map_keeps_the_hash_it_had_before_role_existed():
+    """Upgrade safety: stored revisions must not all look changed and be re-pushed.
+
+    `role` is appended to the digest only when it is set, so every revision pushed
+    before v0.20.0 keeps its hash. The literal below was produced by the pre-#68
+    implementation; if this changes, agents on the old hash will be re-sent configs
+    after an upgrade.
+    """
+    legacy = {"": {"body": "receivers:\n", "content_type": "text/yaml"}}
+    assert remote_config.compute_hash(legacy) == (
+        "cc6b77c36cc412c5dc1ac52c815b25384be3328e2e888403e2450c7fe2ea8fe9"
+    )
+    # An explicit empty role is still role-less.
+    assert remote_config.compute_hash(
+        {"": {"body": "receivers:\n", "content_type": "text/yaml", "role": ""}}
+    ) == remote_config.compute_hash(legacy)
 
 
 def test_yaml_that_does_not_parse_is_refused():

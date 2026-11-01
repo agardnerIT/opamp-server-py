@@ -594,6 +594,24 @@ class TestConfigCommands:
         )
         assert withdrawn["withdrawn"] is True
 
+    def test_set_carries_role(self, live, push_env, tmp_path):
+        """`--role` reaches the stored revision (v0.20.0 AgentConfigObject.role, #68)."""
+        register_agent("ef" * 16)
+        path = tmp_path / "collector.yaml"
+        path.write_text(CONFIG_FILE_BODY)
+
+        parse(run("--password", ADMIN_PW, "agents", "config", "set", "ef" * 16,
+                  "--file", str(path), "--role", "raw"))
+        got = parse(run("--password", ADMIN_PW, "agents", "config", "get", "ef" * 16))
+        assert got["desired"]["config_map"][""]["role"] == "raw"
+
+        # It changes the canonical hash, so a role is part of what was approved.
+        with_role = parse(run("--password", ADMIN_PW, "config", "validate",
+                              "--file", str(path), "--role", "raw"))
+        without = parse(run("--password", ADMIN_PW, "config", "validate",
+                            "--file", str(path)))
+        assert with_role["config_hash"] != without["config_hash"]
+
     def test_set_is_404_when_push_is_disabled(self, live, tmp_path):
         register_agent("cd" * 16)
         path = tmp_path / "collector.yaml"

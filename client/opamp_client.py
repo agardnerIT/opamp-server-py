@@ -437,8 +437,10 @@ class OpampClient:
     ) -> Dict[str, Any]:
         """``PUT /agent/{id}/config`` — push a desired config (approver).
 
-        ``config_map`` maps a config object name to ``{"body", "content_type"}``;
-        ``{"": {...}}`` is the single-object case. Returns the new ``revision_id``
+        ``config_map`` maps a config object name to
+        ``{"body", "content_type", "role"?}``; ``{"": {...}}`` is the single-object
+        case, and ``role`` is the optional v0.20.0 ``AgentConfigObject.role`` the
+        agent defines (carried verbatim). Returns the new ``revision_id``
         and ``config_hash``. Delivery happens on the agent's next status report and
         only when its reported hash differs — never automatically retried.
 

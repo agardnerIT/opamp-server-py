@@ -67,6 +67,11 @@ Pre-built images are available from GitHub Container Registry:
 - `ghcr.io/agardnerit/opamp-server-py-server:latest`
 - `ghcr.io/agardnerit/opamp-server-py-ui:latest`
 
+Images are multi-arch (`linux/amd64`, `linux/arm64`). Pushing a `vX.Y.Z` git tag
+publishes `X.Y.Z` and `X.Y`, and moves `latest`; a prerelease tag such as
+`vX.Y.Z-rc1` publishes only `X.Y.Z-rc1` and leaves `latest` alone. Tags are
+created with `python3 release.py --version vX.Y.Z`.
+
 ```bash
 # Start server and UI
 docker-compose up -d

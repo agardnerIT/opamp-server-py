@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import prometheus_client as prom_client
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from fastapi import FastAPI, Request, HTTPException, Query, WebSocket, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, JSONResponse
@@ -77,7 +77,15 @@ from server.ws import (
     ws_enabled,
 )
 
-AGENT_TIMEOUT_SECONDS = int(os.environ.get("AGENT_TIMEOUT_SECONDS", 60))
+# #69: a stale timeout must follow the agent's *observed* reporting cadence, not a
+# fixed guess. The floor covers collectors on their 30s default (and any agent that
+# reports more often than that); beyond it we expire at `margin × observed gap`, so a
+# `polling_interval: 120s` agent is not deleted and re-registered every minute.
+AGENT_TIMEOUT_SECONDS = int(os.environ.get("AGENT_TIMEOUT_SECONDS", 180))
+AGENT_TIMEOUT_INTERVAL_MARGIN = float(os.environ.get("AGENT_TIMEOUT_INTERVAL_MARGIN", 3))
+# Until one full gap has been observed, "polling every 10 minutes" and "died on
+# startup" are indistinguishable, so the first contact gets a generous window.
+AGENT_FIRST_CONTACT_SECONDS = float(os.environ.get("AGENT_FIRST_CONTACT_SECONDS", 900))
 _cleanup_task = None
 
 
@@ -758,27 +766,48 @@ def update_metrics():
     PROM_CONNECTED_AGENTS.set(len(AGENT_REGISTRY._agents))
 
 
-def cleanup_stale_agents():
-    now = datetime.now(timezone.utc)
-    timeout = timedelta(seconds=AGENT_TIMEOUT_SECONDS)
+def cleanup_stale_agents(now: Optional[datetime] = None) -> list:
+    """Remove agents that have gone silent past their own timeout (#69).
+
+    `now` is injectable so the removal window can be tested against a controllable
+    clock instead of `sleep()`.
+    """
+    now = now or datetime.now(timezone.utc)
     stale = []
-    
+
     for agent in AGENT_REGISTRY.list_all():
-        if now - agent.last_heartbeat > timeout:
-            stale.append(agent.agent_id)
-    
-    logger.info(f"Found {len(stale)} stale agents")
-    
-    for agent_id in stale:
-        logger.info(f"Removing stale agent: {agent_id}")
-        AGENT_REGISTRY.remove(agent_id)
-        PROM_AGENT_HEALTH.remove(agent_id)
-        _METRICS_STORE.delete(agent_id)
-        AGENT_METRICS.pop(agent_id, None)
-        send_stale_agent_alert(agent_id)
-    
-    if stale:
-        update_metrics()
+        timeout = agent.timeout_seconds(
+            AGENT_TIMEOUT_SECONDS,
+            AGENT_TIMEOUT_INTERVAL_MARGIN,
+            AGENT_FIRST_CONTACT_SECONDS,
+        )
+        silent = (now - agent.last_heartbeat).total_seconds()
+        if silent > timeout:
+            stale.append((agent, silent, timeout))
+
+    if not stale:
+        # Every 15s is 5760 identical lines a day, and this is the tick that also
+        # prunes audit rows — the log must show something only when it acted.
+        logger.debug("No stale agents")
+        return []
+
+    logger.info(f"Found {len(stale)} stale agent(s)")
+
+    for agent, silent, timeout in stale:
+        logger.info(
+            f"Removing stale agent: {agent.agent_id} "
+            f"(silent {silent:.0f}s > timeout {timeout:.0f}s, "
+            f"observed interval "
+            f"{f'{agent.report_interval:.0f}s' if agent.report_interval else 'unknown'})"
+        )
+        AGENT_REGISTRY.remove(agent.agent_id)
+        PROM_AGENT_HEALTH.remove(agent.agent_id)
+        _METRICS_STORE.delete(agent.agent_id)
+        AGENT_METRICS.pop(agent.agent_id, None)
+        send_stale_agent_alert(agent.agent_id)
+
+    update_metrics()
+    return [agent.agent_id for agent, _, _ in stale]
 
 
 HEARTBEAT_PERSIST_SECONDS = 60  # bounds post-restart heartbeat skew (#109)
@@ -831,6 +860,9 @@ def _apply_status_report(agent_id: str, agent_dict: Dict[str, Any], persist: boo
     PROM_MESSAGES_RECEIVED.labels(message_type="heartbeat").inc()
 
     changed = AGENT_REGISTRY.update(agent_id, persist=False, **updates)
+    # #69: the message itself is the heartbeat (and the cadence sample). In-memory
+    # only: the row is written once below, by `persist()`.
+    AGENT_REGISTRY.record_report(agent_id)
     if not persist:
         return changed
 
@@ -1128,6 +1160,9 @@ def get_agent(agent_id: str):
     Responds 404 if the agent is not connected. The `metrics` key holds the last
     OTLP snapshot (empty dict if none received); `credential` reports the agent's
     auth state (`enrolled`, `active`, `last_seen_at`, `revoked_at` — never a token).
+    `report_interval_seconds` is the cadence learned from the agent's own messages
+    and `stale_timeout_seconds` the silence budget applied to it (#69), so "why is
+    this agent still listed / why did it disappear" is answerable from one response.
     """
     agent = AGENT_REGISTRY.get(agent_id)
     if not agent:
@@ -1136,6 +1171,13 @@ def get_agent(agent_id: str):
     agent_dict = agent.to_dict()
     agent_dict["metrics"] = _get_agent_metrics_entry(agent_id)
     agent_dict["credential"] = agent_auth.credential_summary(agent_id)
+    # #69: the silence budget actually applied to this agent, so "why is it still
+    # listed / why was it dropped" is answerable without reading the cleanup code.
+    agent_dict["stale_timeout_seconds"] = agent.timeout_seconds(
+        AGENT_TIMEOUT_SECONDS,
+        AGENT_TIMEOUT_INTERVAL_MARGIN,
+        AGENT_FIRST_CONTACT_SECONDS,
+    )
     
     return agent_dict
 

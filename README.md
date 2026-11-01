@@ -585,6 +585,40 @@ BENCH_WORKERS=4 python3 scripts/bench_opamp_capacity.py                  # why n
 One client process saturates its own GIL at ~1,200 msg/s, so a single-process
 client under-reports server capacity — use `BENCH_CLIENTS` to spread the load.
 
+## When an agent counts as gone (#69)
+
+The server learns each agent's reporting cadence instead of guessing it. The
+`polling_interval` of a collector is operator-set (`30s` by default, minutes in a
+large fleet), so a fixed timeout shorter than it deletes and re-registers a healthy
+agent on every cycle — `connected_at` resets, its persisted metrics are dropped, and
+`stale_agent` + `new_agent` webhooks fire forever.
+
+An agent is removed once it has been silent for:
+
+```
+max(AGENT_TIMEOUT_SECONDS, AGENT_TIMEOUT_INTERVAL_MARGIN × observed_interval)
+```
+
+where `observed_interval` is an EWMA of the gaps between its own messages, not a
+configured number. Two details make it behave:
+
+- **One gap is not a cadence.** Gaps under a second (two messages in one batch,
+  registration followed immediately by the first report) are ignored, and an
+  estimate is only trusted after two real gaps — a restart measures its first gap
+  from a heartbeat persisted before the restart.
+- **Unknown cadence is not "fast".** An agent that has not reported twice yet gets
+  `AGENT_FIRST_CONTACT_SECONDS` (15 min): until one full gap is observed, "polls
+  every 10 minutes" and "died on startup" look identical.
+
+What that means in practice: a 30s collector is held to the 180s floor (six
+intervals of tolerance), a 120s collector to 360s, a 10-minute collector to 30
+minutes — and a collector that dies is gone after ~3 missed polls in every case.
+
+Observability, because "my agent disappeared" must be answerable from the API:
+`GET /agent/{id}` reports `report_interval_seconds` (the learned cadence) and
+`stale_timeout_seconds` (the budget actually applied to it), and the removal log
+line carries the silence, the timeout and the interval.
+
 ## Environment Variables
 
 | Variable | Default | Description |

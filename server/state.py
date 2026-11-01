@@ -1678,6 +1678,17 @@ CAPABILITY_TAGS = {
 }
 
 
+# #69: cadence learning. A gap is only treated as a reporting interval once it is
+# long enough not to be an artefact (an agent that sends two messages in one batch,
+# or a registration followed immediately by the first report, says nothing about
+# how often it polls), and the estimate is only trusted after two such gaps so a
+# restart — where the first gap is measured from a *persisted* heartbeat — cannot
+# halve it.
+MIN_REPORT_GAP_SECONDS = 1.0
+REPORT_INTERVAL_ALPHA = 0.3  # EWMA weight for the newest gap
+TRUSTED_REPORT_SAMPLES = 2
+
+
 @dataclass
 class AgentState:
     instance_uid: bytes
@@ -1693,6 +1704,12 @@ class AgentState:
     available_components: Dict[str, Any] = field(default_factory=dict)
     health: Dict[str, Any] = field(default_factory=dict)
     compliance: Optional[Dict[str, Any]] = None
+    # #69: the agent's own reporting cadence, learned from the gaps between its
+    # messages. A fixed timeout flaps every agent whose `polling_interval` is
+    # longer than it (delete → re-register every cycle → `stale_agent` +
+    # `new_agent` alerts forever), and the collector's interval is user-set.
+    report_interval: Optional[float] = None  # EWMA of observed gaps, seconds
+    report_samples: int = 0  # informative gaps seen (see record_report)
     # #81: the spec's reconciliation MUST compares hashes, so both halves of the
     # agent's RemoteConfigStatus are kept. Hex here, base64 on the wire.
     last_remote_config_hash: Optional[str] = None
@@ -1704,6 +1721,40 @@ class AgentState:
     # (raw json, redacted json, paths) — redaction is a per-request cost otherwise,
     # and `GET /agents` walks every agent (#98, #109).
     _redacted_effective_config: Optional[tuple] = field(default=None, repr=False, compare=False)
+
+    def record_report(self, now: Optional[datetime] = None) -> None:
+        """Record that the agent just reported, and learn from the gap (#69).
+
+        Called from the OpAMP message path only. `AGENT_REGISTRY.update()` no longer
+        touches `last_heartbeat`, so a server-side mutation (a compliance check, say)
+        cannot keep a dead agent looking alive.
+        """
+        now = now or utcnow()
+        gap = (now - self.last_heartbeat).total_seconds()
+        if gap >= MIN_REPORT_GAP_SECONDS:
+            self.report_samples += 1
+            if self.report_interval is None:
+                self.report_interval = gap
+            else:
+                self.report_interval += REPORT_INTERVAL_ALPHA * (gap - self.report_interval)
+        self.last_heartbeat = now
+
+    def timeout_seconds(
+        self,
+        floor: float,
+        margin: float = 3.0,
+        first_contact: float = 900.0,
+    ) -> float:
+        """How long this agent may stay silent before it is removed (#69).
+
+        `max(floor, margin × observed_interval)`. An agent whose cadence is not yet
+        trusted gets `first_contact` instead: until one full gap has been seen, "slow
+        poller" and "died on startup" are the same observation, and guessing low is
+        what makes the dashboard flap.
+        """
+        if self.report_samples < TRUSTED_REPORT_SAMPLES or not self.report_interval:
+            return max(floor, first_contact)
+        return max(floor, margin * self.report_interval)
 
     @property
     def capability_tags(self) -> list[dict]:
@@ -1890,6 +1941,9 @@ class AgentState:
             "healthy": self.healthy,
             "connected_at": self.connected_at.isoformat(),
             "last_heartbeat": self.last_heartbeat.isoformat(),
+            "report_interval_seconds": (
+                round(self.report_interval, 3) if self.report_interval is not None else None
+            ),
             "capabilities": self.capabilities,
             "capability_tags": self.capability_tags,
             "description": self.description,
@@ -1933,8 +1987,9 @@ class AgentRegistry:
     def update(self, agent_id: str, persist: bool = True, **kwargs) -> bool:
         """Apply `kwargs` to the in-memory state; return True if a value changed.
 
-        `last_heartbeat` alone never counts as a change: it moves on every
-        message and persisting it is what made steady state write-bound.
+        This is a *server-side* mutation (a compliance result, say): it deliberately
+        does not touch `last_heartbeat`, because a liveness signal must come from the
+        agent (#69). Use `record_report()` for that.
         """
         agent = self._agents.get(agent_id)
         if agent is None:
@@ -1944,10 +1999,19 @@ class AgentRegistry:
             if getattr(agent, key, None) != value:
                 setattr(agent, key, value)
                 changed = True
-        agent.last_heartbeat = utcnow()
         if persist:
             self.persist(agent_id)
         return changed
+
+    def record_report(self, agent_id: str, now: Optional[datetime] = None) -> None:
+        """The agent sent a message: move `last_heartbeat`, learn its cadence (#69).
+
+        In-memory only — the message path persists once, after it has applied every
+        field group (#109).
+        """
+        agent = self._agents.get(agent_id)
+        if agent is not None:
+            agent.record_report(now)
 
     def persist(self, agent_id: str) -> None:
         """Write the whole row once (the only place agents are written)."""

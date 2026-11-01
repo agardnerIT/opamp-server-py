@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import os
+import time
 from typing import Callable, Dict, FrozenSet, NamedTuple, Set
 
 import prometheus_client as prom_client
@@ -28,7 +29,7 @@ from server.framing import (
     encode_message,
     message_limit,
 )
-from server import agent_auth
+from server import agent_auth, tracing
 
 CLOSE_PROTOCOL_ERROR = 1002
 CLOSE_POLICY_VIOLATION = 1008
@@ -221,9 +222,15 @@ async def serve(
     """Serve one accepted WebSocket connection until it closes.
 
     `process` is the shared AgentToServer handler, called as
-    `process(payload, principal)`. Importing the FastAPI app here would create a
-    cycle, so it is injected. `principal` is the authenticated identity from the
-    handshake (#94); it is `None` in `off` mode, where behaviour is unchanged.
+    `process(payload, principal, transport="ws")`. Importing the FastAPI app here
+    would create a cycle, so it is injected. `principal` is the authenticated
+    identity from the handshake (#94); it is `None` in `off` mode, where behaviour
+    is unchanged.
+
+    #108: one long-lived `opamp.ws.connection` span per socket (it is the only
+    place that knows the close code and which agents were bound), and every log
+    line inside carries `conn_id` via the loguru context. A heartbeat message is
+    still DEBUG/message-level; connection open and close are INFO.
     """
     registry = REGISTRY if registry is None else registry
     principal_id = getattr(principal, "agent_id", None)
@@ -231,83 +238,136 @@ async def serve(
     queue: asyncio.Queue = asyncio.Queue(maxsize=outbound_queue_depth())
     writer = asyncio.create_task(_writer(websocket, queue))
     OPAMP_WS_CONNECTIONS.inc()
-    logger.info(f"OpAMP WebSocket connection {conn_id} opened")
+    # WebSocket close code 1000 = normal closure, 1001 = going away.
+    close_code = 1000
+    started = time.monotonic()
 
-    try:
-        while True:
+    with tracing.span(
+        "opamp.ws.connection", conn_id=conn_id, principal=principal_id, transport="ws"
+    ) as ws_span:
+        with logger.contextualize(conn_id=conn_id, transport="ws"):
+            logger.bind(
+                event="opamp.ws.connected", conn_id=conn_id, principal=principal_id
+            ).info(f"OpAMP WebSocket connection {conn_id} opened")
             try:
-                message = await websocket.receive()
-            except WebSocketDisconnect:
-                break
-
-            if message["type"] == "websocket.disconnect":
-                break
-
-            frame = message.get("bytes")
-            if frame is None:
-                # OpAMP is binary-only; a text frame is a protocol error.
-                logger.warning(f"Connection {conn_id}: non-binary WebSocket frame")
-                OPAMP_WS_MESSAGES.labels(direction="received", outcome="malformed").inc()
-                await _close(websocket, CLOSE_PROTOCOL_ERROR)
-                break
-
-            try:
-                payload = decode_message(frame, max_bytes=message_limit())
-            except MessageTooBig as exc:
-                logger.warning(f"Connection {conn_id}: {exc}")
-                OPAMP_WS_MESSAGES.labels(direction="received", outcome="too_big").inc()
-                await _close(websocket, CLOSE_MESSAGE_TOO_BIG)
-                break
-            except MalformedFrame as exc:
-                logger.warning(f"Connection {conn_id}: malformed frame: {exc}")
-                OPAMP_WS_MESSAGES.labels(direction="received", outcome="malformed").inc()
-                await _close(websocket, CLOSE_PROTOCOL_ERROR)
-                break
-
-            OPAMP_WS_MESSAGES.labels(direction="received", outcome="ok").inc()
-            try:
-                result = process(payload, principal)
-            except agent_auth.AgentAuthError as exc:
-                # #94: identity, not the message body, decides who may speak. The
-                # handler refused before applying anything, so state is untouched.
-                logger.warning(
-                    f"Connection {conn_id}: refused message ({exc.reason}): {exc.detail}"
+                close_code = await _serve_frames(
+                    websocket, process, registry, principal, principal_id, conn_id, queue
                 )
-                OPAMP_WS_MESSAGES.labels(direction="received", outcome="unauthorized").inc()
-                agent_auth.record_failure(
-                    exc.reason,
-                    principal=exc.principal,
-                    claimed=exc.claimed,
-                    transport="ws",
-                    client=websocket.client.host if websocket.client else "",
+            except Exception:
+                close_code = 1011
+                logger.bind(
+                    event="opamp.ws.connection_failed", conn_id=conn_id
+                ).exception(f"OpAMP WebSocket connection {conn_id} failed")
+            finally:
+                writer.cancel()
+                try:
+                    await writer
+                except (asyncio.CancelledError, Exception):
+                    pass
+                bound = registry.unbind_connection(conn_id)
+                OPAMP_WS_CONNECTIONS.dec()
+                duration_ms = round((time.monotonic() - started) * 1000, 2)
+                tracing.set_span_attributes(
+                    ws_span,
+                    close_code=close_code,
+                    agents=[uid.hex() for uid in bound],
+                    duration_ms=duration_ms,
                 )
-                await _close(websocket, CLOSE_POLICY_VIOLATION)
-                break
+                logger.bind(
+                    event="opamp.ws.disconnected",
+                    conn_id=conn_id,
+                    close_code=close_code,
+                    agents=len(bound),
+                    duration_ms=duration_ms,
+                ).info(
+                    f"OpAMP WebSocket connection {conn_id} closed ({close_code})"
+                )
 
-            if result.instance_uid:
-                if result.disconnected:
-                    registry.unbind(conn_id, result.instance_uid)
-                else:
-                    registry.bind(conn_id, result.instance_uid, principal_id)
 
-            try:
-                frame_out = encode_message(result.response, max_bytes=message_limit())
-            except MessageTooBig as exc:
-                # Spec: MUST NOT send an oversized ServerToAgent.
-                logger.error(f"Connection {conn_id}: refusing to send response: {exc}")
-                OPAMP_WS_MESSAGES.labels(direction="sent", outcome="too_big").inc()
-                continue
-
-            _enqueue(queue, frame_out)
-
-    except Exception:
-        logger.exception(f"OpAMP WebSocket connection {conn_id} failed")
-    finally:
-        writer.cancel()
+async def _serve_frames(
+    websocket: WebSocket,
+    process: Callable[..., ProcessedMessage],
+    registry: ConnectionRegistry,
+    principal: object | None,
+    principal_id: str | None,
+    conn_id: int,
+    queue: asyncio.Queue,
+) -> int:
+    """The receive loop; returns the close code it finished with."""
+    while True:
         try:
-            await writer
-        except (asyncio.CancelledError, Exception):
-            pass
-        registry.unbind_connection(conn_id)
-        OPAMP_WS_CONNECTIONS.dec()
-        logger.info(f"OpAMP WebSocket connection {conn_id} closed")
+            message = await websocket.receive()
+        except WebSocketDisconnect as exc:
+            return getattr(exc, "code", None) or 1000
+
+        if message["type"] == "websocket.disconnect":
+            return message.get("code") or 1000
+
+        frame = message.get("bytes")
+        if frame is None:
+            # OpAMP is binary-only; a text frame is a protocol error.
+            logger.bind(
+                event="opamp.ws.frame_rejected", conn_id=conn_id, reason="non_binary"
+            ).warning(f"Connection {conn_id}: non-binary WebSocket frame")
+            OPAMP_WS_MESSAGES.labels(direction="received", outcome="malformed").inc()
+            await _close(websocket, CLOSE_PROTOCOL_ERROR)
+            return CLOSE_PROTOCOL_ERROR
+
+        try:
+            payload = decode_message(frame, max_bytes=message_limit())
+        except MessageTooBig as exc:
+            logger.bind(
+                event="opamp.ws.frame_rejected", conn_id=conn_id, reason="too_big"
+            ).warning(f"Connection {conn_id}: {exc}")
+            OPAMP_WS_MESSAGES.labels(direction="received", outcome="too_big").inc()
+            await _close(websocket, CLOSE_MESSAGE_TOO_BIG)
+            return CLOSE_MESSAGE_TOO_BIG
+        except MalformedFrame as exc:
+            logger.bind(
+                event="opamp.ws.frame_rejected", conn_id=conn_id, reason="malformed"
+            ).warning(f"Connection {conn_id}: malformed frame: {exc}")
+            OPAMP_WS_MESSAGES.labels(direction="received", outcome="malformed").inc()
+            await _close(websocket, CLOSE_PROTOCOL_ERROR)
+            return CLOSE_PROTOCOL_ERROR
+
+        OPAMP_WS_MESSAGES.labels(direction="received", outcome="ok").inc()
+        try:
+            # `transport` is observability only (#108): the shared handler tags its
+            # log line and span with which transport carried the message.
+            result = process(payload, principal, transport="ws")
+        except agent_auth.AgentAuthError as exc:
+            # #94: identity, not the message body, decides who may speak. The
+            # handler refused before applying anything, so state is untouched.
+            logger.bind(
+                event="agent.auth.failed", conn_id=conn_id, reason=exc.reason
+            ).warning(
+                f"Connection {conn_id}: refused message ({exc.reason}): {exc.detail}"
+            )
+            OPAMP_WS_MESSAGES.labels(direction="received", outcome="unauthorized").inc()
+            agent_auth.record_failure(
+                exc.reason,
+                principal=exc.principal,
+                claimed=exc.claimed,
+                transport="ws",
+                client=websocket.client.host if websocket.client else "",
+            )
+            await _close(websocket, CLOSE_POLICY_VIOLATION)
+            return CLOSE_POLICY_VIOLATION
+
+        if result.instance_uid:
+            if result.disconnected:
+                registry.unbind(conn_id, result.instance_uid)
+            else:
+                registry.bind(conn_id, result.instance_uid, principal_id)
+
+        try:
+            frame_out = encode_message(result.response, max_bytes=message_limit())
+        except MessageTooBig as exc:
+            # Spec: MUST NOT send an oversized ServerToAgent.
+            logger.bind(event="opamp.ws.send_refused", conn_id=conn_id).error(
+                f"Connection {conn_id}: refusing to send response: {exc}"
+            )
+            OPAMP_WS_MESSAGES.labels(direction="sent", outcome="too_big").inc()
+            continue
+
+        _enqueue(queue, frame_out)

@@ -2,6 +2,7 @@ import asyncio
 import binascii
 import json
 import os
+from contextlib import nullcontext
 from pathlib import Path
 import prometheus_client as prom_client
 from contextlib import asynccontextmanager
@@ -19,7 +20,15 @@ from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
-from proto.opamp_pb2 import AgentToServer, ServerToAgent, ServerCapabilities, ServerToAgentFlags
+# #108: configure loguru before importing anything that logs at import time (the
+# alert store, the persistent agent registry). In a container this is what makes
+# every line JSON, including the first one.
+from server import logging as server_logging  # noqa: E402
+from server.logging import RequestContextMiddleware  # noqa: E402
+
+server_logging.configure_logging()
+
+from proto.opamp_pb2 import AgentCapabilities, AgentToServer, ServerToAgent, ServerCapabilities, ServerToAgentFlags
 from server.state import (
     AgentRegistry,
     AgentState,
@@ -54,6 +63,7 @@ from server import (
     posture,
     redaction,
     remote_config,
+    tracing,
 )
 from server.redaction import redact_document
 from server.auth import (  # noqa: F401  (privileged routes below)
@@ -96,7 +106,7 @@ def _log_audit_startup() -> None:
     runs on every restart, while `/audit/verify` is the on-demand answer.
     """
     if not audit.enabled():
-        logger.warning(
+        logger.bind(event="audit.disabled").warning(
             "audit log is DISABLED (OPAMP_AUDIT_ENABLED=false): privileged actions are "
             "refused and only AUDIT log lines remain"
         )
@@ -104,9 +114,11 @@ def _log_audit_startup() -> None:
     try:
         bounds = audit.STORE.bounds()
     except Exception as exc:  # pragma: no cover - defensive
-        logger.warning(f"audit log unavailable at startup: {exc}")
+        logger.bind(event="audit.unavailable", error=str(exc)).warning(
+            f"audit log unavailable at startup: {exc}"
+        )
         return
-    logger.info(
+    logger.bind(event="audit.ready", entries=bounds["count"]).info(
         f"audit log: {bounds['count']} entries"
         + (f" ({bounds['first_ts']} .. {bounds['last_ts']})" if bounds["count"] else "")
         + f", retention {audit.retention_days()}d; verify with GET /audit/verify"
@@ -125,7 +137,9 @@ async def periodic_cleanup():
         try:
             remote_config.REGISTRY.prune()
         except Exception as exc:  # pragma: no cover - defensive
-            logger.warning(f"config retention prune failed: {exc}")
+            logger.bind(event="store.write_failed", operation="config_prune").warning(
+                f"config retention prune failed: {exc}"
+            )
         # #99: drift is recomputed here, not on the message path — an alert is a
         # network call and one alert per poll is the flood the issue rules out. The
         # `include_future` sweep lives here too, so a later-joining agent inherits a
@@ -133,11 +147,15 @@ async def periodic_cleanup():
         try:
             config_control.sweep_drift(AGENT_REGISTRY.list_all())
         except Exception as exc:  # pragma: no cover - defensive
-            logger.warning(f"config drift sweep failed: {exc}")
+            logger.bind(event="store.write_failed", operation="drift_sweep").warning(
+                f"config drift sweep failed: {exc}"
+            )
         try:
             config_control.reconcile_future(AGENT_REGISTRY.list_all())
         except Exception as exc:  # pragma: no cover - defensive
-            logger.warning(f"include_future sweep failed: {exc}")
+            logger.bind(
+                event="store.write_failed", operation="include_future_sweep"
+            ).warning(f"include_future sweep failed: {exc}")
 
 
 @asynccontextmanager
@@ -156,10 +174,15 @@ async def lifespan(app: FastAPI):
     # Refuses to start (non-zero exit) when config push is enabled on an insecure
     # posture (#96). Read-only deployments are unaffected.
     posture.assert_startup_posture()
+    # #108: the posture is public on /health already; publishing it as metrics is
+    # what makes "someone left the insecure override on" a pager rule instead of a
+    # thing you find by reading a JSON endpoint. Pure `metric_values()` in, gauges out.
+    posture.publish_metrics()
     _log_audit_startup()
-    # #98: the log filter goes on before anything else can log a config, and the
-    # storage mode is stated once so a plaintext store is never a surprise.
-    redaction.install_log_filter()
+    # #98/#108: the log filter (redaction + correlation) is installed by
+    # `configure_logging()` at import, before the first line is written. Calling
+    # `redaction.install_log_filter()` here would replace the composed patcher and
+    # drop `request_id` from every line, so it is deliberately not repeated.
     crypto.warn_if_plaintext()
     # #81: the desired-config cache is loaded once; the message path must not read
     # SQLite per message (#109).
@@ -168,6 +191,7 @@ async def lifespan(app: FastAPI):
     yield
     if _cleanup_task:
         _cleanup_task.cancel()
+    tracing.shutdown_tracing()
 
 prom_client.REGISTRY.unregister(prom_client.PROCESS_COLLECTOR)
 prom_client.REGISTRY.unregister(prom_client.PLATFORM_COLLECTOR)
@@ -257,6 +281,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# #108: outermost, so even a CORS rejection and a 4xx from a route carries a
+# request id and exactly one completion line. WebSocket scopes pass through
+# untouched (the socket layer binds `conn_id` itself).
+app.add_middleware(RequestContextMiddleware)
+
+# #108: tracing must be wired *before* Starlette builds the middleware stack, so it
+# cannot happen inside the lifespan (adding middleware to a started app raises).
+# `init_tracing` is a no-op unless OPAMP_TRACING_ENABLED=true.
+tracing.init_tracing(app)
 
 
 @app.get("/auth/status", tags=["auth"], summary="Check whether admin auth is required")
@@ -678,7 +712,14 @@ async def receive_metrics(request: Request):
             
             agent_id = (service_instance_id or service_name or "").replace("-", "")
             
-            logger.info(f"JSON metrics received: agent_id={agent_id}, found={agent_id and agent_id in AGENT_REGISTRY._agents}")
+            # #108: per-scrape lines are DEBUG. One line per collector per scrape at
+            # INFO is hot-loop noise, and it was the loudest line in a healthy fleet.
+            logger.bind(
+                event="metrics.ingest",
+                agent_id=agent_id,
+                encoding="json",
+                known=bool(agent_id and agent_id in AGENT_REGISTRY._agents),
+            ).debug(f"JSON metrics received: agent_id={agent_id}")
             
             if agent_id and agent_id in AGENT_REGISTRY._agents:
                 metrics_data = {}
@@ -690,7 +731,9 @@ async def receive_metrics(request: Request):
                                 metrics_data[metric.get("name", "")] = val
                 
                 _record_agent_metrics(agent_id, metrics_data)
-                logger.info(f"JSON: Stored metrics for {agent_id}")
+                logger.bind(event="metrics.stored", agent_id=agent_id, encoding="json").debug(
+                    f"JSON: Stored metrics for {agent_id}"
+                )
         else:
             body = await request.body()
             
@@ -710,7 +753,12 @@ async def receive_metrics(request: Request):
             
             agent_id = (service_instance_id or service_name or "").replace("-", "")
             
-            logger.info(f"Protobuf metrics received: agent_id={agent_id}, found={agent_id and agent_id in AGENT_REGISTRY._agents}")
+            logger.bind(
+                event="metrics.ingest",
+                agent_id=agent_id,
+                encoding="protobuf",
+                known=bool(agent_id and agent_id in AGENT_REGISTRY._agents),
+            ).debug(f"Protobuf metrics received: agent_id={agent_id}")
             
             if agent_id and agent_id in AGENT_REGISTRY._agents:
                 metrics_data = {}
@@ -722,11 +770,20 @@ async def receive_metrics(request: Request):
                                 metrics_data[metric.name] = val
                 
                 _record_agent_metrics(agent_id, metrics_data)
-                logger.info(f"Protobuf: Stored metrics for {agent_id}, log_records={metrics_data.get('otelcol_receiver_accepted_log_records')}, all={metrics_data}")
+                # Values, not the whole snapshot: `all=` printed every metric the
+                # collector sent, per scrape, into the log.
+                logger.bind(
+                    event="metrics.stored",
+                    agent_id=agent_id,
+                    encoding="protobuf",
+                    metric_count=len(metrics_data),
+                ).debug(f"Protobuf: Stored {len(metrics_data)} metrics for {agent_id}")
         
         return {"status": "success"}
     except Exception as e:
-        logger.error(f"Failed to process metrics: {e}")
+        logger.bind(event="metrics.ingest_failed", error=str(e)).error(
+            f"Failed to process metrics: {e}"
+        )
         return {"status": "error", "error": str(e)}
 
 
@@ -874,9 +931,28 @@ def _apply_status_report(agent_id: str, agent_dict: Dict[str, Any], persist: boo
     return False
 
 
+MESSAGE_KINDS = (
+    "remoteConfigStatus",
+    "agentDisconnect",
+    "agentDescription",
+    "effectiveConfig",
+    "availableComponents",
+    "packageStatuses",
+    "connectionSettingsRequest",
+    "health",
+)
+
+
+def _message_kinds(agent_dict: Dict[str, Any]) -> List[str]:
+    """The report kinds present in one message, for logs, spans and metrics."""
+    kinds = [key for key in MESSAGE_KINDS if key in agent_dict]
+    return kinds or ["heartbeat"]
+
+
 def _handle_agent_message(
     data: bytes,
     principal: "agent_auth.Principal | None" = None,
+    transport: str = "http",
 ) -> ProcessedMessage:
     """Apply one `AgentToServer` message and build the `ServerToAgent` reply.
 
@@ -888,22 +964,28 @@ def _handle_agent_message(
     credential that does not match the claimed `instance_uid`, or a uid already
     bound to a different principal, raises `AgentAuthError` — before any state is
     read or written, so a refusal can never leave a half-applied report behind.
+
+    `transport` is only for observability (#108): the log line carries it, and the
+    `opamp.message` span records `transport=http|ws`, which is the first question
+    asked when one transport misbehaves and the other does not.
     """
     response = ServerToAgent()
     response.capabilities = 0
-    
+
     if not data:
         response.capabilities = ServerCapabilities.ServerCapabilities_AcceptsStatus
         return ProcessedMessage(response.SerializeToString())
-    
+
     try:
         agent_msg = AgentToServer()
         agent_msg.ParseFromString(data)
     except Exception as e:
-        logger.error(f"Failed to parse OpAMP message: {e}")
+        logger.bind(event="opamp.message.rejected", transport=transport, reason="parse").error(
+            f"Failed to parse OpAMP message: {e}"
+        )
         response.capabilities = ServerCapabilities.ServerCapabilities_AcceptsStatus
         return ProcessedMessage(response.SerializeToString())
-    
+
     agent_id = binascii.hexlify(agent_msg.instance_uid).decode('utf-8')
     agent_dict = MessageToDict(agent_msg)
 
@@ -919,9 +1001,25 @@ def _handle_agent_message(
                 principal=principal.agent_id,
                 claimed=agent_id,
             )
-    
+
+    # Bound here, not per log call: every line written while applying this message
+    # (the offer decision, the audit write, the alert it may trigger) carries the
+    # same `agent_id` without threading it through every function (#108).
+    with logger.contextualize(agent_id=agent_id, transport=transport):
+        return _apply_agent_message(agent_msg, agent_dict, agent_id, principal, transport)
+
+
+def _apply_agent_message(
+    agent_msg: AgentToServer,
+    agent_dict: Dict[str, Any],
+    agent_id: str,
+    principal: "agent_auth.Principal | None",
+    transport: str,
+) -> ProcessedMessage:
+    """The state-mutating half of `_handle_agent_message`, inside the log/trace scope."""
+    response = ServerToAgent()
     response.instance_uid = agent_msg.instance_uid
-    
+
     response.capabilities = (
         ServerCapabilities.ServerCapabilities_AcceptsStatus |
         ServerCapabilities.ServerCapabilities_AcceptsEffectiveConfig |
@@ -936,51 +1034,108 @@ def _handle_agent_message(
     # side of the agent's `AcceptsRemoteConfig`.
     if posture.push_allowed():
         response.capabilities |= ServerCapabilities.ServerCapabilities_OffersRemoteConfig
-    
-    if agent_id not in AGENT_REGISTRY._agents:
-        logger.info(f"New agent connecting: {agent_id}")
-        AGENT_REGISTRY.register(agent_id, AgentState(
-            instance_uid=agent_msg.instance_uid,
-            agent_id=agent_id,
-            capabilities=agent_msg.capabilities,
-            description=agent_dict.get("agentDescription", {}),
-        ), persist=False)
-        response.flags = ServerToAgentFlags.ServerToAgentFlags_ReportFullState
-        update_metrics()
-        
-        send_new_agent_alert(agent_id)
 
-    # One write for the whole message (#109): `_apply_status_report` batches the
-    # field groups and flushes the row at most once, including for a new agent.
-    _apply_status_report(agent_id, agent_dict)
+    existing = AGENT_REGISTRY.get(agent_id)
+    is_new = existing is None
+    health_changed = bool(
+        "health" in agent_dict
+        and existing is not None
+        and existing.healthy != agent_dict["health"].get("healthy", False)
+    )
+    kinds = _message_kinds(agent_dict)
+    accepts_remote = bool(
+        agent_msg.capabilities & AgentCapabilities.AgentCapabilities_AcceptsRemoteConfig
+    )
+    heartbeat = tracing.message_is_heartbeat(
+        agent_dict, is_new=is_new, health_changed=health_changed
+    )
 
-    # #81: react to a FAILED report before deciding what to offer — a poisoned
-    # revision must not be re-sent in the same reply that learned it failed (D6).
-    status_name, reported_hash, error_message = remote_config.parse_status(agent_dict)
-    if status_name:
-        remote_config.note_status(agent_id, status_name, reported_hash, error_message)
-    
-    disconnected = 'agentDisconnect' in agent_dict
-    if disconnected:
-        logger.info(f"Agent disconnecting: {agent_id}")
-        AGENT_REGISTRY.remove(agent_id)
-        PROM_AGENT_HEALTH.remove(agent_id)
-        _METRICS_STORE.delete(agent_id)
-        AGENT_METRICS.pop(agent_id, None)
-        update_metrics()
-    
-    # #81: offer the desired config when (and only when) the agent's reported hash
-    # differs from ours. The agent is authenticated by this point, so the offer can
-    # only ever go to the agent it was written for (D1).
-    if not disconnected and posture.push_allowed():
-        offer = remote_config.offer_for(agent_id, agent_msg.capabilities, agent_dict.get("remoteConfigStatus"))
-        if offer is not None:
-            response.remote_config.CopyFrom(offer)
-            PROM_CONFIG_OFFERS.inc()
+    # Heartbeats are the highest-volume event in the system: a log line at DEBUG and
+    # no span. Everything else is a state change worth one INFO line and one span.
+    if not heartbeat:
+        logger.bind(
+            event="opamp.message",
+            kinds=kinds,
+            new_agent=is_new,
+            health_changed=health_changed,
+        ).info(f"OpAMP message from {agent_id}: {', '.join(kinds)}")
+    else:
+        logger.bind(event="opamp.heartbeat", kinds=kinds).debug(
+            f"heartbeat from {agent_id}"
+        )
 
-    # Last line of defence for #81/#102: nothing may put remote_config on the
-    # wire while the posture says config push is not allowed.
-    posture.scrub_remote_config(response)
+    span_attributes = {
+        "agent_id": agent_id,
+        "instance_uid": agent_id,
+        "transport": transport,
+        "message.kinds": kinds,
+        "agent.capabilities.accepts_remote_config": accepts_remote,
+        "agent.new": is_new,
+    }
+    manager = (
+        nullcontext()
+        if heartbeat
+        else tracing.span("opamp.message", **span_attributes)
+    )
+    with manager as sp:
+        if is_new:
+            logger.bind(event="agent.registered", agent_id=agent_id, transport=transport).info(
+                f"New agent connecting: {agent_id}"
+            )
+            AGENT_REGISTRY.register(agent_id, AgentState(
+                instance_uid=agent_msg.instance_uid,
+                agent_id=agent_id,
+                capabilities=agent_msg.capabilities,
+                description=agent_dict.get("agentDescription", {}),
+            ), persist=False)
+            response.flags = ServerToAgentFlags.ServerToAgentFlags_ReportFullState
+            update_metrics()
+
+            send_new_agent_alert(agent_id)
+
+        # One write for the whole message (#109): `_apply_status_report` batches the
+        # field groups and flushes the row at most once, including for a new agent.
+        _apply_status_report(agent_id, agent_dict)
+
+        # #81: react to a FAILED report before deciding what to offer — a poisoned
+        # revision must not be re-sent in the same reply that learned it failed (D6).
+        status_name, reported_hash, error_message = remote_config.parse_status(agent_dict)
+        if status_name:
+            remote_config.note_status(agent_id, status_name, reported_hash, error_message)
+
+        disconnected = 'agentDisconnect' in agent_dict
+        if disconnected:
+            logger.bind(event="agent.disconnected", agent_id=agent_id, transport=transport).info(
+                f"Agent disconnecting: {agent_id}"
+            )
+            AGENT_REGISTRY.remove(agent_id)
+            PROM_AGENT_HEALTH.remove(agent_id)
+            _METRICS_STORE.delete(agent_id)
+            AGENT_METRICS.pop(agent_id, None)
+            update_metrics()
+
+        # #81: offer the desired config when (and only when) the agent's reported hash
+        # differs from ours. The agent is authenticated by this point, so the offer can
+        # only ever go to the agent it was written for (D1).
+        offered = False
+        if not disconnected and posture.push_allowed():
+            offer = remote_config.offer_for(agent_id, agent_msg.capabilities, agent_dict.get("remoteConfigStatus"))
+            if offer is not None:
+                response.remote_config.CopyFrom(offer)
+                PROM_CONFIG_OFFERS.inc()
+                offered = True
+
+        # Last line of defence for #81/#102: nothing may put remote_config on the
+        # wire while the posture says config push is not allowed.
+        posture.scrub_remote_config(response)
+
+        tracing.set_span_attributes(
+            sp,
+            **{
+                "reply.capabilities": response.capabilities,
+                "reply.remote_config_offered": offered,
+            },
+        )
 
     return ProcessedMessage(
         response.SerializeToString(),
@@ -1013,6 +1168,9 @@ async def opamp_endpoint(request: Request) -> Response:
     client = request.client.host if request.client else ""
     principal, reason = agent_auth.authenticate(request.headers)
     if reason is not None:
+        logger.bind(
+            event="agent.auth.failed", reason=reason, transport="http", client=client
+        ).warning(f"agent credential refused: {reason}")
         agent_auth.record_failure(reason, transport="http", client=client)
         raise HTTPException(
             status_code=401,

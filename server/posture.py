@@ -39,6 +39,7 @@ from __future__ import annotations
 import os
 from typing import Dict, List
 
+import prometheus_client as prom_client
 from fastapi import HTTPException
 from loguru import logger
 
@@ -57,6 +58,35 @@ VALID_AGENT_AUTH_MODES = ("off", "token", "mtls")
 ENFORCED_AGENT_AUTH_MODES: frozenset = frozenset({"token"})
 
 TLS_URL_PREFIXES = ("https://", "wss://")
+
+# ---------------------------------------------------------------- #108 metrics
+#
+# Values that /health already exposes, in a form Prometheus can alert on. The
+# point of `opamp_config_push_insecure` is a pager rule: an override left on in
+# production is otherwise discoverable only by a human reading /health. Gauges are
+# refreshed by `publish_metrics()` at startup (and after a test flips the env),
+# from the pure `metric_values()` dict, so the arithmetic is unit-testable.
+
+PROM_CONFIG_PUSH_ENABLED = prom_client.Gauge(
+    "opamp_config_push_enabled",
+    "Whether remote config push is enabled (1=yes, 0=no)",
+)
+
+PROM_CONFIG_PUSH_INSECURE = prom_client.Gauge(
+    "opamp_config_push_insecure",
+    "Whether config push is enabled on an insecure posture (1=yes: pager condition)",
+)
+
+PROM_POSTURE_REQUIREMENT = prom_client.Gauge(
+    "opamp_security_posture_requirement",
+    "Whether one config-push posture requirement is met (1=met, 0=unmet)",
+    ["requirement"],
+)
+
+PROM_CONFIG_PUSH_GATE_BLOCKED = prom_client.Counter(
+    "opamp_config_push_gate_blocked_total",
+    "Requests refused by the config push gate (feature off or posture insecure)",
+)
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -227,6 +257,32 @@ def insecure() -> bool:
     return config_push_enabled() and bool(unmet_requirements())
 
 
+def metric_values() -> Dict[str, object]:
+    """The posture as metric values: pure, no Prometheus object touched.
+
+    Everything here is already public on `GET /health`; nothing secret is added to
+    the unauthenticated `/metrics` scrape. A requirement that is *not enforced* by
+    this build (mTLS, #94) reports 0, which is the honest answer.
+    """
+    return {
+        "enabled": 1 if config_push_enabled() else 0,
+        "insecure": 1 if insecure() else 0,
+        "requirements": {
+            name: 1 if state["met"] else 0 for name, state in requirements().items()
+        },
+    }
+
+
+def publish_metrics(values: Dict[str, object] | None = None) -> Dict[str, object]:
+    """Push `metric_values()` into the Prometheus gauges. Called once at startup."""
+    values = metric_values() if values is None else values
+    PROM_CONFIG_PUSH_ENABLED.set(values["enabled"])
+    PROM_CONFIG_PUSH_INSECURE.set(values["insecure"])
+    for name, value in values["requirements"].items():
+        PROM_POSTURE_REQUIREMENT.labels(requirement=name).set(value)
+    return values
+
+
 def push_allowed() -> bool:
     """May the server deliver remote config at all?
 
@@ -327,7 +383,13 @@ def assert_startup_posture() -> None:
         return
 
     if allow_insecure_config_push():
-        logger.warning(_override_banner(missing))
+        # Event-named as well as human-readable: this line is the only trace of a
+        # decision that is otherwise invisible unless someone reads /health (#108).
+        logger.bind(
+            event="posture.insecure",
+            unmet=len(missing),
+            requirements=[item.split(":", 1)[0] for item in missing],
+        ).warning(_override_banner(missing))
         return
 
     raise PostureError(missing)
@@ -355,4 +417,12 @@ def config_push_gate() -> None:
     should not be able to tell the surface apart from a typo.
     """
     if not push_allowed():
+        # Counter first: a probe of a disabled surface is exactly the thing nobody
+        # could see before (#108). 404 still gives an attacker no signal.
+        PROM_CONFIG_PUSH_GATE_BLOCKED.inc()
+        logger.bind(
+            event="config_push.gate_blocked",
+            enabled=config_push_enabled(),
+            insecure=insecure(),
+        ).info("config push route refused: config push is disabled")
         raise HTTPException(status_code=404, detail=GATE_DETAIL)

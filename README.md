@@ -685,6 +685,54 @@ line carries the silence, the timeout and the interval.
 | `CONFIG_MAX_BYTES` | `1048576` | Maximum size of one pushed config map (bytes). A collector config is kilobytes |
 | `CONFIG_RETENTION_DAYS` | `30` | Superseded config revisions keep hash/author/timestamps but lose the body after this long. The current revision is never pruned. `0` keeps everything |
 | `OPAMP_ALLOW_INSECURE_CONFIG_PUSH` | `false` | **Local development only.** Starts with config push enabled on an insecure posture: red warning, `insecure: true` in `/health`, permanent UI banner. See [Before you expose this server](#before-you-expose-this-server) |
+| `LOG_FORMAT` | `json` (non-TTY) / `text` (TTY) | Log encoding. JSON is one object per line with `event`, `request_id`, `agent_id`, `trace_id`/`span_id` where relevant. `text` stays readable for local dev |
+| `LOG_LEVEL` | `INFO` | Minimum level. Per-request lines for `/health`, `/metrics` and `/v1/metrics` are `DEBUG`; heartbeats log at `DEBUG` |
+| `LOG_FILE` | *(empty)* | Optional rotated, gzip-compressed file sink (`LOG_FILE_ROTATION`, `LOG_FILE_RETENTION` tune it) |
+| `OPAMP_TRACING_ENABLED` | `false` | Export OTLP spans (`opamp.message`, `opamp.ws.connection`, `opa.evaluate`, `alert.send`, plus HTTP spans). Requires `pip install -e ".[observability]"`; off = no provider, no exporter, no spans |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | *(unset)* | Standard OTLP/HTTP collector endpoint, used when tracing is on |
+| `OTEL_SERVICE_NAME` | `opamp-server` | OTel resource `service.name` |
+| `OTEL_TRACES_SAMPLER` / `_ARG` | `parentbased_always_on` | Sampler (`always_on`, `always_off`, `traceidratio`, `parentbased_*`) and its ratio |
+
+### Observability
+
+**Structured logs (#108).** Every line is one JSON object in a container and readable
+text on a terminal. Log lines name an **event**, not just a sentence, so a
+log-based alert needs no regex:
+
+```bash
+docker logs opamp-server | grep '"event":"admin.auth.failed"'
+docker logs opamp-server | grep '"event":"config_push.gate_blocked"'
+docker logs opamp-server | grep '"event":"posture.insecure"'
+```
+
+Every HTTP request gets an `X-Request-ID` (inbound ids are reused when well-formed,
+generated otherwise), echoed on the response and bound to every line written while
+the request is in flight. One `http.request` line per request at `INFO`;
+`/health`, `/metrics` and `/v1/metrics` log at `DEBUG`. Heartbeats and their metric
+scrapes are `DEBUG` too — the state transitions are `INFO`.
+Logs are scrubbed by the same #98 filter as everything else: no admin password,
+agent token, `Authorization` header, OpAMP body or config body reaches a sink,
+including a traceback.
+
+**Posture metrics.** In addition to the fleet gauges, `/metrics` exposes:
+
+| Metric | Type | Why |
+|---|---|---|
+| `opamp_config_push_enabled` | gauge 0/1 | Is the push surface on at all |
+| `opamp_config_push_insecure` | gauge 0/1 | **Pager condition**: push is on with an unsafe posture (the #96 override) |
+| `opamp_security_posture_requirement{requirement="admin_auth\|agent_auth\|tls\|audit\|config_at_rest"}` | gauge 1/0 | Which requirement is unmet |
+| `opamp_config_push_gate_blocked_total` | counter | Someone probed `/config/*` while push was off or insecure |
+| `opamp_admin_auth_failures_total{reason}` | counter | Brute force / misconfigured client |
+
+Values are already public on `/health`; nothing secret is added to the scrape.
+
+**Traces (opt-in).** `pip install -e ".[observability]"` then
+`OPAMP_TRACING_ENABLED=true` and point `OTEL_EXPORTER_OTLP_ENDPOINT` at your
+collector. Spans: `opamp.message` (one per state-changing message, both transports),
+`opamp.ws.connection` (one per socket, with close code), `opa.evaluate`,
+`alert.send`, plus HTTP spans from the FastAPI instrumentor. Attributes carry ids,
+counts and outcomes — never a config body, token or webhook URL query. With tracing
+off, no provider or exporter is constructed. **No span per heartbeat.**
 
 ## Alerts (Webhook)
 
@@ -1130,20 +1178,23 @@ except OpampApiError as e:
 ```bash
 pip install -r requirements.txt
 pip install -r requirements-ui.txt
-pytest tests/ -v
+pip install -e ".[dev]"
+pytest tests/ -v                                   # logging defaults to JSON in CI
+LOG_FORMAT=text pytest tests/ -v                   # readable local output
+pip install -e ".[dev,observability]" && OPAMP_TRACING_ENABLED=true pytest tests/ -v
 ```
 
 ## Project Structure
 
 ```
 opamp-server-py/
-├── server/          # FastAPI server (audit.py = append-only audit seam, #97)
+├── server/          # FastAPI server (logging.py/tracing.py = observability, #108)
 ├── client/          # opamp_client — shared HTTP client library
 ├── cli/             # opampctl CLI (typer, JSON output)
 ├── mcp_server/      # FastMCP server (stdio/SSE) for AI agents
 ├── ui/              # Streamlit dashboard
 ├── proto/           # Protobuf definitions
-├── tests/           # Tests
+├── tests/           # Tests (fake_agent.py = scriptable OpAMP Supervisor, #107)
 ├── collector/       # Sample configs
 ├── docker/          # TLS terminator examples (nginx, Caddy) for #96
 └── data/            # SQLite DB (+ generated admin_password)

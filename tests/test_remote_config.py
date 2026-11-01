@@ -152,7 +152,9 @@ def test_multiple_objects_and_non_empty_keys_are_supported():
         ({"": {"content_type": "text/yaml"}}, "'body' is required"),
         ({"": {"body": 42}}, "'body' is required"),
         ({"": {"body": "x", "content_type": 1}}, "'content_type' must be a string"),
-        ({"": {"body": "x", "role": "main"}}, "'role' is not supported"),
+        # The proto expresses `role` (v0.20.0) but the push pipeline cannot carry it
+        # yet: accepting it would deliver an object the approver never saw (#68).
+        ({"": {"body": "x", "role": "main"}}, "'role' cannot be carried"),
     ],
 )
 def test_invalid_shapes_are_rejected_with_a_reason(payload, fragment):

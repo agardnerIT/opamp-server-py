@@ -1,7 +1,8 @@
 from google.protobuf.internal import containers as _containers
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
-from typing import ClassVar as _ClassVar, Iterable as _Iterable, Mapping as _Mapping, Optional as _Optional, Union as _Union
+from collections.abc import Iterable as _Iterable, Mapping as _Mapping
+from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
@@ -21,7 +22,7 @@ class AnyValue(_message.Message):
     array_value: ArrayValue
     kvlist_value: KeyValueList
     bytes_value: bytes
-    def __init__(self, string_value: _Optional[str] = ..., bool_value: bool = ..., int_value: _Optional[int] = ..., double_value: _Optional[float] = ..., array_value: _Optional[_Union[ArrayValue, _Mapping]] = ..., kvlist_value: _Optional[_Union[KeyValueList, _Mapping]] = ..., bytes_value: _Optional[bytes] = ...) -> None: ...
+    def __init__(self, string_value: _Optional[str] = ..., bool_value: _Optional[bool] = ..., int_value: _Optional[int] = ..., double_value: _Optional[float] = ..., array_value: _Optional[_Union[ArrayValue, _Mapping]] = ..., kvlist_value: _Optional[_Union[KeyValueList, _Mapping]] = ..., bytes_value: _Optional[bytes] = ...) -> None: ...
 
 class ArrayValue(_message.Message):
     __slots__ = ("values",)

@@ -1,9 +1,10 @@
-import anyvalue_pb2 as _anyvalue_pb2
+from proto import anyvalue_pb2 as _anyvalue_pb2
 from google.protobuf.internal import containers as _containers
 from google.protobuf.internal import enum_type_wrapper as _enum_type_wrapper
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
-from typing import ClassVar as _ClassVar, Iterable as _Iterable, Mapping as _Mapping, Optional as _Optional, Union as _Union
+from collections.abc import Iterable as _Iterable, Mapping as _Mapping
+from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
@@ -62,6 +63,14 @@ class AgentCapabilities(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     AgentCapabilities_ReportsRemoteConfig: _ClassVar[AgentCapabilities]
     AgentCapabilities_ReportsHeartbeat: _ClassVar[AgentCapabilities]
     AgentCapabilities_ReportsAvailableComponents: _ClassVar[AgentCapabilities]
+    AgentCapabilities_ReportsConnectionSettingsStatus: _ClassVar[AgentCapabilities]
+
+class ConnectionSettingsStatuses(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
+    __slots__ = ()
+    ConnectionSettingsStatuses_UNSET: _ClassVar[ConnectionSettingsStatuses]
+    ConnectionSettingsStatuses_APPLIED: _ClassVar[ConnectionSettingsStatuses]
+    ConnectionSettingsStatuses_APPLYING: _ClassVar[ConnectionSettingsStatuses]
+    ConnectionSettingsStatuses_FAILED: _ClassVar[ConnectionSettingsStatuses]
 
 class RemoteConfigStatuses(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
@@ -112,6 +121,11 @@ AgentCapabilities_ReportsHealth: AgentCapabilities
 AgentCapabilities_ReportsRemoteConfig: AgentCapabilities
 AgentCapabilities_ReportsHeartbeat: AgentCapabilities
 AgentCapabilities_ReportsAvailableComponents: AgentCapabilities
+AgentCapabilities_ReportsConnectionSettingsStatus: AgentCapabilities
+ConnectionSettingsStatuses_UNSET: ConnectionSettingsStatuses
+ConnectionSettingsStatuses_APPLIED: ConnectionSettingsStatuses
+ConnectionSettingsStatuses_APPLYING: ConnectionSettingsStatuses
+ConnectionSettingsStatuses_FAILED: ConnectionSettingsStatuses
 RemoteConfigStatuses_UNSET: RemoteConfigStatuses
 RemoteConfigStatuses_APPLIED: RemoteConfigStatuses
 RemoteConfigStatuses_APPLYING: RemoteConfigStatuses
@@ -123,7 +137,7 @@ PackageStatusEnum_InstallFailed: PackageStatusEnum
 PackageStatusEnum_Downloading: PackageStatusEnum
 
 class AgentToServer(_message.Message):
-    __slots__ = ("instance_uid", "sequence_num", "agent_description", "capabilities", "health", "effective_config", "remote_config_status", "package_statuses", "agent_disconnect", "flags", "connection_settings_request", "custom_capabilities", "custom_message", "available_components")
+    __slots__ = ("instance_uid", "sequence_num", "agent_description", "capabilities", "health", "effective_config", "remote_config_status", "package_statuses", "agent_disconnect", "flags", "connection_settings_request", "custom_capabilities", "custom_message", "available_components", "connection_settings_status")
     INSTANCE_UID_FIELD_NUMBER: _ClassVar[int]
     SEQUENCE_NUM_FIELD_NUMBER: _ClassVar[int]
     AGENT_DESCRIPTION_FIELD_NUMBER: _ClassVar[int]
@@ -138,6 +152,7 @@ class AgentToServer(_message.Message):
     CUSTOM_CAPABILITIES_FIELD_NUMBER: _ClassVar[int]
     CUSTOM_MESSAGE_FIELD_NUMBER: _ClassVar[int]
     AVAILABLE_COMPONENTS_FIELD_NUMBER: _ClassVar[int]
+    CONNECTION_SETTINGS_STATUS_FIELD_NUMBER: _ClassVar[int]
     instance_uid: bytes
     sequence_num: int
     agent_description: AgentDescription
@@ -152,7 +167,8 @@ class AgentToServer(_message.Message):
     custom_capabilities: CustomCapabilities
     custom_message: CustomMessage
     available_components: AvailableComponents
-    def __init__(self, instance_uid: _Optional[bytes] = ..., sequence_num: _Optional[int] = ..., agent_description: _Optional[_Union[AgentDescription, _Mapping]] = ..., capabilities: _Optional[int] = ..., health: _Optional[_Union[ComponentHealth, _Mapping]] = ..., effective_config: _Optional[_Union[EffectiveConfig, _Mapping]] = ..., remote_config_status: _Optional[_Union[RemoteConfigStatus, _Mapping]] = ..., package_statuses: _Optional[_Union[PackageStatuses, _Mapping]] = ..., agent_disconnect: _Optional[_Union[AgentDisconnect, _Mapping]] = ..., flags: _Optional[int] = ..., connection_settings_request: _Optional[_Union[ConnectionSettingsRequest, _Mapping]] = ..., custom_capabilities: _Optional[_Union[CustomCapabilities, _Mapping]] = ..., custom_message: _Optional[_Union[CustomMessage, _Mapping]] = ..., available_components: _Optional[_Union[AvailableComponents, _Mapping]] = ...) -> None: ...
+    connection_settings_status: ConnectionSettingsStatus
+    def __init__(self, instance_uid: _Optional[bytes] = ..., sequence_num: _Optional[int] = ..., agent_description: _Optional[_Union[AgentDescription, _Mapping]] = ..., capabilities: _Optional[int] = ..., health: _Optional[_Union[ComponentHealth, _Mapping]] = ..., effective_config: _Optional[_Union[EffectiveConfig, _Mapping]] = ..., remote_config_status: _Optional[_Union[RemoteConfigStatus, _Mapping]] = ..., package_statuses: _Optional[_Union[PackageStatuses, _Mapping]] = ..., agent_disconnect: _Optional[_Union[AgentDisconnect, _Mapping]] = ..., flags: _Optional[int] = ..., connection_settings_request: _Optional[_Union[ConnectionSettingsRequest, _Mapping]] = ..., custom_capabilities: _Optional[_Union[CustomCapabilities, _Mapping]] = ..., custom_message: _Optional[_Union[CustomMessage, _Mapping]] = ..., available_components: _Optional[_Union[AvailableComponents, _Mapping]] = ..., connection_settings_status: _Optional[_Union[ConnectionSettingsStatus, _Mapping]] = ...) -> None: ...
 
 class AgentDisconnect(_message.Message):
     __slots__ = ()
@@ -233,29 +249,37 @@ class ServerToAgent(_message.Message):
     def __init__(self, instance_uid: _Optional[bytes] = ..., error_response: _Optional[_Union[ServerErrorResponse, _Mapping]] = ..., remote_config: _Optional[_Union[AgentRemoteConfig, _Mapping]] = ..., connection_settings: _Optional[_Union[ConnectionSettingsOffers, _Mapping]] = ..., packages_available: _Optional[_Union[PackagesAvailable, _Mapping]] = ..., flags: _Optional[int] = ..., capabilities: _Optional[int] = ..., agent_identification: _Optional[_Union[AgentIdentification, _Mapping]] = ..., command: _Optional[_Union[ServerToAgentCommand, _Mapping]] = ..., custom_capabilities: _Optional[_Union[CustomCapabilities, _Mapping]] = ..., custom_message: _Optional[_Union[CustomMessage, _Mapping]] = ...) -> None: ...
 
 class OpAMPConnectionSettings(_message.Message):
-    __slots__ = ("destination_endpoint", "headers", "certificate", "heartbeat_interval_seconds")
+    __slots__ = ("destination_endpoint", "headers", "certificate", "heartbeat_interval_seconds", "tls", "proxy")
     DESTINATION_ENDPOINT_FIELD_NUMBER: _ClassVar[int]
     HEADERS_FIELD_NUMBER: _ClassVar[int]
     CERTIFICATE_FIELD_NUMBER: _ClassVar[int]
     HEARTBEAT_INTERVAL_SECONDS_FIELD_NUMBER: _ClassVar[int]
+    TLS_FIELD_NUMBER: _ClassVar[int]
+    PROXY_FIELD_NUMBER: _ClassVar[int]
     destination_endpoint: str
     headers: Headers
     certificate: TLSCertificate
     heartbeat_interval_seconds: int
-    def __init__(self, destination_endpoint: _Optional[str] = ..., headers: _Optional[_Union[Headers, _Mapping]] = ..., certificate: _Optional[_Union[TLSCertificate, _Mapping]] = ..., heartbeat_interval_seconds: _Optional[int] = ...) -> None: ...
+    tls: TLSConnectionSettings
+    proxy: ProxyConnectionSettings
+    def __init__(self, destination_endpoint: _Optional[str] = ..., headers: _Optional[_Union[Headers, _Mapping]] = ..., certificate: _Optional[_Union[TLSCertificate, _Mapping]] = ..., heartbeat_interval_seconds: _Optional[int] = ..., tls: _Optional[_Union[TLSConnectionSettings, _Mapping]] = ..., proxy: _Optional[_Union[ProxyConnectionSettings, _Mapping]] = ...) -> None: ...
 
 class TelemetryConnectionSettings(_message.Message):
-    __slots__ = ("destination_endpoint", "headers", "certificate")
+    __slots__ = ("destination_endpoint", "headers", "certificate", "tls", "proxy")
     DESTINATION_ENDPOINT_FIELD_NUMBER: _ClassVar[int]
     HEADERS_FIELD_NUMBER: _ClassVar[int]
     CERTIFICATE_FIELD_NUMBER: _ClassVar[int]
+    TLS_FIELD_NUMBER: _ClassVar[int]
+    PROXY_FIELD_NUMBER: _ClassVar[int]
     destination_endpoint: str
     headers: Headers
     certificate: TLSCertificate
-    def __init__(self, destination_endpoint: _Optional[str] = ..., headers: _Optional[_Union[Headers, _Mapping]] = ..., certificate: _Optional[_Union[TLSCertificate, _Mapping]] = ...) -> None: ...
+    tls: TLSConnectionSettings
+    proxy: ProxyConnectionSettings
+    def __init__(self, destination_endpoint: _Optional[str] = ..., headers: _Optional[_Union[Headers, _Mapping]] = ..., certificate: _Optional[_Union[TLSCertificate, _Mapping]] = ..., tls: _Optional[_Union[TLSConnectionSettings, _Mapping]] = ..., proxy: _Optional[_Union[ProxyConnectionSettings, _Mapping]] = ...) -> None: ...
 
 class OtherConnectionSettings(_message.Message):
-    __slots__ = ("destination_endpoint", "headers", "certificate", "other_settings")
+    __slots__ = ("destination_endpoint", "headers", "certificate", "other_settings", "tls", "proxy")
     class OtherSettingsEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -267,11 +291,39 @@ class OtherConnectionSettings(_message.Message):
     HEADERS_FIELD_NUMBER: _ClassVar[int]
     CERTIFICATE_FIELD_NUMBER: _ClassVar[int]
     OTHER_SETTINGS_FIELD_NUMBER: _ClassVar[int]
+    TLS_FIELD_NUMBER: _ClassVar[int]
+    PROXY_FIELD_NUMBER: _ClassVar[int]
     destination_endpoint: str
     headers: Headers
     certificate: TLSCertificate
     other_settings: _containers.ScalarMap[str, str]
-    def __init__(self, destination_endpoint: _Optional[str] = ..., headers: _Optional[_Union[Headers, _Mapping]] = ..., certificate: _Optional[_Union[TLSCertificate, _Mapping]] = ..., other_settings: _Optional[_Mapping[str, str]] = ...) -> None: ...
+    tls: TLSConnectionSettings
+    proxy: ProxyConnectionSettings
+    def __init__(self, destination_endpoint: _Optional[str] = ..., headers: _Optional[_Union[Headers, _Mapping]] = ..., certificate: _Optional[_Union[TLSCertificate, _Mapping]] = ..., other_settings: _Optional[_Mapping[str, str]] = ..., tls: _Optional[_Union[TLSConnectionSettings, _Mapping]] = ..., proxy: _Optional[_Union[ProxyConnectionSettings, _Mapping]] = ...) -> None: ...
+
+class TLSConnectionSettings(_message.Message):
+    __slots__ = ("ca_pem_contents", "include_system_ca_certs_pool", "insecure_skip_verify", "min_version", "max_version", "cipher_suites")
+    CA_PEM_CONTENTS_FIELD_NUMBER: _ClassVar[int]
+    INCLUDE_SYSTEM_CA_CERTS_POOL_FIELD_NUMBER: _ClassVar[int]
+    INSECURE_SKIP_VERIFY_FIELD_NUMBER: _ClassVar[int]
+    MIN_VERSION_FIELD_NUMBER: _ClassVar[int]
+    MAX_VERSION_FIELD_NUMBER: _ClassVar[int]
+    CIPHER_SUITES_FIELD_NUMBER: _ClassVar[int]
+    ca_pem_contents: str
+    include_system_ca_certs_pool: bool
+    insecure_skip_verify: bool
+    min_version: str
+    max_version: str
+    cipher_suites: _containers.RepeatedScalarFieldContainer[str]
+    def __init__(self, ca_pem_contents: _Optional[str] = ..., include_system_ca_certs_pool: _Optional[bool] = ..., insecure_skip_verify: _Optional[bool] = ..., min_version: _Optional[str] = ..., max_version: _Optional[str] = ..., cipher_suites: _Optional[_Iterable[str]] = ...) -> None: ...
+
+class ProxyConnectionSettings(_message.Message):
+    __slots__ = ("url", "connect_headers")
+    URL_FIELD_NUMBER: _ClassVar[int]
+    CONNECT_HEADERS_FIELD_NUMBER: _ClassVar[int]
+    url: str
+    connect_headers: Headers
+    def __init__(self, url: _Optional[str] = ..., connect_headers: _Optional[_Union[Headers, _Mapping]] = ...) -> None: ...
 
 class Headers(_message.Message):
     __slots__ = ("headers",)
@@ -390,7 +442,7 @@ class AgentDescription(_message.Message):
     def __init__(self, identifying_attributes: _Optional[_Iterable[_Union[_anyvalue_pb2.KeyValue, _Mapping]]] = ..., non_identifying_attributes: _Optional[_Iterable[_Union[_anyvalue_pb2.KeyValue, _Mapping]]] = ...) -> None: ...
 
 class ComponentHealth(_message.Message):
-    __slots__ = ("healthy", "start_time_unix_nano", "last_error", "status", "status_time_unix_nano", "component_health_map")
+    __slots__ = ("healthy", "start_time_unix_nano", "last_error", "status", "status_time_unix_nano", "component_health_map", "attributes")
     class ComponentHealthMapEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -404,13 +456,15 @@ class ComponentHealth(_message.Message):
     STATUS_FIELD_NUMBER: _ClassVar[int]
     STATUS_TIME_UNIX_NANO_FIELD_NUMBER: _ClassVar[int]
     COMPONENT_HEALTH_MAP_FIELD_NUMBER: _ClassVar[int]
+    ATTRIBUTES_FIELD_NUMBER: _ClassVar[int]
     healthy: bool
     start_time_unix_nano: int
     last_error: str
     status: str
     status_time_unix_nano: int
     component_health_map: _containers.MessageMap[str, ComponentHealth]
-    def __init__(self, healthy: bool = ..., start_time_unix_nano: _Optional[int] = ..., last_error: _Optional[str] = ..., status: _Optional[str] = ..., status_time_unix_nano: _Optional[int] = ..., component_health_map: _Optional[_Mapping[str, ComponentHealth]] = ...) -> None: ...
+    attributes: _containers.RepeatedCompositeFieldContainer[_anyvalue_pb2.KeyValue]
+    def __init__(self, healthy: _Optional[bool] = ..., start_time_unix_nano: _Optional[int] = ..., last_error: _Optional[str] = ..., status: _Optional[str] = ..., status_time_unix_nano: _Optional[int] = ..., component_health_map: _Optional[_Mapping[str, ComponentHealth]] = ..., attributes: _Optional[_Iterable[_Union[_anyvalue_pb2.KeyValue, _Mapping]]] = ...) -> None: ...
 
 class EffectiveConfig(_message.Message):
     __slots__ = ("config_map",)
@@ -427,6 +481,16 @@ class RemoteConfigStatus(_message.Message):
     status: RemoteConfigStatuses
     error_message: str
     def __init__(self, last_remote_config_hash: _Optional[bytes] = ..., status: _Optional[_Union[RemoteConfigStatuses, str]] = ..., error_message: _Optional[str] = ...) -> None: ...
+
+class ConnectionSettingsStatus(_message.Message):
+    __slots__ = ("last_connection_settings_hash", "status", "error_message")
+    LAST_CONNECTION_SETTINGS_HASH_FIELD_NUMBER: _ClassVar[int]
+    STATUS_FIELD_NUMBER: _ClassVar[int]
+    ERROR_MESSAGE_FIELD_NUMBER: _ClassVar[int]
+    last_connection_settings_hash: bytes
+    status: ConnectionSettingsStatuses
+    error_message: str
+    def __init__(self, last_connection_settings_hash: _Optional[bytes] = ..., status: _Optional[_Union[ConnectionSettingsStatuses, str]] = ..., error_message: _Optional[str] = ...) -> None: ...
 
 class PackageStatuses(_message.Message):
     __slots__ = ("packages", "server_provided_all_packages_hash", "error_message")
@@ -494,19 +558,21 @@ class AgentConfigMap(_message.Message):
         KEY_FIELD_NUMBER: _ClassVar[int]
         VALUE_FIELD_NUMBER: _ClassVar[int]
         key: str
-        value: AgentConfigFile
-        def __init__(self, key: _Optional[str] = ..., value: _Optional[_Union[AgentConfigFile, _Mapping]] = ...) -> None: ...
+        value: AgentConfigObject
+        def __init__(self, key: _Optional[str] = ..., value: _Optional[_Union[AgentConfigObject, _Mapping]] = ...) -> None: ...
     CONFIG_MAP_FIELD_NUMBER: _ClassVar[int]
-    config_map: _containers.MessageMap[str, AgentConfigFile]
-    def __init__(self, config_map: _Optional[_Mapping[str, AgentConfigFile]] = ...) -> None: ...
+    config_map: _containers.MessageMap[str, AgentConfigObject]
+    def __init__(self, config_map: _Optional[_Mapping[str, AgentConfigObject]] = ...) -> None: ...
 
-class AgentConfigFile(_message.Message):
-    __slots__ = ("body", "content_type")
+class AgentConfigObject(_message.Message):
+    __slots__ = ("body", "content_type", "role")
     BODY_FIELD_NUMBER: _ClassVar[int]
     CONTENT_TYPE_FIELD_NUMBER: _ClassVar[int]
+    ROLE_FIELD_NUMBER: _ClassVar[int]
     body: bytes
     content_type: str
-    def __init__(self, body: _Optional[bytes] = ..., content_type: _Optional[str] = ...) -> None: ...
+    role: str
+    def __init__(self, body: _Optional[bytes] = ..., content_type: _Optional[str] = ..., role: _Optional[str] = ...) -> None: ...
 
 class CustomCapabilities(_message.Message):
     __slots__ = ("capabilities",)

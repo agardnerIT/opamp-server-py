@@ -877,13 +877,15 @@ def check_shape(
             verdict.add_error(key, "'content_type' must be a string")
             continue
         if "role" in entry:
-            # The v0.20.0 `AgentConfigObject.role` field is not in this repo's proto
-            # yet (#66). Silently dropping it would accept a config and deliver
-            # something else.
+            # The proto gained `AgentConfigObject.role` in v0.20.0 (#66), but the rest
+            # of the push pipeline (canonical hash, delivery, API round-trip) still
+            # carries body+content_type only. Accepting `role` here would report a
+            # successful push and deliver a different object than the one approved.
             verdict.add_error(
                 key,
-                "'role' is not supported by this build's protocol version; "
-                "it arrives with the v0.20.0 proto sync (#66)",
+                "'role' cannot be carried by the config push pipeline yet (see #68)",
+                "omit 'role' until the push pipeline round-trips it; dropping it "
+                "silently would deliver a config the approver never saw",
             )
             continue
         try:

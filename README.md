@@ -27,6 +27,38 @@ Want to learn more about OpAMP? [Read the spec](https://opentelemetry.io/docs/sp
                                   └───────────────────────┘
 ```
 
+## Protocol definitions (`proto/`)
+
+The wire format lives in [`proto/opamp.proto`](proto/opamp.proto) and
+[`proto/anyvalue.proto`](proto/anyvalue.proto), synced to
+[opamp-spec **v0.20.0**](https://github.com/open-telemetry/opamp-spec/tree/v0.20.0/proto/opamp/v1).
+The Python stubs (`proto/*_pb2.py`, `proto/*_pb2.pyi`) are generated and committed.
+
+Two deliberate differences from upstream:
+
+- **Flat layout.** Files stay in `proto/` rather than `proto/opamp/v1/`, so `opamp.proto`
+  imports `"proto/anyvalue.proto"` instead of `"opamp/v1/anyvalue.proto"`. That is what
+  makes the stubs import each other as `from proto import anyvalue_pb2` and every call
+  site (`server/`, `cli/`, `tests/`) keep using the `proto.opamp_pb2` path. Nothing on the
+  wire changes: protobuf does not transmit package, file or message names.
+- **Generated with protoc 34.1**, so the stubs refuse to import on a protobuf runtime older
+  than 7.34.1 (`requirements.txt` pins that floor). Regenerating with a newer protoc
+  raises the floor — bump the requirement in the same commit.
+
+Regenerate after editing a `.proto`:
+
+```bash
+./scripts/generate_proto.sh      # prints the expected protoc release if it is missing
+git diff --stat -- proto/        # a clean tree means the stubs were not stale
+python -m pytest tests/test_proto_sync.py
+```
+
+`tests/test_proto_sync.py` is the guard rail: it pins the proto package, every
+pre-existing field number, the byte-for-byte encoding of a pre-v0.20.0 message, and the
+messages v0.20.0 added (`AgentConfigObject.role`, `ComponentHealth.attributes`). A
+renumbered field is invisible in review — protobuf happily parses the old bytes into the
+new field — so the test is the only thing that catches it.
+
 ## Quick Start
 
 ### Docker Compose (Recommended)
@@ -560,7 +592,9 @@ client under-reports server capacity — use `BENCH_CLIENTS` to spread the load.
 | `SERVER_HTTP_SCHEME` | `http` | HTTP scheme |
 | `SERVER_ADDRESS` | `localhost` | Server bind address |
 | `SERVER_PORT` | `4320` | Server port |
-| `AGENT_TIMEOUT_SECONDS` | `60` | Seconds before stale agent removed |
+| `AGENT_TIMEOUT_SECONDS` | `180` | Floor on the silence before an agent is removed (#69). An agent reporting more slowly than this is kept for `margin × its observed interval`, so a long `polling_interval` does not flap it |
+| `AGENT_TIMEOUT_INTERVAL_MARGIN` | `3` | Multiplier on the agent's learned reporting interval: a silent agent is dropped after ~3 missed polls. `GET /agent/{id}` reports the resulting `stale_timeout_seconds` |
+| `AGENT_FIRST_CONTACT_SECONDS` | `900` | Silence budget for an agent that has not reported twice yet, when its interval is still unknown |
 | `DATA_DIR` | `data` | SQLite database directory |
 | `ADMIN_PASSWORD` | *(empty)* | Admin password for privileged endpoints (see [API](#api-reference)). Empty = read-only mode; set `ADMIN_PASSWORD_FILE` or `OPAMP_ADMIN_AUTOGENERATE_PASSWORD` instead if you prefer |
 | `ADMIN_PASSWORD_FILE` | *(empty)* | Read the admin password from a file (secret mount) instead of the environment |

@@ -458,6 +458,10 @@ opampctl --password "$ADMIN_PASSWORD" config apply --file collector.yaml \
 
 # 5. Withdraw: an empty config map, which tells the agent to run its local config
 opampctl --password "$ADMIN_PASSWORD" agents config withdraw <agent-id>
+
+# 6. Deliver now: re-send the active revision over the agent's live connection
+#    (no new revision, no approval — a latency optimisation, not a new decision)
+opampctl --password "$ADMIN_PASSWORD" agents config deliver <agent-id>
 ```
 
 How delivery works:
@@ -470,6 +474,36 @@ How delivery works:
   last_remote_config_hash`) with its own. Equal → nothing is sent. Different →
   the reply carries `remote_config`. That is the spec's reconciliation rule and
   what stops a re-push loop.
+- **Desired state, not a command** (#102, epic #93 D5). The revision is stored
+  once and delivered when the agent's hash differs. A live WebSocket connection
+  only removes the wait for the next report: the server hands the frame to that
+  connection immediately. There is one decision function behind both transports,
+  so a push can never deliver something a poll would refuse.
+- Every push response carries a `delivery` object instead of a promise:
+
+  | `delivery.state` | Meaning |
+  |---|---|
+  | `delivered` | Handed to the agent's live WebSocket connection (`channel: "push"`) |
+  | `queued` | No live connection, throttled, or refused — it arrives on the agent's next status report (`delivery.detail` says when) |
+  | `unchanged` | Nothing to deliver; `delivery.reason` says why (`reported_hash_matches`, `revision_not_deliverable`, `attempts_exhausted`, `agent_does_not_accept`, …) |
+
+  Nothing is ever called **applied** until the agent reports `APPLIED` for our
+  hash. `GET /agent/{id}/config` → `assignment.state` is the same vocabulary,
+  derived: `none | queued | delivered | applied | failed | poisoned | unconfirmed`.
+- Delivery is recorded when the frame is **written**, not when it is queued: a
+  dropped or superseded frame consumes no attempt, so the next report re-offers
+  it. That is what makes a bounded send queue safe.
+- A rollout cannot starve heartbeats on a shared socket: config frames ride a
+  per-connection token bucket (`CONFIG_PUSH_RATE_PER_SECOND`,
+  `CONFIG_PUSH_BURST`) plus a global in-flight cap
+  (`CONFIG_PUSH_MAX_CONCURRENT`), and a throttled frame is simply `queued`.
+  `opamp_ws_push_sent_total{outcome}` and `opamp_ws_config_pending` make that
+  visible; `opamp_config_delivery_latency_seconds{channel}` measures written →
+  `APPLIED`.
+- `opampctl agents config deliver <agent-id>` (or `POST
+  /agent/{id}/config/deliver`) re-delivers the **already approved** revision now.
+  It moves no pointer and needs only `operator`, because there is nothing to
+  approve — it is the manual lever for "the queue dropped that frame".
 - **Never retried automatically.** A `FAILED` status for our revision poisons it:
   it is surfaced in the API, the UI and the audit log (`config.apply.failed`), and
   will not be sent again. Push a new revision or roll back — a human decision,
@@ -672,7 +706,11 @@ line carries the silence, the timeout and the interval.
 | `CORS_ORIGINS` | `*` | Comma-separated list of allowed CORS origins (browser clients) |
 | `OPAMP_WS_ENABLED` | `false` | Enable the WebSocket transport on `/v1/opamp` (see [Transports](#transports)) |
 | `OPAMP_MAX_MESSAGE_BYTES` | `67108864` | Max OpAMP message size (64 MiB), varint header included |
-| `OPAMP_WS_OUTBOUND_QUEUE` | `32` | Per-connection WebSocket send queue depth; oldest is dropped when full |
+| `OPAMP_WS_OUTBOUND_QUEUE` | `32` | Per-connection WebSocket send queue depth; oldest is dropped when full. A dropped config frame is re-sent by reconciliation, never counted as a delivery (#102) |
+| `CONFIG_PUSH_RATE_PER_SECOND` | `20` | Config frames per second allowed on one WebSocket connection. Over the limit the push is `queued` (delivered on the next report), never blocked |
+| `CONFIG_PUSH_BURST` | `20` | Burst allowance per connection before the rate applies |
+| `CONFIG_PUSH_MAX_CONCURRENT` | `50` | Global cap on config frames queued but not yet written; over it, pushes degrade to `queued` |
+| `CONFIG_PUSH_WAIT_SECONDS` | `2` | How long a route waits to hand a push to a live connection's event loop before answering `queued` |
 | `OPAMP_CONFIG_PUSH_ENABLED` | `false` | Remote config push master switch. Off = push routes 404, no `remote_config` is ever sent. On = the server refuses to start unless the posture below is secure |
 | `OPAMP_AGENT_AUTH` | `off` | Agent authentication on `/v1/opamp`: `off` \| `token` \| `mtls`. `token` requires `Authorization: Bearer <token>` per agent (see [Agent authentication](#agent-authentication-agent--server)); `mtls` is reported but not enforced by this build. `off` logs a startup warning, and config push refuses to start without `token` |
 | `PUBLIC_URL` | *(empty)* | Public URL agents/browsers use. `https://` or `wss://` counts as TLS for the posture check |
@@ -896,6 +934,7 @@ secret only) or `disabled` (read-only mode).
 | GET | `/agent/{id}/config` | viewer | Desired (pushed) + effective (reported) config, **redacted** with `redacted_paths`. `?reveal=true` needs `approver`, is audited (`config.reveal`) and sets `Cache-Control: no-store`. Includes revision `history` (metadata only) |
 | PUT | `/agent/{id}/config` | approver | Push a desired config: `{"config_map": {"": {"body": "<yaml>", "content_type": "text/yaml"}}, "note": "…"}`. 404 when push is disabled, 422 with every validation error, including a redacted body. Creates an immutable revision |
 | DELETE | `/agent/{id}/config` | approver | Withdraw by pushing an **empty** config map (agent falls back to its local config). Delivered once |
+| POST | `/agent/{id}/config/deliver` | operator | Deliver the active revision over the agent's live WebSocket now. Idempotent: always 200 with `delivery.state` = `delivered` \| `queued` \| `unchanged` (+ `reason`). Moves no pointer, creates no revision, so it needs no approval. Audited as `config.deliver`; a refusal on principal grounds adds a second row with `result: "error"` |
 | POST | `/agent/{id}/config/rollback` | approver | Return to the previous revision as a **new** revision with `parent_revision_id` set. 409 when there is nothing to roll back to |
 | POST | `/config/apply` | admin | Push one config to many agents: `{"config_map", "agents": [...] \| "filter": {...}, "confirm": true}`. No selector is a 400 — never "all agents" |
 | POST | `/config/revisions` | operator | **Propose** a revision — validates and drafts it, delivers nothing: `{"config_map", "scope": {"agent_id" \| "agents" \| "filter", "include_future"}, "note"}`. Returns `proposal_id`, per-agent revisions and the full verdict. 422 with every structured error |
@@ -1080,9 +1119,10 @@ try to use it.
 
 **An AI may propose, never approve.** `propose_config` creates a *draft* revision —
 nothing is delivered until a human with the `approver` role approves it in the CLI,
-UI or API. There is no MCP tool for approve, reject, reactivate, rollback, apply or
-withdraw at any setting: a client that can approve its own proposal has no
-separation of duties (D3/D9).
+UI or API. There is no MCP tool for approve, reject, reactivate, rollback, apply,
+withdraw or **deliver** at any setting: a client that can approve its own proposal
+has no separation of duties, and one that can *deliver* would make the proposal
+arrive on its own schedule (D3/D9, #102).
 
 Transport is **stdio** by default (works with every local MCP client); use
 `--transport sse --port 8765` for remote agents. Configure with the same env vars

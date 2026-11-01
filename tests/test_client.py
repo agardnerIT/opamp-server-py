@@ -13,6 +13,7 @@ import httpx
 import pytest
 
 import client as client_pkg
+from proto import opamp_pb2
 from client import (
     DEFAULT_SERVER_URL,
     OpampApiError,
@@ -643,6 +644,29 @@ class TestConfigControlPlane:
         rolled = oc.rollback_agent_config(agent_id, note="undo")
         assert rolled["config_hash"] == first["config_hash"]
         assert rolled["parent_revision_id"] == first["revision_id"]
+
+    def test_deliver_now_is_idempotent_relivery(self, oc, push_env):
+        agent_id = register_agent("34" * 16)
+        # Remote config is only offered to an agent that advertises the capability.
+        AGENT_REGISTRY.get(agent_id).capabilities = (
+            opamp_pb2.AgentCapabilities.AgentCapabilities_AcceptsRemoteConfig
+        )
+        pushed = oc.set_agent_config(agent_id, CONFIG_MAP)
+        delivered = oc.deliver_agent_config(agent_id)
+        # No WebSocket in-process, so the honest answer is "queued" — and it names
+        # the revision that is waiting, never claiming it was applied.
+        assert delivered["delivery"]["state"] in ("delivered", "queued")
+        assert delivered["delivery"]["revision_id"] == pushed["revision_id"]
+        assert delivered["delivery"]["channel"] in (None, "push")
+
+    def test_deliver_now_with_nothing_to_deliver_is_unchanged(self, oc, push_env):
+        agent_id = register_agent("36" * 16)
+        AGENT_REGISTRY.get(agent_id).capabilities = (
+            opamp_pb2.AgentCapabilities.AgentCapabilities_AcceptsRemoteConfig
+        )
+        delivered = oc.deliver_agent_config(agent_id)
+        assert delivered["delivery"]["state"] == "unchanged"
+        assert delivered["delivery"]["reason"] == "nothing_assigned"
 
     def test_rollback_without_history_is_409(self, oc, push_env):
         agent_id = register_agent("9a" * 16)

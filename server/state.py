@@ -731,6 +731,9 @@ class SQLiteDesiredConfigStore:
     _ASSIGNMENT_COLUMNS = {
         "delivered_hash": "TEXT",
         "delivered_at": "TEXT",
+        # #102: how the config arrived — `push` (unsolicited WS frame) or `reply`
+        # (carried on the agent's own request). NULL = queued, never delivered.
+        "delivery_channel": "TEXT",
         "last_status": "TEXT",
         "last_error": "TEXT",
         "attempts": "INTEGER NOT NULL DEFAULT 0",
@@ -918,7 +921,8 @@ class SQLiteDesiredConfigStore:
             "  WHEN desired_configs.revision_id = excluded.revision_id "
             "  THEN desired_configs.previous_revision_id "
             "  ELSE desired_configs.revision_id END, "
-            "delivered_hash=NULL, delivered_at=NULL, last_status=NULL, last_error=NULL, "
+            "delivered_hash=NULL, delivered_at=NULL, delivery_channel=NULL, "
+            "last_status=NULL, last_error=NULL, "
             # Poison is a fact about the revision that failed (D6), not about the
             # agent: a new assignment must be deliverable even when the one it
             # replaces was poisoned. Without this a rollback after a failed push is
@@ -1003,19 +1007,30 @@ class SQLiteDesiredConfigStore:
                 (revision_id,),
             )
 
-    def record_delivery(self, agent_id: str, revision_id: str) -> int:
+    def record_delivery(
+        self, agent_id: str, revision_id: str, channel: Optional[str] = None
+    ) -> int:
         """Count one delivery of the current revision; returns the new attempt count.
 
         Called once per frame we put on the wire, so an agent that never reports back
-        cannot be re-pushed forever (`CONFIG_MAX_DELIVERY_ATTEMPTS`).
+        cannot be re-pushed forever (`CONFIG_MAX_DELIVERY_ATTEMPTS`). `channel` (#102)
+        records *how* it got there, because "delivered by a push" and "delivered on
+        the next poll" are different promises to an operator.
         """
         with self._connect() as conn:
             conn.execute(
                 "UPDATE desired_configs SET delivered_hash=("
                 "  SELECT config_hash FROM config_revisions WHERE revision_id=?"
-                "), delivered_at=?, attempts=attempts+1, updated_at=? "
+                "), delivered_at=?, delivery_channel=?, attempts=attempts+1, updated_at=? "
                 "WHERE agent_id=? AND revision_id=?",
-                (revision_id, utcnow().isoformat(), utcnow().isoformat(), agent_id, revision_id),
+                (
+                    revision_id,
+                    utcnow().isoformat(),
+                    channel,
+                    utcnow().isoformat(),
+                    agent_id,
+                    revision_id,
+                ),
             )
             row = conn.execute(
                 "SELECT attempts FROM desired_configs WHERE agent_id=?", (agent_id,)

@@ -441,8 +441,10 @@ class OpampClient:
         ``{"body", "content_type", "role"?}``; ``{"": {...}}`` is the single-object
         case, and ``role`` is the optional v0.20.0 ``AgentConfigObject.role`` the
         agent defines (carried verbatim). Returns the new ``revision_id``
-        and ``config_hash``. Delivery happens on the agent's next status report and
-        only when its reported hash differs — never automatically retried.
+        and ``config_hash``, plus a ``delivery`` object: ``delivered`` when the frame
+        went to the agent's live WebSocket connection, ``queued`` when it will ride
+        the next status report, ``unchanged`` when there was nothing to send. Never
+        retried automatically.
 
         This is approval-by-fiat: the caller holds the approver role. For the
         two-phase flow use :meth:`propose_config` + :meth:`approve_config`.
@@ -639,6 +641,28 @@ class OpampClient:
         if override_reason:
             body["override_reason"] = override_reason
         return self._post(f"/config/revisions/{proposal_id}/reactivate", json=body)
+
+    def deliver_agent_config(self, agent_id: str) -> Dict[str, Any]:
+        """``POST /agent/{id}/config/deliver`` — deliver the active config now (operator).
+
+        Re-delivery of an **already approved** revision: it moves no pointer and
+        changes nothing, so it needs ``operator`` rather than ``approver``. Present
+        because a push is an optimisation over the poll queue (#102), and "the queue
+        dropped that frame" needs a lever that is not "wait for the next report".
+
+        Returns ``{"agent_id", "delivery": {state, revision_id, config_hash,
+        channel, reason, detail}}`` where ``state`` is:
+
+        * ``delivered`` — handed to the agent's live WebSocket connection;
+        * ``queued`` — no live connection (or throttled / refused); it arrives on the
+          agent's next status report;
+        * ``unchanged`` — nothing to deliver; ``reason`` says why
+          (``reported_hash_matches``, ``revision_not_deliverable``, …).
+
+        Always 200 for a known agent: ``queued`` is the designed fallback, not an
+        error, so a rollout engine can call this in a loop.
+        """
+        return self._post(f"/agent/{agent_id}/config/deliver")
 
     def rollback_agent_config(
         self, agent_id: str, note: Optional[str] = None

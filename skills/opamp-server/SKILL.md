@@ -112,6 +112,7 @@ opampctl agents compliance <agent-id>
 | Reject (approver) | `config reject prop-… --reason …` | — | `POST /config/revisions/{id}/reject` |
 | Reactivate poisoned (approver) | `config reactivate prop-… --reason …` | — | `POST /config/revisions/{id}/reactivate` |
 | Roll back one agent (approver) | `agents config rollback <id>` | — | `POST /agent/{id}/config/rollback` |
+| Deliver the active revision now (operator) | `agents config deliver <id>` | — | `POST /agent/{id}/config/deliver` |
 | Fleet push (admin, confirmed) | `config apply --file f.yaml --attr env=prod --confirm` | — | `POST /config/apply` |
 | Re-encrypt stored bodies | `config rotate-key --db data/opamp.db` | — | — |
 | Offline (no server) | `--db data/opamp.db …` | — | — |
@@ -208,8 +209,9 @@ proposes and another approves.
 ## Remote config (`OPAMP_CONFIG_PUSH_ENABLED=true`)
 
 Off by default. When it is on and the posture is secure, the server stores a
-*desired* config per agent and delivers it on the agent's next status report —
-desired state, not a command, so it survives restarts and is idempotent.
+*desired* config per agent and delivers it — immediately over a live WebSocket
+connection, or on the agent's next status report — desired state, not a command,
+so it survives restarts and is idempotent.
 
 ```bash
 opampctl config validate --file collector.yaml          # safe: no storage, no audit
@@ -218,9 +220,23 @@ opampctl agents config get <id>                          # desired + effective, 
 opampctl --password "$ADMIN_PASSWORD" config apply --file collector.yaml \
   --attr environment=prod --confirm                      # admin, explicit targets
 opampctl --password "$ADMIN_PASSWORD" agents config withdraw <id>
+opampctl --password "$ADMIN_PASSWORD" agents config deliver <id>   # re-send now
 ```
 
 Rules that matter when acting on this:
+
+- **Read `delivery.state`, do not assume instant.** Every push answers with
+  `delivered` (handed to the agent's live WebSocket), `queued` (it will arrive on
+  the next status report — `delivery.detail` says when) or `unchanged` (nothing to
+  do; `delivery.reason` says why). `queued` is the designed fallback, not an error:
+  the desired state is stored and the agent's own report collects it. Never report
+  a push as "applied" — only the agent's `APPLIED` report means that
+  (`agents get <id>` → `remote_config_status`, or `agents config get <id>` →
+  `assignment.state`).
+- **`agents config deliver` is not a way around approval.** It re-sends the
+  *active* revision; it cannot create or change one, which is why `operator` is
+  enough. If there is nothing active it answers `unchanged` with
+  `reason: nothing_assigned` or `revision_not_deliverable`.
 
 - **Only the OpAMP Supervisor can apply a pushed config.** `extension/opampextension`
   never advertises `AcceptsRemoteConfig`; a bare collector will simply never be

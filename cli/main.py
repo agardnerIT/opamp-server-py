@@ -1007,8 +1007,9 @@ def agents_config_set(
 ) -> None:
     """Push a desired config to one agent (approver, live server only).
 
-    The file becomes the single config object (`""` key). Delivery happens on the
-    agent's next status report, and only when its hash differs — a failed revision
+    The file becomes the single config object (`""` key). The response's
+    `delivery.state` says whether it went over a live WebSocket connection
+    (`delivered`) or will ride the next status report (`queued`); a failed revision
     is never retried automatically.
     """
     config_map = _read_config_file(file, role=role)
@@ -1027,6 +1028,23 @@ def agents_config_rollback(
     append-only and the chain (`parent_revision_id`) records what replaced what.
     """
     _run(lambda oc: oc.rollback_agent_config(agent_id, note=note))
+
+
+@agent_config_app.command("deliver")
+def agents_config_deliver(
+    agent_id: str = typer.Argument(..., help="Agent instance UID (hex)"),
+) -> None:
+    """Deliver the agent's active config now (operator, live server only).
+
+    Re-delivery, not a new decision: the revision is already active, so this cannot
+    change what any agent runs. Use it after a dropped push or to save a poll cycle.
+
+    `delivery.state` is `delivered` (handed to the live WebSocket connection),
+    `queued` (no live connection — it arrives on the next status report) or
+    `unchanged` (nothing to deliver; `reason` says why). Exits 0 for all three:
+    queued is the designed fallback, so it is not a failure to script against.
+    """
+    _run(lambda oc: oc.deliver_agent_config(agent_id))
 
 
 @agent_config_app.command("withdraw")

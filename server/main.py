@@ -1020,20 +1020,10 @@ def _apply_agent_message(
     response = ServerToAgent()
     response.instance_uid = agent_msg.instance_uid
 
-    response.capabilities = (
-        ServerCapabilities.ServerCapabilities_AcceptsStatus |
-        ServerCapabilities.ServerCapabilities_AcceptsEffectiveConfig |
-        ServerCapabilities.ServerCapabilities_AcceptsPackagesStatus |
-        ServerCapabilities.ServerCapabilities_OffersConnectionSettings |
-        ServerCapabilities.ServerCapabilities_AcceptsConnectionSettingsRequest
-    )
-
-    # Only advertise remote config when the server may actually deliver it (#96):
-    # a capability bit is a promise, and an agent supervisor that sees it will
-    # wait for a config that is never coming. `OffersRemoteConfig` is the server
-    # side of the agent's `AcceptsRemoteConfig`.
-    if posture.push_allowed():
-        response.capabilities |= ServerCapabilities.ServerCapabilities_OffersRemoteConfig
+    # #102: one advertisement for both paths. `OffersRemoteConfig` is only included
+    # when the server may actually deliver (#96), so an unsolicited push frame and a
+    # reply never disagree about what the server can do.
+    response.capabilities = remote_config.server_capabilities()
 
     existing = AGENT_REGISTRY.get(agent_id)
     is_new = existing is None
@@ -2069,6 +2059,21 @@ def get_agent_config(agent_id: str, request: Request, reveal: bool = False):
     return response
 
 
+def _delivery_for(agent_id: str, principal=None) -> Dict[str, Any]:
+    """Attempt immediate delivery after a state change and describe the outcome (#102).
+
+    Every route that changes what an agent *should* run ends with this: the state is
+    already stored (that is the model, D5), so a push is only a latency optimisation
+    and a failure to reach the agent is `queued`, never an error. The principal is
+    passed through so a refusal is attributed to whoever asked for the delivery.
+    """
+    return remote_config.deliver_now(agent_id, principal).to_dict()
+
+
+def _delivery_for_many(agent_ids: List[str], principal=None) -> Dict[str, Any]:
+    return remote_config.deliver_many(agent_ids, principal)
+
+
 @app.put(
     "/agent/{agent_id}/config",
     tags=["config"],
@@ -2092,10 +2097,12 @@ def put_agent_config(
     naming every problem. A revision is immutable (D4); pushing again creates a new
     one and keeps the previous for rollback.
 
-    Delivery is *desired state*, not a command (D5): the agent receives it on its
-    next status report (HTTP) or immediately over its WebSocket, and only when the
-    hash it reports differs from ours. Nothing is retried automatically — a
-    `FAILED` revision is poisoned until a human pushes again (D6).
+    Delivery is *desired state*, not a command (D5): it is handed to a live
+    WebSocket connection immediately (#102) and otherwise rides the agent's next
+    status report, and only ever when the hash it reports differs from ours. The
+    response's `delivery` object says which happened — `delivered`, `queued` or
+    `unchanged` — and never claims the config is applied. Nothing is retried
+    automatically — a `FAILED` revision is poisoned until a human pushes again (D6).
 
     This direct push is approval-by-fiat: the caller holds the approver role. The
     two-phase propose/approve flow that separates those duties arrives with #99 and
@@ -2167,6 +2174,7 @@ def put_agent_config(
         raise HTTPException(status_code=500, detail=f"could not store the revision: {exc}")
 
     PROM_CONFIG_PUSHES.labels(result="ok").inc()
+    delivery = _delivery_for(agent_id, principal)
     return {
         "agent_id": agent_id,
         "revision_id": record["revision_id"],
@@ -2175,7 +2183,7 @@ def put_agent_config(
         "status": record.get("status"),
         "warnings": warnings,
         "verdict": verdict.to_dict(),
-        "delivery": "queued — sent on the agent's next status report",
+        "delivery": delivery,
     }
 
 
@@ -2219,8 +2227,64 @@ def delete_agent_config(
         "revision_id": record["revision_id"],
         "config_hash": record["config_hash"],
         "withdrawn": True,
-        "delivery": "queued — sent on the agent's next status report",
+        "delivery": _delivery_for(agent_id, principal),
     }
+
+
+@app.post(
+    "/agent/{agent_id}/config/deliver",
+    tags=["config"],
+    summary="Deliver the agent's active config now (operator)",
+)
+def deliver_agent_config(
+    agent_id: str,
+    request: Request,
+    _gate=Depends(posture.config_push_gate),
+    _audit=Depends(require_audit("config.deliver")),
+):
+    """Deliver the agent's current active revision over its live connection. Requires `operator`.
+
+    This is **re-delivery, not a new decision** (epic #93, D5): the revision is
+    already active and approved, so this endpoint cannot change what any agent runs.
+    That is why `operator` suffices here while creating or editing a config needs
+    `approver` — there is nothing here to approve.
+
+    Idempotent by design: it always answers 200 with a `delivery` object whose
+    `state` is one of
+
+    * `delivered` — handed to the agent's live WebSocket connection (the writer
+      records `delivered_at` when the frame is actually written);
+    * `queued` — no live connection, no accepted push (throttled, or the uid is bound
+      to a different principal), so the agent gets it on its next status report;
+    * `unchanged` — nothing was deliverable; `reason` says why
+      (`reported_hash_matches`, `revision_not_deliverable`, `attempts_exhausted`, …).
+
+    `queued` is not a failure — desired state is the model and the poll queue always
+    catches up — which is exactly why a rollout engine can call this without having to
+    interpret errors. Every attempt is audited as `config.deliver`, and a refusal on
+    principal grounds is recorded a second time with `result="error"`.
+    """
+    principal = require_roles(request, ROLE_OPERATOR)
+    try:
+        agent_id = remote_config.normalize_agent_id(agent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    if AGENT_REGISTRY.get(agent_id) is None and remote_config.REGISTRY.get(agent_id) is None:
+        raise HTTPException(status_code=404, detail=f"agent {agent_id} not found")
+
+    record = remote_config.REGISTRY.get(agent_id) or {}
+    # #97 ordering: recorded before it acts, so a delivery that cannot be recorded
+    # does not happen. The outcome is in the response and the metrics; the row names
+    # what was being delivered.
+    audit_action(
+        principal,
+        "config.deliver",
+        target_kind="agent",
+        target_id=agent_id,
+        revision_id=record.get("revision_id"),
+        config_hash=record.get("config_hash"),
+    )
+    return {"agent_id": agent_id, "delivery": _delivery_for(agent_id, principal)}
 
 
 @app.post(
@@ -2349,7 +2413,9 @@ def apply_config_fleet(
         "failed": sum(1 for item in results if not item["ok"]),
         "warnings": warnings,
         "results": results,
-        "delivery": "queued — sent on each agent's next status report",
+        "delivery": _delivery_for_many(
+            [item["agent_id"] for item in results if item["ok"]], principal
+        ),
     }
 
 
@@ -2636,6 +2702,12 @@ def approve_config_revision(
             reason=body.override_reason,
         )
     PROM_CONFIG_PUSHES.labels(result="approved").inc()
+    # #102: approval is what makes a revision active, so this is the first moment it
+    # may be delivered. Agents with a live connection get it now; the rest get it on
+    # their next report, and `delivery.state` says which happened.
+    result["delivery"] = _delivery_for_many(
+        [revision["agent_id"] for revision in result.get("revisions", [])], principal
+    )
     return result
 
 
@@ -2713,7 +2785,7 @@ def reactivate_config_revision(
         override_reason=body.override_reason,
     )
     try:
-        return config_control.reactivate(
+        result = config_control.reactivate(
             proposal_id,
             approver=principal.name,
             agents=AGENT_REGISTRY.list_all(),
@@ -2723,6 +2795,11 @@ def reactivate_config_revision(
         )
     except config_control.ConfigControlError as exc:
         raise _control_error(exc)
+    # Reactivation clears the poison, so delivery may resume immediately (#102).
+    result["delivery"] = _delivery_for_many(
+        [revision["agent_id"] for revision in result.get("revisions", [])], principal
+    )
+    return result
 
 
 @app.post(
@@ -2771,7 +2848,7 @@ def rollback_agent_config(
         note=body.note,
     )
     try:
-        return config_control.rollback(
+        result = config_control.rollback(
             agent_id,
             author=principal.name,
             agents=AGENT_REGISTRY.list_all(),
@@ -2780,6 +2857,8 @@ def rollback_agent_config(
         )
     except config_control.ConfigControlError as exc:
         raise _control_error(exc)
+    result["delivery"] = _delivery_for(agent_id, principal)
+    return result
 
 
 @app.get("/health", tags=["ops"], summary="Health check")

@@ -20,8 +20,13 @@ bounded parse, structural rules, protected invariants, inventory warnings and th
 OPA policy gate. It is re-run at approve/apply time, because the schema, the
 policies and an agent's component inventory can all move between Monday and Friday.
 
-**Delivery.** A pure decision function, ``offer_for()``, so the HTTP and WebSocket
-transports cannot diverge. It offers only when push is allowed by the posture, the
+**Delivery.** A pure decision function, ``decision_for()``, so the HTTP and WebSocket
+transports cannot diverge, plus two thin builders over it: ``offer_for()`` for the
+reply path (the offer rides the agent's own response) and ``push_frame()`` /
+``deliver_now()`` for the unsolicited "push now" path (#102). Both go through the same
+gate — posture, capability, lifecycle, poisoned, reported-hash — so a push can never
+deliver something a poll would refuse (epic #93, D5: desired state, not a command).
+It offers only when push is allowed by the posture, the
 agent advertises `AcceptsRemoteConfig`, the assignment points at a revision that is
 `active` and not poisoned, and the agent's reported hash differs from ours. On top
 of #81's hash comparison it now carries #99's lifecycle guards: a delivery counter
@@ -29,6 +34,13 @@ of #81's hash comparison it now carries #99's lifecycle guards: a delivery count
 (T9: an agent that reports a *different* config after we delivered ours has restored
 its last working config, so re-pushing is the infinite loop), and delivery
 bookkeeping that survives a restart.
+
+**When delivery is recorded** differs by transport, and that difference is the whole
+point of #102: the reply path records at build time (the offer is in the same
+response body, so "built" and "sent" are the same event), while the push path
+records in an `on_sent` callback that only runs once the frame is actually written.
+A queued-then-dropped frame therefore consumes no delivery attempt and is re-offered
+by reconciliation on the next report, instead of being silently lost.
 
 Nothing here writes to SQLite on the steady-state message path: `DesiredConfigRegistry`
 keeps the assignment in memory (loaded at startup, updated on push) because #109
@@ -45,9 +57,11 @@ import os
 import re
 import struct
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+import prometheus_client as prom_client
 from loguru import logger
 
 from proto.opamp_pb2 import (
@@ -55,10 +69,13 @@ from proto.opamp_pb2 import (
     AgentConfigMap,
     AgentRemoteConfig,
     RemoteConfigStatuses,
+    ServerCapabilities,
+    ServerToAgent,
 )
-from server import audit, config_validation, crypto, posture
+from server import audit, config_validation, crypto, posture, ws
 from server.config_validation import ConfigValidationError  # noqa: F401  (re-export)
-from server.state import SQLiteDesiredConfigStore, utcnow
+from server.framing import MessageTooBig, encode_message, message_limit
+from server.state import AGENT_REGISTRY, SQLiteDesiredConfigStore, utcnow
 
 HASH_ALGORITHM = "sha256"
 HASH_DOMAIN = b"opamp-config-map-v1\x00"
@@ -88,6 +105,17 @@ STATUS_FAILED = "FAILED"
 STATUS_APPLIED = "APPLIED"
 
 _REVISION_PREFIX = "rev"
+
+# #102: how long "delivered" takes to become "applied", per delivery channel. A
+# rollout that never reaches APPLIED is the failure operators actually care about,
+# so the latency is measured from the write to the agent's own report — never
+# inferred by the server.
+OPAMP_CONFIG_DELIVERY_LATENCY = prom_client.Histogram(
+    "opamp_config_delivery_latency_seconds",
+    "Seconds from a config frame being delivered to the agent reporting APPLIED",
+    ["channel"],
+    buckets=(0.1, 0.5, 1, 2, 5, 10, 30, 60, 120, 300, 900),
+)
 
 
 # ---------------------------------------------------------------------- settings
@@ -326,17 +354,13 @@ class DesiredConfigRegistry:
         return len(self._cache)
 
     def delivery_record(self, agent_id: str) -> Dict[str, Any]:
-        """The assignment/delivery facts the API and the drift check report (#99)."""
-        record = self._cache.get(agent_id) or {}
-        return {
-            "delivered_hash": record.get("delivered_hash"),
-            "delivered_at": record.get("delivered_at"),
-            "last_status": record.get("last_status"),
-            "last_error": record.get("last_error"),
-            "attempts": int(record.get("attempts") or 0),
-            "poisoned": bool(record.get("poisoned")),
-            "unconfirmed": bool(record.get("unconfirmed")),
-        }
+        """The assignment/delivery facts the API and the drift check report (#99).
+
+        Read from the in-memory assignment (the message path must not hit SQLite,
+        #109); `delivery_view()` is the same shape for callers that already have the
+        row, so a listing and a detail view cannot disagree.
+        """
+        return delivery_view(self._cache.get(agent_id), reported_hash(agent_id))
 
     # -- writes --------------------------------------------------------------
 
@@ -438,14 +462,23 @@ class DesiredConfigRegistry:
             proposal_id=proposal_id,
         )
 
-    def record_delivery(self, agent_id: str, revision_id: str) -> int:
-        """One frame was put on the wire; returns the assignment's attempt count."""
-        attempts = self._store.record_delivery(agent_id, revision_id)
+    def record_delivery(
+        self, agent_id: str, revision_id: str, channel: Optional[str] = None
+    ) -> int:
+        """One frame was put on the wire; returns the assignment's attempt count.
+
+        `channel` is `push` (unsolicited WebSocket frame) or `reply` (carried on the
+        agent's own request — an HTTP poll or a WS message/reply). It is stored so
+        the API can say *how* the config arrived instead of pretending a poll is
+        instant (#102).
+        """
+        attempts = self._store.record_delivery(agent_id, revision_id, channel)
         record = self._cache.get(agent_id)
         if record is not None and record.get("revision_id") == revision_id:
             record["attempts"] = attempts
             record["delivered_hash"] = record.get("config_hash")
             record["delivered_at"] = utcnow().isoformat()
+            record["delivery_channel"] = channel
         return attempts
 
     def note_report(
@@ -543,6 +576,126 @@ def deliverable(record: Optional[Dict[str, Any]]) -> bool:
     return True
 
 
+def server_capabilities() -> int:
+    """The `ServerToAgent.capabilities` advertisement (#74, used by #102).
+
+    Shared by the reply path and the unsolicited push frame so an agent never sees a
+    different server depending on who spoke first. `OffersRemoteConfig` is only
+    advertised when the server may actually deliver a config (#96): a capability bit
+    is a promise, and a supervisor that sees it waits for a config that never comes.
+    """
+    capabilities = (
+        ServerCapabilities.ServerCapabilities_AcceptsStatus
+        | ServerCapabilities.ServerCapabilities_AcceptsEffectiveConfig
+        | ServerCapabilities.ServerCapabilities_AcceptsPackagesStatus
+        | ServerCapabilities.ServerCapabilities_OffersConnectionSettings
+        | ServerCapabilities.ServerCapabilities_AcceptsConnectionSettingsRequest
+    )
+    if posture.push_allowed():
+        capabilities |= ServerCapabilities.ServerCapabilities_OffersRemoteConfig
+    return capabilities
+
+
+@dataclass(frozen=True)
+class OfferDecision:
+    """The answer to "should this agent be sent its config now?", with no side effects.
+
+    `reason` is set exactly when `deliver` is False, and it is what the push API
+    reports instead of a bare "nothing happened": "your agent already has it" and
+    "the revision is poisoned" are different answers to the same question.
+    """
+
+    deliver: bool
+    revision_id: Optional[str] = None
+    config_hash: Optional[str] = None
+    config_map: Mapping[str, Any] = field(default_factory=dict)
+    reason: Optional[str] = None
+
+
+# Why a delivery did not happen, in the caller's terms. Kept next to the decision so
+# the API, the CLI and the UI cannot invent different words for the same state.
+REASON_DETAILS = {
+    "push_disabled": "config push is disabled by the security posture",
+    "agent_does_not_accept": "the agent does not advertise AcceptsRemoteConfig",
+    "nothing_assigned": "no desired config is assigned to this agent",
+    "revision_not_deliverable": "the current revision is not active and deliverable",
+    "revision_has_no_body": "the revision body is unavailable (pruned or undecryptable)",
+    "reported_hash_matches": "the agent already reports this config hash",
+    "frame_too_big": "the push frame would exceed OPAMP_MAX_MESSAGE_BYTES",
+    "attempts_exhausted": (
+        "the delivery budget is exhausted (CONFIG_MAX_DELIVERY_ATTEMPTS); the agent "
+        "never acknowledged it"
+    ),
+}
+
+
+def decision_for(
+    agent_id: str,
+    capabilities: int,
+    status: Optional[Dict[str, Any]] = None,
+) -> OfferDecision:
+    """Should this agent be offered its desired config right now? (pure, #81/#99/#102)
+
+    Conditions, in order, each with a reason the caller can report:
+
+    1. config push is allowed by the posture (#96) — a capability bit is a promise;
+    2. the agent advertises `AcceptsRemoteConfig` — the spec's MUST;
+    3. the assignment is deliverable (see :func:`deliverable`);
+    4. the revision has a body — delivering an empty map would wipe the agent;
+    5. the agent's reported hash differs from ours — the spec's MUST, and what stops
+       a server from re-pushing a config the agent already has;
+    6. the delivery budget is not exhausted — an agent that never reports back is
+       surfaced as `unconfirmed` instead of being re-pushed forever.
+
+    The one write this function can cause (`mark_unconfirmed`, when the budget runs
+    out) is kept here rather than in a builder so both paths surface it identically.
+    """
+    if not posture.push_allowed():
+        return OfferDecision(False, reason="push_disabled")
+    if not capabilities & AgentCapabilities.AgentCapabilities_AcceptsRemoteConfig:
+        return OfferDecision(False, reason="agent_does_not_accept")
+
+    record = REGISTRY.get(agent_id)
+    if not record:
+        return OfferDecision(False, reason="nothing_assigned")
+    revision_id = record.get("revision_id")
+    config_hash = record.get("config_hash")
+    if not deliverable(record):
+        return OfferDecision(False, revision_id=revision_id, config_hash=config_hash,
+                             reason="revision_not_deliverable")
+    if not record.get("config_map") and not record.get("withdrawn"):
+        logger.warning(
+            f"agent {agent_id}: revision {revision_id} has no decoded body; "
+            "nothing to deliver"
+        )
+        return OfferDecision(False, revision_id=revision_id, config_hash=config_hash,
+                             reason="revision_has_no_body")
+
+    reported = hash_from_wire((status or {}).get("lastRemoteConfigHash"))
+    if reported == config_hash:
+        return OfferDecision(False, revision_id=revision_id, config_hash=config_hash,
+                             reason="reported_hash_matches")
+
+    attempts = int(record.get("attempts") or 0)
+    limit = max_delivery_attempts()
+    if attempts >= limit:
+        detail = (
+            f"delivered {attempts} times and the agent never reported hash "
+            f"{str(config_hash)[:12]}…; delivery stopped"
+        )
+        REGISTRY.mark_unconfirmed(agent_id, detail)
+        logger.warning(f"agent {agent_id}: {detail}")
+        return OfferDecision(False, revision_id=revision_id, config_hash=config_hash,
+                             reason="attempts_exhausted")
+
+    return OfferDecision(
+        True,
+        revision_id=revision_id,
+        config_hash=config_hash,
+        config_map=record.get("config_map") or {},
+    )
+
+
 def offer_for(
     agent_id: str,
     capabilities: int,
@@ -550,56 +703,349 @@ def offer_for(
 ) -> Optional[AgentRemoteConfig]:
     """Build the `remote_config` offer for one message, or None (#81, #99).
 
-    Conditions, in order:
-
-    1. config push is allowed by the posture (#96) — a capability bit is a promise;
-    2. the agent advertises `AcceptsRemoteConfig` — the spec's MUST;
-    3. the assignment is deliverable (see :func:`deliverable`);
-    4. the agent's reported hash differs from ours — the spec's MUST, and what
-       stops a server from re-pushing a config the agent already has;
-    5. the delivery budget is not exhausted — an agent that never reports back is
-       surfaced as `unconfirmed` instead of being re-pushed forever.
-
-    Delivery bookkeeping (one write per frame, never per message) is recorded here
-    so a restart cannot double-deliver: `delivered_hash` is persisted, and a
+    The **reply** path: the offer is put in the response the agent is waiting for, so
+    building it and sending it are the same event and the delivery is recorded here.
+    A restart cannot double-deliver because `delivered_hash` is persisted, and a
     re-delivery is only justified by a hash mismatch, not by a lost in-memory flag.
+
+    For the unsolicited path see :func:`push_frame`, which defers the same
+    bookkeeping to the moment the frame is actually written (#102).
     """
-    if not posture.push_allowed():
-        return None
-    if not capabilities & AgentCapabilities.AgentCapabilities_AcceptsRemoteConfig:
-        return None
-
-    record = REGISTRY.get(agent_id)
-    if not deliverable(record):
-        return None
-    if not record.get("config_map") and not record.get("withdrawn"):
-        logger.warning(
-            f"agent {agent_id}: revision {record.get('revision_id')} has no decoded body; "
-            "nothing to deliver"
-        )
-        return None
-
-    reported = hash_from_wire((status or {}).get("lastRemoteConfigHash"))
-    if reported == record["config_hash"]:
-        return None
-
-    revision_id = record["revision_id"]
-    attempts = int(record.get("attempts") or 0)
-    limit = max_delivery_attempts()
-    if attempts >= limit:
-        detail = (
-            f"delivered {attempts} times and the agent never reported hash "
-            f"{record['config_hash'][:12]}…; delivery stopped"
-        )
-        REGISTRY.mark_unconfirmed(agent_id, detail)
-        logger.warning(f"agent {agent_id}: {detail}")
+    decision = decision_for(agent_id, capabilities, status)
+    if not decision.deliver:
         return None
 
     offer = AgentRemoteConfig()
-    offer.config.CopyFrom(build_config_map(record.get("config_map") or {}))
-    offer.config_hash = hash_bytes(record["config_hash"])
-    REGISTRY.record_delivery(agent_id, revision_id)
+    offer.config.CopyFrom(build_config_map(dict(decision.config_map)))
+    offer.config_hash = hash_bytes(decision.config_hash or "")
+    REGISTRY.record_delivery(agent_id, decision.revision_id or "", channel=ws.CHANNEL_REPLY)
     return offer
+
+
+def push_frame(
+    agent_id: str,
+    *,
+    capabilities: Optional[int] = None,
+    status: Optional[Dict[str, Any]] = None,
+) -> Tuple[Optional[bytes], OfferDecision]:
+    """Build the unsolicited `ServerToAgent` a "push now" would send (#102).
+
+    Deliberately the same `decision_for()` gate as the reply path (D5), with two
+    differences that only exist because nobody asked for this frame: the reply's
+    `ReportFullState` flag is absent (it answers a message we did not receive), and
+    the capabilities are the full advertisement, so an agent that has only ever seen
+    pushes still learns what the server can do.
+
+    Returns `(None, decision)` when there is nothing to send, so the caller can report
+    *why* rather than guessing.
+    """
+    state = AGENT_REGISTRY.get(agent_id)
+    if capabilities is None:
+        capabilities = int(getattr(state, "capabilities", 0) or 0)
+    if status is None:
+        status = reported_status(agent_id)
+
+    decision = decision_for(agent_id, capabilities, status)
+    if not decision.deliver:
+        return None, decision
+
+    response = ServerToAgent()
+    response.instance_uid = bytes.fromhex(agent_id)
+    response.capabilities = server_capabilities()
+    response.remote_config.config.CopyFrom(build_config_map(dict(decision.config_map)))
+    response.remote_config.config_hash = hash_bytes(decision.config_hash or "")
+    # Last line of defence (#96/#102): nothing may put remote_config on the wire
+    # while the posture says config push is not allowed.
+    if posture.scrub_remote_config(response) or not response.HasField("remote_config"):
+        return None, OfferDecision(False, reason="push_disabled")
+    try:
+        # Framed like every other outbound frame (varint header + protobuf). Returning
+        # a raw message here would put an unframed frame on the wire — the transport
+        # writes `payload` verbatim.
+        frame = encode_message(response.SerializeToString(), max_bytes=message_limit())
+    except MessageTooBig as exc:
+        logger.error(f"agent {agent_id}: refusing to push an oversized frame: {exc}")
+        return None, OfferDecision(False, reason="frame_too_big")
+    return frame, decision
+
+
+@dataclass(frozen=True)
+class DeliveryResult:
+    """What happened to one "deliver now" request (#102).
+
+    Three states, and the difference between the first two is the whole point:
+    `delivered` means the frame was handed to a live connection, `queued` means there
+    was nowhere to put it and the agent will pick it up on its next report, and
+    `unchanged` means nothing was deliverable at all (`reason` says why). Never
+    `applied`: that word belongs to the agent.
+    """
+
+    state: str
+    revision_id: Optional[str] = None
+    config_hash: Optional[str] = None
+    channel: Optional[str] = None
+    reason: Optional[str] = None
+    detail: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "state": self.state,
+            "revision_id": self.revision_id,
+            "config_hash": self.config_hash,
+            "channel": self.channel,
+            "reason": self.reason,
+            "detail": self.detail,
+        }
+
+
+def _queued_detail(agent_id: str) -> str:
+    """Say when it will actually arrive, using the agent's own observed cadence."""
+    state = AGENT_REGISTRY.get(agent_id)
+    interval = getattr(state, "report_interval", None)
+    if not interval:
+        return (
+            "queued — no live connection; delivered on the agent's next status report"
+        )
+    return (
+        "queued — no live connection; delivered within one polling interval "
+        f"({float(interval):.0f}s observed)"
+    )
+
+
+def deliver_now(agent_id: str, principal: Any = None) -> DeliveryResult:
+    """Deliver the agent's current active revision over its live connection (#102).
+
+    This is a latency optimisation, not a second delivery model (D5): the desired
+    state is already stored, this only decides *when* it arrives. Nothing here can
+    resurrect a poisoned revision, bypass the posture, or exceed the delivery budget,
+    because the frame comes from :func:`push_frame` — the same gate a poll goes
+    through.
+
+    Delivery is recorded in `on_sent`, so a frame that is dropped, superseded or
+    never written leaves `delivered_at` unset and reconciliation re-offers it.
+
+    `principal` is the admin identity that asked for the delivery, used only to
+    attribute a refusal to the person who caused it (T1: a socket whose binding
+    moved is either a reconnect the registry has not caught up with or an attempt to
+    receive someone else's config — both deserve a record naming the requester).
+    """
+    frame, decision = push_frame(agent_id)
+    revision_id = decision.revision_id
+    config_hash = decision.config_hash
+    if frame is None:
+        reason = decision.reason or "nothing_to_deliver"
+        return DeliveryResult(
+            state="unchanged",
+            revision_id=revision_id,
+            config_hash=config_hash,
+            reason=reason,
+            detail=REASON_DETAILS.get(reason, reason),
+        )
+
+    def _on_sent() -> None:
+        # Only the writer calls this, and only after `send_bytes()` returned.
+        REGISTRY.record_delivery(agent_id, revision_id or "", channel=ws.CHANNEL_PUSH)
+
+    uid = bytes.fromhex(agent_id)
+    blocker = ws.push_blocker(uid)
+    if blocker == ws.BLOCKER_FOREIGN_PRINCIPAL:
+        # The socket holding this uid authenticated as somebody else (#94). Refusing
+        # is the security answer; it is still *queued*, because the agent's own next
+        # report will collect the config, so the operator sees a delay, not a lie.
+        audit.audit_event(
+            "config.deliver",
+            principal=getattr(principal, "name", None) or "system",
+            role=getattr(principal, "role", None),
+            actor_kind="human" if principal is not None else "system",
+            result="error",
+            target_kind="agent",
+            target_id=agent_id,
+            revision_id=revision_id,
+            config_hash=config_hash,
+            error="refused: instance_uid is bound to a different principal",
+            reason="foreign_principal",
+        )
+        return DeliveryResult(
+            state="queued",
+            revision_id=revision_id,
+            config_hash=config_hash,
+            reason="foreign_principal",
+            detail=(
+                "refused — the instance_uid is bound to a different principal; the "
+                "revocation or the reconnect will resolve it"
+            ),
+        )
+    try:
+        sent = ws.send_to_agent_threadsafe(
+            uid, frame, kind=ws.KIND_CONFIG, on_sent=_on_sent
+        )
+    except RuntimeError as exc:
+        # Called from the event loop (a rollout engine tick, #101): fall back to the
+        # poll path rather than blocking the loop on itself. Logged, never silent.
+        logger.bind(event="config.push.inline_fallback", agent_id=agent_id).warning(
+            f"cannot push to {agent_id} inline: {exc}"
+        )
+        sent = False
+
+    if sent:
+        return DeliveryResult(
+            state="delivered",
+            revision_id=revision_id,
+            config_hash=config_hash,
+            channel=ws.CHANNEL_PUSH,
+            detail="sent over the agent's live WebSocket connection",
+        )
+    return DeliveryResult(
+        state="queued",
+        revision_id=revision_id,
+        config_hash=config_hash,
+        reason="no_live_connection",
+        detail=_queued_detail(agent_id),
+    )
+
+
+def deliver_many(agent_ids: Sequence[str], principal: Any = None) -> Dict[str, Any]:
+    """`deliver_now()` for a set of agents, rolled up into one honest summary.
+
+    `state` is `delivered` only when **every** target was reached live, `queued` when
+    none was, `partial` in between — a fleet push that reached half the fleet must not
+    read as success. The counts stay visible because "18 delivered, 2 queued" is the
+    sentence a rollout UI needs.
+    """
+    results = [deliver_now(agent_id, principal) for agent_id in agent_ids]
+    counts = {"delivered": 0, "queued": 0, "unchanged": 0}
+    for result in results:
+        counts[result.state] = counts.get(result.state, 0) + 1
+    if counts["delivered"] and not counts["queued"]:
+        state = "delivered"
+    elif counts["queued"] and not counts["delivered"]:
+        state = "queued"
+    elif counts["delivered"]:
+        state = "partial"
+    else:
+        state = "unchanged"
+    return {
+        "state": state,
+        "revision_id": results[0].revision_id if len(results) == 1 else None,
+        "channel": ws.CHANNEL_PUSH if counts["delivered"] else None,
+        "agents": counts,
+        "total": len(results),
+        "detail": (
+            f"{counts['delivered']} delivered over a live connection, "
+            f"{counts['queued']} queued for the next status report, "
+            f"{counts['unchanged']} with nothing to deliver"
+        ),
+    }
+
+
+_HEX_HASH = re.compile(r"^[0-9a-f]{64}$")
+
+
+def reported_status(agent_id: str) -> Dict[str, Any]:
+    """The agent's last `RemoteConfigStatus` hash in **wire (base64)** form.
+
+    The push path has no request body to quote, so it reconstructs the shape
+    `MessageToDict` produces for a real report. Hex and base64 are not
+    interchangeable here: `decision_for()` decodes the wire form, and handing it our
+    own hex made every "the agent already has this" answer wrong.
+    """
+    raw = reported_hash(agent_id)
+    if not raw:
+        return {"lastRemoteConfigHash": None}
+    try:
+        return {"lastRemoteConfigHash": hash_b64(raw)}
+    except ValueError:
+        # A stored hash we cannot read is not a hash the agent reported: treat it as
+        # unknown rather than raising on the delivery path.
+        logger.warning(f"agent {agent_id}: stored remote config hash is malformed")
+        return {"lastRemoteConfigHash": None}
+
+
+def reported_hash(agent_id: str) -> Optional[str]:
+    """The hash the agent last reported, in our hex form (`None` if unknown).
+
+    Read from `AgentState` rather than SQLite: it is already in memory, and this is
+    called from read paths (`GET /agent/{id}/config`) that must not pay for a query.
+
+    `AgentState.last_remote_config_hash` is stored **hex** (`_apply_status_report`
+    converts it on the way in), while the wire and `MessageToDict` use base64 — so
+    this accepts either instead of assuming, because getting it wrong makes every
+    agent look like it never applied anything.
+    """
+    state = AGENT_REGISTRY.get(agent_id)
+    raw = getattr(state, "last_remote_config_hash", None)
+    if not raw:
+        return None
+    return raw.lower() if _HEX_HASH.match(str(raw).lower()) else hash_from_wire(raw)
+
+
+def assignment_state(
+    record: Optional[Dict[str, Any]], reported: Optional[str] = None
+) -> str:
+    """One word for "where is this assignment?" (#102).
+
+    `applied` is only ever the agent's word, matched against **our** hash: the agent
+    having `APPLIED` an *older* config is not "applied". Everything else is derived
+    from the delivery facts, so a UI can say "queued" instead of pretending a push
+    was instant, and "delivered" instead of claiming it worked.
+    """
+    if not record:
+        return "none"
+    ours = record.get("config_hash")
+    status = record.get("last_status")
+    if reported and reported == ours and status != STATUS_FAILED:
+        return "applied"
+    if (
+        record.get("poisoned")
+        or record.get("failed_at")
+        or record.get("status") == SQLiteDesiredConfigStore.STATUS_POISONED
+    ):
+        return "poisoned"
+    if record.get("unconfirmed"):
+        return "unconfirmed"
+    if status == STATUS_FAILED:
+        return "failed"
+    if not deliverable(record):
+        return record.get("status") or "undeliverable"
+    if record.get("delivered_hash") and record.get("delivered_hash") == ours:
+        return "delivered"
+    return "queued"
+
+
+def delivery_view(
+    record: Optional[Dict[str, Any]], reported: Optional[str] = None
+) -> Dict[str, Any]:
+    """Delivery facts plus the derived `state` for one assignment row (#99, #102).
+
+    Takes a row rather than an agent id so both sources can use it — the in-memory
+    cache (`DesiredConfigRegistry.delivery_record`, no SQLite on the message path)
+    and an authoritative SQL read (proposal listings, which must not show this
+    process's stale cache). `state` is **derived, never stored**: `applied` is the
+    agent's own report and nothing else, so the server cannot claim a config took
+    effect.
+    """
+    record = record or {}
+    return {
+        "delivered_hash": record.get("delivered_hash"),
+        "delivered_at": record.get("delivered_at"),
+        "channel": record.get("delivery_channel"),
+        "state": assignment_state(record, reported),
+        "last_status": record.get("last_status"),
+        "last_error": record.get("last_error"),
+        "attempts": int(record.get("attempts") or 0),
+        "poisoned": bool(record.get("poisoned")),
+        "unconfirmed": bool(record.get("unconfirmed")),
+    }
+
+
+def _observe_delivery_latency(record: Dict[str, Any]) -> None:
+    """Record delivered → APPLIED once per revision (#102)."""
+    delivered_at = _delivered_at(record)
+    if delivered_at is None:
+        return
+    seconds = max(0.0, (utcnow() - delivered_at).total_seconds())
+    channel = record.get("delivery_channel") or "unknown"
+    OPAMP_CONFIG_DELIVERY_LATENCY.labels(channel=channel).observe(seconds)
 
 
 def _delivered_at(record: Dict[str, Any]) -> Optional[datetime]:
@@ -661,6 +1107,15 @@ def note_status(
         return None
     ours = record["config_hash"]
     reported = hash_from_wire(reported_hash_b64)
+
+    # #102: delivered → APPLIED, measured once per revision on the transition. A
+    # heartbeat repeating APPLIED must not keep observing the same latency.
+    if (
+        status_name == STATUS_APPLIED
+        and reported == ours
+        and record.get("last_status") != STATUS_APPLIED
+    ):
+        _observe_delivery_latency(record)
 
     if status_name == STATUS_FAILED and reported == ours:
         detail = error_message or "agent reported FAILED without an error message"

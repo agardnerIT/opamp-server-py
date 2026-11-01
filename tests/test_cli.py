@@ -669,6 +669,15 @@ class TestConfigCommands:
         )
         assert rolled["parent_revision_id"]
 
+        # #102: deliver-now is re-delivery of the active revision. The fixture's
+        # agent does not advertise `AcceptsRemoteConfig`, so the honest answer is
+        # "unchanged" naming that reason — never a claim that it was delivered.
+        delivered = parse(
+            run("--password", ADMIN_PW, "agents", "config", "deliver", "11" * 16)
+        )
+        assert delivered["delivery"]["state"] == "unchanged"
+        assert delivered["delivery"]["reason"] == "agent_does_not_accept"
+
     def test_cli_reject_then_approve_is_409(self, live, push_env, tmp_path):
         register_agent("22" * 16)
         path = tmp_path / "collector.yaml"

@@ -599,6 +599,11 @@ AUDITED_ROUTES = {
     ("POST", "/config/revisions/{proposal_id}/reject"): "config.reject",
     ("POST", "/config/revisions/{proposal_id}/reactivate"): "config.reactivate",
     ("POST", "/agent/{agent_id}/config/rollback"): "config.rollback",
+    # #102: "deliver now" is re-delivery of an already-approved revision, so it is an
+    # operator action rather than an approval — but it is still a privileged action
+    # against a live machine, and a refusal on principal grounds adds a second row
+    # with `result="error"` (pre-write, then act — #97).
+    ("POST", "/agent/{agent_id}/config/deliver"): "config.deliver",
 }
 
 EXPLAINED_ROUTES = {

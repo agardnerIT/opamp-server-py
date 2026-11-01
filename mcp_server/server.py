@@ -265,6 +265,9 @@ def validate_config(config_map: Dict[str, Any], agent_id: Optional[str] = None) 
     a YAML path + hint. This is the validate half of the flow: MCP may check a
     config and report the hash, but approve/rollback/reactivate are never exposed
     here ([#93](https://github.com/agardnerIT/opamp-server-py/issues/93), D9).
+    **`deliver` is not here either** (#102): re-sending a config to a live fleet
+    machine is an operational action, and an AI proposing a config must not be the
+    thing that makes it arrive.
     """
     return _tool(lambda oc: oc.validate_config(config_map, agent_id=agent_id))
 

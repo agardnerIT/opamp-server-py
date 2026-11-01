@@ -380,7 +380,17 @@ def propose(
         "scope": {key: value for key, value in scope.items() if key != "resolved_agents"},
         "revisions": revisions,
         "verdict": verdict.to_dict(),
-        "delivery": "nothing is delivered until an approver approves this proposal",
+        # #102: not a delivery attempt, so it is a static answer by design. The shape
+        # matches `remote_config.DeliveryResult` so a client can read `delivery.state`
+        # on every config response without special-casing the propose step.
+        "delivery": {
+            "state": "unchanged",
+            "revision_id": None,
+            "config_hash": prepared["config_hash"],
+            "channel": None,
+            "reason": "not_approved",
+            "detail": "nothing is delivered until an approver approves this proposal",
+        },
     }
 
 
@@ -570,7 +580,9 @@ def approve(
         "added": newcomers,
         "verdict": next(iter(verdicts.values())).to_dict() if verdicts else {},
         "override_reason": (override_reason or "").strip() or None,
-        "delivery": "queued — each agent receives it on its next status report",
+        # `delivery` is deliberately absent: the route attaches the result of actually
+        # trying to deliver (#102). A lifecycle module must not claim to have handed
+        # anything to an agent it cannot see.
     }
 
 
@@ -780,7 +792,6 @@ def rollback(
         "config_hash": record["config_hash"],
         "withdrawn": bool(record.get("withdrawn")),
         "verdict": verdict.to_dict(),
-        "delivery": "queued — sent on the agent's next status report",
     }
 
 
@@ -1059,16 +1070,20 @@ def proposal_view(proposal_id: str) -> Dict[str, Any]:
     revisions = []
     for row in rows:
         view = revision_view(row)
+        # Authoritative read, not the in-memory cache: a listing must not show this
+        # worker's stale view of another worker's delivery (#102).
         assignment = store.current(row["agent_id"])
-        view["delivery"] = {
-            "delivered_hash": assignment.get("delivered_hash") if assignment else None,
-            "delivered_at": assignment.get("delivered_at") if assignment else None,
-            "last_status": assignment.get("last_status") if assignment else None,
-            "last_error": assignment.get("last_error") if assignment else None,
-            "attempts": assignment.get("attempts") if assignment else 0,
-            "poisoned": assignment.get("poisoned") if assignment else False,
-            "current": bool(assignment and assignment.get("revision_id") == row["revision_id"]),
-        }
+        current = bool(assignment and assignment.get("revision_id") == row["revision_id"])
+        # #102: the same derived state the agent view uses, so "delivered" never
+        # means two different things in two listings. It describes the *current*
+        # assignment, so it is null on a revision that is no longer current.
+        delivery = remote_config.delivery_view(
+            assignment, remote_config.reported_hash(row["agent_id"])
+        )
+        delivery["current"] = current
+        if not current:
+            delivery["state"] = None
+        view["delivery"] = delivery
         revisions.append(view)
     statuses = {row.get("status") for row in rows}
     return {

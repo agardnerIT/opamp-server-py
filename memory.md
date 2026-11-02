@@ -258,7 +258,15 @@
 - **`dry_run` on `POST /config/rollouts` needs only `operator`** — it is a question, not a decision; creating the rollout still needs `approver`. The page forced this distinction into the open, and it is the right one: the person who proposed should be able to see the batch plan.
 - **No auto-refresh timer.** Progress is a Refresh button: polling a fleet-wide rollout from a browser on a timer is a request amplifier, and `st.fragment(run_every=…)` is version-dependent. Recorded as a deliberate choice, not an omission.
 - **UI tests actually run in this environment now** (streamlit 1.66 installed as the `[ui]` extra). `tests/test_ui_smoke.py` gained 8 behaviour tests plus the page in the every-page-renders parametrisation; `texts()` had to learn `header`/`subheader`/`title`, because the flow is addressed by heading and the helper silently could not see them. The fake server needed `/agents` in `.request()` (not just `.get()`) because `admin_request()` goes through `requests.request` for every verb — a fake that only implements `.get()` reports an empty fleet and makes a page look broken when it is not.
-- **Screenshots were not produced**: no `otelcol-contrib` binary on this machine and the README has no screenshots at all, so a capture would show an empty fleet. Documented on #104 as the one outstanding item.
+- **Screenshots landed** (see the finalisation entry below).
+
+## Chunk 6 finalised (#104) — screenshots and two real UI bugs, 2026-11-02
+
+- **`docs/screenshots/remote-config-{target,plan,paused}.png`** are in the README's "The Remote Config page (UI)" section. Captured against a real server in the *secure* posture (`OPAMP_AGENT_AUTH=token`, `TLS_TERMINATED_UPSTREAM=true`, `CONFIG_AT_REST_KEY`, audit on) with three token-authenticated agents over HTTP; the canary agent reports `FAILED` so the third shot is a genuinely paused rollout, not a mocked state.
+- **Driving the real page (Playwright, not `AppTest`) found two defects the fake had hidden.** Both fixed, both with regression tests:
+  - **A started rollout was invisible.** `rc_rollout_id` is a keyed widget, so the `value=` computed from the new rollout is ignored once the widget exists: approving started the rollout and left the progress box empty. Fixed by setting `st.session_state["rc_rollout_id"]` *before* the widget is created, with `ROLLOUT_AUTOFILL_KEY` so a manually-entered id is not overwritten; `test_approving_a_rollout_fills_the_live_progress_field`.
+  - **Blast radius said "unknown" for every agent.** The page read `description["non_identifying_attributes"]` as a mapping, but the API serialises camelCase **lists** of `{key, value:{stringValue}}` (#75). Fixed with `ui.shared.description_attribute()` (accepts both shapes), and `fake_agent()` now uses the serialised shape so the change-detector test cannot hide the next such drift (`1 × production` assertion).
+- Progress stays a **Refresh** button: the screenshot flow clicks it to reach the paused state, which is exactly what an operator does. No timer was added.
 
 ## CI and release (as of this session)
 

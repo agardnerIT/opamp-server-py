@@ -395,6 +395,42 @@ def logout(sign_out_all=False):
     st.rerun()
 
 
+def description_attribute(description, *keys):
+    """First scalar value among `keys` in an agent's description, or None.
+
+    The API serialises `AgentState.description` as camelCase **lists** of
+    `{key, value: {stringValue}}` entries (`identifyingAttributes` +
+    `nonIdentifyingAttributes`, #75). A plain mapping is also accepted, because
+    that is what a hand-written test fixture tends to be — but the list shape is
+    the real one, and reading only the mapping shape is how the Remote Config
+    blast radius silently said "3 × unknown" while the data was right there (#104).
+    """
+    description = description or {}
+    for field in (
+        "identifyingAttributes",
+        "nonIdentifyingAttributes",
+        "identifying_attributes",
+        "non_identifying_attributes",
+    ):
+        attrs = description.get(field)
+        if isinstance(attrs, dict):
+            for key in keys:
+                if attrs.get(key):
+                    return attrs[key]
+        elif isinstance(attrs, list):
+            for entry in attrs:
+                if not isinstance(entry, dict) or entry.get("key") not in keys:
+                    continue
+                value = entry.get("value")
+                if isinstance(value, dict):
+                    for value_key in ("stringValue", "string_value"):
+                        if value.get(value_key):
+                            return value[value_key]
+                elif value:
+                    return str(value)
+    return None
+
+
 def render_identity_panel():
     """Sidebar: who you are, what your role is, when the session dies, sign out.
 

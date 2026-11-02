@@ -39,6 +39,7 @@ from ui.shared import (  # noqa: E402
     ROLE_OPERATOR,
     ROLE_VIEWER,
     admin_request,
+    description_attribute,
     format_local_time,
     require_admin,
     render_sidebar,
@@ -53,6 +54,7 @@ ROLE_KEY = "rc_object_role"
 PROPOSAL_KEY = "rc_proposal"
 PLAN_KEY = "rc_plan"
 ROLLOUT_KEY = "rc_rollout"
+ROLLOUT_AUTOFILL_KEY = "rc_rollout_autofill"
 REVEAL_KEY = "rc_reveal"
 
 STATUS_ICON = {
@@ -189,9 +191,9 @@ if not agents:
 
 counts = {}
 for agent in agents:
-    description = agent.get("description") or {}
-    attributes = description.get("non_identifying_attributes") or {}
-    environment = attributes.get("deployment.environment") or attributes.get("environment") or "unknown"
+    environment = description_attribute(
+        agent.get("description"), "deployment.environment", "environment"
+    ) or "unknown"
     counts[environment] = counts.get(environment, 0) + 1
 
 metric_cols = st.columns(4)
@@ -434,6 +436,15 @@ if plan:
 
 # ---------------------------------------------------------------- 6 progress
 
+# #104: a rollout created in this page must appear in the live-progress field. The
+# field is a keyed widget, so its stored value wins over `value=` on every rerun —
+# without this, approving starts a rollout but the field stays empty and the operator
+# has to copy the id from the History tab. Set it *before* the widget is created;
+# setting it in the approve handler, further down, is a StreamlitAPIException.
+_created_rollout_id = (st.session_state.get(ROLLOUT_KEY) or {}).get("rollout_id")
+if _created_rollout_id and st.session_state.get(ROLLOUT_AUTOFILL_KEY) != _created_rollout_id:
+    st.session_state["rc_rollout_id"] = _created_rollout_id
+    st.session_state[ROLLOUT_AUTOFILL_KEY] = _created_rollout_id
 
 st.header("5. Roll out", divider="gray")
 rollout_id = st.text_input(

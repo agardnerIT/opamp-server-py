@@ -241,14 +241,27 @@ class FakeServer:
 
 
 def fake_agent(agent_id=None, healthy=True, capabilities=0x2):
-    """One `GET /agents` row: the minimum the Remote Config page reads."""
+    """One `GET /agents` row in the shape the **server** actually serialises.
+
+    The description is camelCase lists of `{key, value: {stringValue}}` (#75), not a
+    plain mapping: the mapping shape is what let the blast radius read "3 × unknown"
+    against the real API while this fixture said "1 × production" (#104).
+    """
     return {
         "id": agent_id or ("ab" * 16),
         "healthy": healthy,
         "capabilities": capabilities,
         "remote_config_status": "APPLIED",
         "description": {
-            "non_identifying_attributes": {"deployment.environment": "production"}
+            "identifyingAttributes": [
+                {"key": "service.name", "value": {"stringValue": "otelcol"}},
+            ],
+            "nonIdentifyingAttributes": [
+                {
+                    "key": "deployment.environment",
+                    "value": {"stringValue": "production"},
+                }
+            ],
         },
     }
 
@@ -580,6 +593,47 @@ def test_validate_then_propose_then_plan_is_one_call_each(server):
     assert "POST" in server.methods_for("/config/rollouts")
     # The plan is displayed, not just fetched: the batches are the operator's review.
     assert "2" in [metric.value for metric in app.metric]
+
+
+def test_approving_a_rollout_fills_the_live_progress_field(server):
+    """A rollout started in the page is visible immediately (#104).
+
+    The field is a keyed widget, so without the autofill it keeps the empty value it
+    was first created with and the operator sees "Rollout started" above a blank
+    progress box — the rollout exists, but the page silently does not show it.
+    """
+    server.agents = [fake_agent()]
+    app = signed_in(REMOTE_CONFIG_PAGE, rc_body="exporters:\n  debug: {}\n").run()
+    [button for button in app.button if (button.label or "") == "Validate"][0].click().run()
+    [button for button in app.button if (button.label or "") == "Propose revision"][0].click().run()
+    [button for button in app.button
+     if (button.label or "") == "Plan the rollout (dry run)"][0].click().run()
+    [button for button in app.button
+     if (button.label or "") == "Approve & roll out"][0].click().run()
+
+    assert not app.exception, app.exception
+    assert "Rollout started" in texts(app)
+    field = [widget for widget in app.text_input if widget.key == "rc_rollout_id"][0]
+    assert field.value == "ro-1"
+    # The live view rendered, not just the success message next to an empty field.
+    assert "auto_reverted" in texts(app)
+
+
+def test_description_attribute_reads_the_serialised_list_shape():
+    """The blast radius must read the API's real shape, not a fixture's convenience."""
+    from ui.shared import description_attribute
+
+    description = fake_agent()["description"]
+    assert description_attribute(description, "deployment.environment") == "production"
+    assert description_attribute(description, "environment") is None
+    assert description_attribute(None, "environment") is None
+    # The flat mapping is still accepted (older snapshots, hand-written fixtures).
+    assert (
+        description_attribute(
+            {"non_identifying_attributes": {"environment": "staging"}}, "environment"
+        )
+        == "staging"
+    )
 
 
 def test_a_paused_rollout_shows_its_reason_not_just_paused(server):

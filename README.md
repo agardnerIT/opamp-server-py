@@ -220,6 +220,20 @@ It is a session-token client (#105): buttons are role-gated in the page *and* th
 re-authorises every call, so the UI is ergonomics and never the boundary. Config bodies
 are never listed; the per-agent reveal stays on the Agents page where it is audited.
 
+![Remote Config step 1: the target selector with a live count and the blast radius](docs/screenshots/remote-config-target.png)
+
+*Step 1 — the fleet is counted and broken down by environment before anything is edited.*
+
+![Remote Config: the rollout plan from the dry run](docs/screenshots/remote-config-plan.png)
+
+*The plan is the review screen: real batches, canary size, caps and the health gate. The
+button below it is the only way a rollout starts.*
+
+![Remote Config: a paused rollout with its reason and the batch table](docs/screenshots/remote-config-paused.png)
+
+*A paused rollout names its one reason and shows which batch failed; abort and rollback are
+separate, differently-gated actions below.*
+
 ### OpAMP specification and capability matrix
 
 This server targets **OpAMP [v0.20.0](https://github.com/open-telemetry/opamp-spec/releases/tag/v0.20.0)**

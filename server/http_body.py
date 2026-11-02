@@ -40,6 +40,16 @@ class BodyTooLarge(Exception):
         self.limit = limit
 
 
+class UnsupportedEncoding(BadRequest):
+    """A `Content-Encoding` we cannot decode.
+
+    Still a `BadRequest` (the agent gets a spec-shaped `BAD_REQUEST` error response
+    either way), but the HTTP transport answers **415 Unsupported Media Type**: the
+    message is not malformed, the encoding is simply not one we implement, and
+    "bad request" would send an operator looking for a bug in the agent's protobuf.
+    """
+
+
 def _declared_length(request: Request) -> Optional[int]:
     """`Content-Length` as an int, or None when absent/unparseable."""
     raw = request.headers.get("content-length")
@@ -62,7 +72,7 @@ def _decompressor(encoding: str):
         return None
     if value in GZIP_ENCODINGS:
         return zlib.decompressobj(16 + zlib.MAX_WBITS)
-    raise BadRequest(f"unsupported Content-Encoding: {encoding!r}")
+    raise UnsupportedEncoding(f"unsupported Content-Encoding: {encoding!r}")
 
 
 async def read_body(request: Request, *, limit: Optional[int] = None) -> bytes:

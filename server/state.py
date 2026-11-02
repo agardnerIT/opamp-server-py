@@ -76,7 +76,8 @@ class SQLiteAgentStore:
                     compliance TEXT,
                     updated_at TEXT,
                     last_remote_config_hash TEXT,
-                    remote_config_error TEXT
+                    remote_config_error TEXT,
+                    last_sequence_num INTEGER
                 )
             """)
 
@@ -91,6 +92,10 @@ class SQLiteAgentStore:
                 conn.execute("ALTER TABLE agents ADD COLUMN last_remote_config_hash TEXT")
             if "remote_config_error" not in columns:
                 conn.execute("ALTER TABLE agents ADD COLUMN remote_config_error TEXT")
+            # #70: the spec's compression detection compares against the *last*
+            # sequence_num, so it has to survive a restart. NULL = no baseline yet.
+            if "last_sequence_num" not in columns:
+                conn.execute("ALTER TABLE agents ADD COLUMN last_sequence_num INTEGER")
 
     def load_all(self) -> Dict[str, "AgentState"]:
         agents = {}
@@ -107,8 +112,8 @@ class SQLiteAgentStore:
                                    healthy, capabilities, description, effective_config,
                                    remote_config_status, package_statuses, available_components,
                                    health, compliance, updated_at, last_remote_config_hash,
-                                   remote_config_error)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                   remote_config_error, last_sequence_num)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(agent_id) DO UPDATE SET
                     last_heartbeat=excluded.last_heartbeat,
                     healthy=excluded.healthy,
@@ -122,7 +127,8 @@ class SQLiteAgentStore:
                     compliance=excluded.compliance,
                     updated_at=excluded.updated_at,
                     last_remote_config_hash=excluded.last_remote_config_hash,
-                    remote_config_error=excluded.remote_config_error
+                    remote_config_error=excluded.remote_config_error,
+                    last_sequence_num=excluded.last_sequence_num
                 WHERE excluded.updated_at > agents.updated_at
             """, self._state_to_row(state))
 
@@ -148,6 +154,7 @@ class SQLiteAgentStore:
             utcnow().isoformat(),
             state.last_remote_config_hash,
             state.remote_config_error,
+            state.last_sequence_num,
         )
 
     @staticmethod
@@ -192,6 +199,7 @@ class SQLiteAgentStore:
             compliance=json.loads(row["compliance"] or "null"),
             last_remote_config_hash=_optional_column(row, "last_remote_config_hash"),
             remote_config_error=_optional_column(row, "remote_config_error"),
+            last_sequence_num=_optional_column(row, "last_sequence_num"),
             sealed_effective_config=sealed if config_error else None,
             config_error=config_error,
         )
@@ -1708,6 +1716,9 @@ class AgentState:
     # agent's RemoteConfigStatus are kept. Hex here, base64 on the wire.
     last_remote_config_hash: Optional[str] = None
     remote_config_error: Optional[str] = None
+    # #70: the last `AgentToServer.sequence_num` we accepted, so the next one can be
+    # checked for "exactly one greater". None = no baseline yet (see sequence.is_gap).
+    last_sequence_num: Optional[int] = None
     # #98: the sealed body this row was loaded from, kept only when it could not be
     # opened with the keys this process has (see SQLiteAgentStore._sealed_...).
     sealed_effective_config: Optional[str] = field(default=None, repr=False)
@@ -1962,6 +1973,9 @@ class AgentState:
             "remote_config_status": self.remote_config_status,
             "last_remote_config_hash": self.last_remote_config_hash,
             "remote_config_error": self.remote_config_error,
+            # #70: exposed so "why did the server ask for full state?" is answerable
+            # from the API instead of only from a log line.
+            "last_sequence_num": self.last_sequence_num,
             "package_statuses": self.package_statuses,
             "available_components": self.available_components,
             "components": self.components,
@@ -1983,6 +1997,8 @@ class AgentRegistry:
         self._agents: Dict[str, AgentState] = self._store.load_all()
         # agent_id -> monotonic time of the last successful persist
         self._persisted_at: Dict[str, float] = {}
+        # agent_id -> monotonic time we last asked it for a full status report (#70)
+        self._full_state_requested_at: Dict[str, float] = {}
 
     def register(self, agent_id: str, state: AgentState, persist: bool = True) -> None:
         self._agents[agent_id] = state
@@ -2038,10 +2054,29 @@ class AgentRegistry:
         last = self._persisted_at.get(agent_id)
         return last is None or (time.monotonic() - last) >= min_interval
 
+    def claim_full_state_request(
+        self, agent_id: str, min_interval: float, now: Optional[float] = None
+    ) -> bool:
+        """True if a `ReportFullState` ask for this agent is allowed right now (#70).
+
+        Records the request when it grants one, so a flapping agent cannot turn a
+        gap into a storm: without this, every message with a broken counter would
+        ask for full state, and the server would amplify one agent's problem across
+        the whole connection's queue. Rate limiting is per agent and in-memory on
+        purpose — it is a traffic-shaping decision, not state worth persisting.
+        """
+        now = time.monotonic() if now is None else now
+        last = self._full_state_requested_at.get(agent_id)
+        if last is not None and (now - last) < min_interval:
+            return False
+        self._full_state_requested_at[agent_id] = now
+        return True
+
     def remove(self, agent_id: str) -> bool:
         if agent_id in self._agents:
             del self._agents[agent_id]
             self._persisted_at.pop(agent_id, None)
+            self._full_state_requested_at.pop(agent_id, None)
             self._store.remove(agent_id)
             return True
         return False

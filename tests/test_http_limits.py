@@ -147,17 +147,27 @@ def test_corrupt_gzip_is_bad_request(client, monkeypatch):
     assert AGENT_REGISTRY.count == 0
 
 
-def test_unknown_content_encoding_is_bad_request(client, monkeypatch):
+def test_unknown_content_encoding_is_415_not_a_silent_partial_success(client, monkeypatch):
+    """#71: an encoding we do not implement is a 415, still shaped as BAD_REQUEST.
+
+    415 rather than 400 because the message is not malformed — nothing about the
+    agent's protobuf is wrong, we simply cannot decode the envelope — while the body
+    stays a spec `ServerErrorResponse{BAD_REQUEST}` so the agent can read why. What
+    must never happen is the old behaviour: parsing `br` bytes as protobuf, storing a
+    half-empty report and answering 200.
+    """
     from proto import opamp_pb2
 
     monkeypatch.setenv("OPAMP_MAX_MESSAGE_BYTES", "256")
 
     response = post(client, b"whatever", **{"Content-Encoding": "br"})
 
-    assert response.status_code == 400
+    assert response.status_code == 415
     reply = opamp_pb2.ServerToAgent()
     reply.ParseFromString(response.content)
+    assert reply.error_response.type == opamp_pb2.ServerErrorResponseType_BadRequest
     assert "Content-Encoding" in reply.error_response.error_message
+    assert AGENT_REGISTRY.count == 0
 
 
 def test_metrics_endpoint_does_not_share_the_opamp_limit(client, monkeypatch):

@@ -168,11 +168,41 @@ limit is checked against `Content-Length` first and then while streaming, **afte
 `Content-Encoding: gzip` decompression — so a small compressed body cannot expand
 past the cap. An oversized body gets `413 Content Too Large` and changes no state
 (no registration, no heartbeat, no metrics). A body that is not a usable
-`AgentToServer` — unparseable protobuf, an empty `instance_uid`, or an unknown or
-corrupt `Content-Encoding` — gets `400` with a `ServerToAgent.error_response`
-(`type: BAD_REQUEST`) and a human-readable reason. `/v1/metrics` carries OTLP, not
-OpAMP, and deliberately does not share this limit. On WebSocket the same rejections
-send the error frame and close `1002`; oversized frames close `1009`.
+`AgentToServer` — unparseable protobuf, an empty `instance_uid`, or corrupt gzip —
+gets `400` with a `ServerToAgent.error_response` (`type: BAD_REQUEST`) and a
+human-readable reason; a `Content-Encoding` the server does not implement gets
+`415` with the same body. `/v1/metrics` carries OTLP, not OpAMP, and deliberately
+does not share this limit. On WebSocket the same rejections send the error frame and
+close `1002`; oversized frames close `1009`.
+
+#### Compression
+
+Agents may gzip their request body (`Content-Encoding: gzip` or `x-gzip`) and the
+server unrolls it *inside* the bounded read, so a decompression bomb is refused at
+the limit rather than expanded first. The reply is gzipped when the agent sent
+`Accept-Encoding: gzip` **and** the body is at least 1 KiB — a 40-byte capabilities
+reply costs more to compress than it saves, so it stays plain. `Vary:
+Accept-Encoding` is set so a cache cannot serve gzip to a client that cannot read it.
+The collector's `opamp` extension does not enable compression today; `opamp-go`
+clients that call `EnableCompression()` get it for free.
+
+#### Incomplete status reports
+
+Agents may omit unchanged sub-messages, so an `AgentToServer` is not necessarily a
+full picture. The only signal the spec provides is `sequence_num`: anything that is
+not exactly one greater than the last accepted value means status was missed, and
+the server answers with `ReportFullState` so the agent resends everything. Three
+details are worth knowing:
+
+- the counter is persisted per agent (`GET /agent/{id}` → `last_sequence_num`) so it
+  survives a server restart, which is the case the spec's rule exists for;
+- `sequence_num: 0` means "not set" and never triggers an ask, so an SDK that never
+  fills the field is not asked for full state on every message;
+- the ask is rate limited per agent to `REPORT_FULL_STATE_MIN_INTERVAL_SECONDS`
+  (60), because a flapping agent with a broken counter would otherwise turn every
+  poll into a full-state request. Counted in
+  `opamp_full_state_requested_total{reason}` — `new_agent` for the registration
+  baseline, `sequence_gap` for a repair.
 
 ### Server capabilities
 
@@ -711,6 +741,11 @@ Observability, because "my agent disappeared" must be answerable from the API:
 `stale_timeout_seconds` (the budget actually applied to it), and the removal log
 line carries the silence, the timeout and the interval.
 
+For the same reason, `GET /agent/{id}` reports `last_sequence_num` — the last
+`sequence_num` accepted from that agent. A gap against it is what triggers a
+`ReportFullState` ask, so "why did the server ask this agent for everything?" is
+answerable from the API instead of only from a log line.
+
 ## Environment Variables
 
 | Variable | Default | Description |
@@ -735,6 +770,7 @@ line carries the silence, the timeout and the interval.
 | `OPAMP_WS_ENABLED` | `false` | Enable the WebSocket transport on `/v1/opamp` (see [Transports](#transports)) |
 | `OPAMP_MAX_MESSAGE_BYTES` | `67108864` | Max OpAMP message size (64 MiB) on both transports; varint header included. HTTP request bodies are capped after gzip decompression. `/v1/metrics` (OTLP) is not affected |
 | `OPAMP_WS_OUTBOUND_QUEUE` | `32` | Per-connection WebSocket send queue depth; oldest is dropped when full. A dropped config frame is re-sent by reconciliation, never counted as a delivery (#102) |
+| `REPORT_FULL_STATE_MIN_INTERVAL_SECONDS` | `60` | Minimum gap between `ReportFullState` asks for one agent, when its `sequence_num` shows the server missed status. Stops a flapping counter from becoming a request storm; `0` disables the limit (#70) |
 | `CONFIG_PUSH_RATE_PER_SECOND` | `20` | Config frames per second allowed on one WebSocket connection. Over the limit the push is `queued` (delivered on the next report), never blocked |
 | `CONFIG_PUSH_BURST` | `20` | Burst allowance per connection before the rate applies |
 | `CONFIG_PUSH_MAX_CONCURRENT` | `50` | Global cap on config frames queued but not yet written; over it, pushes degrade to `queued` |
@@ -977,7 +1013,7 @@ The UI signs in the same way the CLI does — `POST /auth/session` — and then 
 | POST | `/auth/principals` | admin | Create an identity: `{"name", "role", "password", "expires_at"}`. scrypt-hashed; 409 taken name, 422 bad role/short password |
 | DELETE | `/auth/principals/{id}` | admin | Revoke an identity and close its sessions (row kept, name stays reserved) |
 | GET | `/auth/verify` | viewer | Validate a credential — any role passes (200, 401, or 429 when locked out); failures feed the lockout |
-| POST | `/v1/opamp` | 🔑 | OpAMP protocol endpoint — agents connect here (protobuf). With `OPAMP_AGENT_AUTH=token` the agent must send `Authorization: Bearer <token>`: 401 without a valid one, 403 when the token is for another `instance_uid`. Malformed input (including an empty `instance_uid`) is 400 with a `BAD_REQUEST` error body; a body over `OPAMP_MAX_MESSAGE_BYTES` (after decompression) is 413 |
+| POST | `/v1/opamp` | 🔑 | OpAMP protocol endpoint — agents connect here (protobuf). With `OPAMP_AGENT_AUTH=token` the agent must send `Authorization: Bearer <token>`: 401 without a valid one, 403 when the token is for another `instance_uid`. Malformed input (including an empty `instance_uid`) is 400 with a `BAD_REQUEST` error body; a body over `OPAMP_MAX_MESSAGE_BYTES` (after decompression) is 413; an unsupported `Content-Encoding` is 415 |
 | WS | `/v1/opamp` | 🔑 | Same endpoint over WebSocket when `OPAMP_WS_ENABLED=true`; credential checked before `accept()`, refusals close `1008`. Malformed messages (including an empty `instance_uid`) get a `BAD_REQUEST` error frame then close `1002`; oversized frames close `1009` |
 | POST | `/v1/metrics` | | OTLP/HTTP metrics ingestion from collectors (JSON or protobuf) |
 | GET | `/agents` | | List agents. Filters: `healthy=true\|false\|unknown`, `status=` (remote config status, or alias `remote_config_status=`), or any description attribute, e.g. `?environment=prod`. Repeated params are OR. Each agent carries a `credential` block |

@@ -10,10 +10,11 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, Request, HTTPException, Query, WebSocket, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, JSONResponse
+from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel
 from google.protobuf.json_format import MessageToDict
 from loguru import logger
-from typing import Optional, Dict, Any, List, Literal
+from typing import Optional, Dict, Any, List, Literal, Tuple
 from functools import wraps
 
 from dotenv import load_dotenv
@@ -71,9 +72,10 @@ from server import (
     protocol,
     redaction,
     remote_config,
+    sequence,
     tracing,
 )
-from server.http_body import BodyTooLarge, read_body
+from server.http_body import BodyTooLarge, UnsupportedEncoding, read_body
 from server.redaction import redact_document
 from server.auth import (  # noqa: F401  (privileged routes below)
     ROLE_ADMIN,
@@ -242,6 +244,14 @@ PROM_CONFIG_PUSHES = prom_client.Counter(
     ["result"],
 )
 
+# #70: `ReportFullState` asks, by reason. `new_agent` is the registration baseline;
+# `sequence_gap` is a status report the spec says we know to be incomplete.
+PROM_FULL_STATE_REQUESTS = prom_client.Counter(
+    "opamp_full_state_requested_total",
+    "ServerToAgent ReportFullState requests sent to agents, by reason",
+    ["reason"],
+)
+
 
 def _parse_cors_origins(raw: str) -> list:
     """Parse the CORS_ORIGINS env var (comma-separated origins; "*" = allow all)."""
@@ -290,6 +300,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# #71: the spec says a server SHOULD gzip its reply when the client advertised
+# `Accept-Encoding: gzip`, and opamp-go only decompresses when it sees the
+# `Content-Encoding` header — so honouring the request is the whole feature. The
+# floor keeps a 40-byte capabilities reply plain, where gzip costs more than it
+# saves. Starlette's middleware negotiates the encoding, skips responses that
+# already set `Content-Encoding` (an error page from a proxy, say), and adds
+# `Vary: Accept-Encoding` so a cache cannot serve gzip to a client that cannot read
+# it. It passes non-HTTP scopes straight through, so the WebSocket transport is
+# unaffected.
+GZIP_MIN_RESPONSE_BYTES = 1024
+app.add_middleware(GZipMiddleware, minimum_size=GZIP_MIN_RESPONSE_BYTES)
 
 # #108: outermost, so even a CORS rejection and a 4xx from a route carries a
 # request id and exactly one completion line. WebSocket scopes pass through
@@ -879,14 +901,51 @@ def cleanup_stale_agents(now: Optional[datetime] = None) -> list:
 HEARTBEAT_PERSIST_SECONDS = 60  # bounds post-restart heartbeat skew (#109)
 
 
-def _apply_status_report(agent_id: str, agent_dict: Dict[str, Any], persist: bool = True) -> bool:
+def report_full_state_interval() -> float:
+    """Minimum seconds between `ReportFullState` asks for one agent (#70).
+
+    Read per call, not at import, so a test (or an operator restarting with a
+    different value) sees the change without reimporting the module. `0` disables the
+    rate limit, which is only useful for testing: in production it lets one agent
+    with a broken counter turn every poll into a full-state request.
+    """
+    raw = os.environ.get("REPORT_FULL_STATE_MIN_INTERVAL_SECONDS", "60")
+    try:
+        value = float(raw)
+    except ValueError:
+        return 60.0
+    return value if value >= 0 else 60.0
+
+
+def _apply_status_report(
+    agent_id: str,
+    agent_dict: Dict[str, Any],
+    persist: bool = True,
+    sequence_num: Optional[int] = None,
+) -> Tuple[bool, Optional[str]]:
     """Apply the status fields present in any valid agent message.
 
     Fields are collected and applied to the in-memory state in one pass, then
     persisted at most once: a message that changes nothing performs no write at
     all, and one that changes N field groups performs exactly one (#109).
+
+    Returns `(changed, full_state_reason)`. `full_state_reason` is `None` unless the
+    message is *known* to be an incomplete picture of the agent (#70), in which case
+    the caller sets `ReportFullState` on the reply — subject to its own rate limit,
+    which this function deliberately does not apply so the decision stays testable
+    and the policy stays in one place (`AgentRegistry.claim_full_state_request`).
     """
     updates: Dict[str, Any] = {}
+    full_state_reason: Optional[str] = None
+
+    # #70: read the previous counter *before* recording this one, or every message
+    # is compared against itself and no gap is ever seen.
+    if sequence_num:
+        agent = AGENT_REGISTRY.get(agent_id)
+        previous = agent.last_sequence_num if agent is not None else None
+        if sequence.is_gap(previous, sequence_num):
+            full_state_reason = "sequence_gap"
+        updates["last_sequence_num"] = sequence_num
 
     if 'health' in agent_dict and agent_dict['health']:
         updates['healthy'] = agent_dict['health'].get('healthy', False)
@@ -930,14 +989,14 @@ def _apply_status_report(agent_id: str, agent_dict: Dict[str, Any], persist: boo
     # only: the row is written once below, by `persist()`.
     AGENT_REGISTRY.record_report(agent_id)
     if not persist:
-        return changed
+        return changed, full_state_reason
 
     # Steady state: nothing changed, so skip the write unless the stored
     # heartbeat is old enough that a restart would look like a stale fleet.
     if changed or AGENT_REGISTRY.heartbeat_persist_due(agent_id, HEARTBEAT_PERSIST_SECONDS):
         AGENT_REGISTRY.persist(agent_id)
-        return True
-    return False
+        return True, full_state_reason
+    return False, full_state_reason
 
 
 MESSAGE_KINDS = (
@@ -1148,13 +1207,38 @@ def _apply_agent_message(
                 description=agent_dict.get("agentDescription", {}),
             ), persist=False)
             response.flags = ServerToAgentFlags.ServerToAgentFlags_ReportFullState
+            PROM_FULL_STATE_REQUESTS.labels(reason="new_agent").inc()
             update_metrics()
 
             send_new_agent_alert(agent_id)
 
         # One write for the whole message (#109): `_apply_status_report` batches the
         # field groups and flushes the row at most once, including for a new agent.
-        _apply_status_report(agent_id, agent_dict)
+        _, full_state_reason = _apply_status_report(
+            agent_id, agent_dict, sequence_num=agent_msg.sequence_num
+        )
+
+        # #70: the agent told us — by its sequence number — that it omitted status we
+        # never received, so ask for the whole picture. Never guess the missing
+        # fields, and never ask a disconnecting agent for anything. The rate limit is
+        # what stops a broken counter from becoming a ReportFullState storm; a
+        # suppressed ask is not lost, because the next message is still a gap.
+        if full_state_reason and 'agentDisconnect' not in agent_dict:
+            if AGENT_REGISTRY.claim_full_state_request(
+                agent_id, report_full_state_interval()
+            ):
+                response.flags |= ServerToAgentFlags.ServerToAgentFlags_ReportFullState
+                PROM_FULL_STATE_REQUESTS.labels(reason=full_state_reason).inc()
+                logger.bind(
+                    event="opamp.report.incomplete",
+                    reason=full_state_reason,
+                    sequence_num=agent_msg.sequence_num,
+                    agent_id=agent_id,
+                    transport=transport,
+                ).info(
+                    f"Status report from {agent_id} is incomplete "
+                    f"(sequence_num={agent_msg.sequence_num}); requesting full state"
+                )
 
         # #81: react to a FAILED report before deciding what to offer — a poisoned
         # revision must not be re-sent in the same reply that learned it failed (D6).
@@ -1236,11 +1320,15 @@ def _instance_uid_header(request: Request) -> str:
     return request.headers.get(INSTANCE_UID_HEADER, "")
 
 
-def _bad_request_response(exc: protocol.BadRequest) -> Response:
-    """400 carrying a spec-shaped `ServerErrorResponse`, so the agent can read why."""
+def _bad_request_response(exc: protocol.BadRequest, status_code: int = 400) -> Response:
+    """400 carrying a spec-shaped `ServerErrorResponse`, so the agent can read why.
+
+    `status_code` is 415 for an encoding we do not implement (#71): the body is still
+    a `BAD_REQUEST` error_response, because that is the only shape the spec defines.
+    """
     return Response(
         content=protocol.error_response(exc.detail, exc.instance_uid).SerializeToString(),
-        status_code=400,
+        status_code=status_code,
         media_type="application/x-protobuf",
     )
 
@@ -1264,11 +1352,22 @@ async def opamp_endpoint(request: Request) -> Response:
     `opamp_agent_auth_failures_total{reason}`. The default (`off`) is
     unauthenticated, exactly as before.
 
-    **Malformed input** (unparseable protobuf, empty `instance_uid`, unsupported or
-    corrupt `Content-Encoding`) is **400** with a `ServerToAgent.error_response`
-    (`type: BAD_REQUEST`, human-readable `error_message`) and changes no state. A
-    body over `OPAMP_MAX_MESSAGE_BYTES` — measured after gzip decompression — is
-    **413** and likewise changes nothing.
+    **Malformed input** (unparseable protobuf, empty `instance_uid`, corrupt gzip) is
+    **400** with a `ServerToAgent.error_response` (`type: BAD_REQUEST`,
+    human-readable `error_message`) and changes no state. A body over
+    `OPAMP_MAX_MESSAGE_BYTES` — measured after gzip decompression — is **413**, and a
+    `Content-Encoding` this server does not implement is **415**; both likewise
+    change nothing.
+
+    **Compression** (#71): a gzipped request body is unrolled *inside* the bounded
+    read, so a decompression bomb is refused at the limit instead of being expanded
+    first. The reply is gzipped when the client advertised `Accept-Encoding: gzip`
+    and the body is large enough to be worth it.
+
+    **Incomplete status** (#70): agents may omit unchanged sub-messages, so a
+    `sequence_num` that is not exactly one greater than the previous one means the
+    server is missing status. The reply then sets `ReportFullState` (at most once per
+    `REPORT_FULL_STATE_MIN_INTERVAL_SECONDS` per agent).
 
     The same path also accepts a WebSocket upgrade when `OPAMP_WS_ENABLED=true`.
     """
@@ -1299,6 +1398,17 @@ async def opamp_endpoint(request: Request) -> Response:
             limit=exc.limit,
         ).warning(f"refusing OpAMP request body: {exc}")
         raise HTTPException(status_code=413, detail="OpAMP request body too large")
+    except UnsupportedEncoding as exc:
+        # 415, not 400: the message is fine, the encoding is not one we implement.
+        logger.bind(
+            event="opamp.message.rejected",
+            transport="http",
+            reason="unsupported_encoding",
+            client=client,
+            instance_uid=_instance_uid_header(request),
+            content_encoding=request.headers.get("content-encoding", ""),
+        ).warning(f"refusing OpAMP message: {exc.detail}")
+        return _bad_request_response(exc, status_code=415)
     except protocol.BadRequest as exc:
         logger.bind(
             event="opamp.message.rejected",

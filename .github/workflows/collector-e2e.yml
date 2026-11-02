@@ -56,7 +56,10 @@ jobs:
       - name: Start the server
         # 0.0.0.0, not the default 127.0.0.1: the collector runs in a container and
         # reaches the host through the docker bridge. A fresh DATA_DIR keeps the run
-        # hermetic — no leftover fleet, no developer's database.
+        # hermetic — no leftover fleet, no developer's database. Both transports are
+        # enabled so one server can serve the HTTP and WebSocket collectors below.
+        env:
+          OPAMP_WS_ENABLED: "true"
         run: |
           mkdir -p "$RUNNER_TEMP/opamp"
           DATA_DIR="$RUNNER_TEMP/opamp" nohup python -m uvicorn server.main:app \
@@ -86,13 +89,31 @@ jobs:
             --agent-name e2e-collector \
             --timeout 120
 
+      - name: Start the collector (WebSocket)
+        # The documented WebSocket block, exercised for real. `collector/e2e-ws.yaml`
+        # is what the README shows; if the extension rejects a key in it, this fails.
+        run: |
+          docker run -d --name opamp-e2e-ws \
+            --add-host=host.docker.internal:host-gateway \
+            -v "$PWD/collector/e2e-ws.yaml:/etc/otelcol-contrib/config.yaml" \
+            "$COLLECTOR_IMAGE"
+
+      - name: Assert the WebSocket collector is visible and buildable
+        run: |
+          python scripts/collector_e2e.py \
+            --server "$SERVER_URL" \
+            --agent-name e2e-collector-ws \
+            --timeout 120
+
       - name: Server log
         if: always()
         run: cat "$RUNNER_TEMP/server.log" || true
 
-      - name: Collector log
+      - name: Collector logs
         if: always()
-        run: docker logs opamp-e2e || true
+        run: |
+          docker logs opamp-e2e || true
+          docker logs opamp-e2e-ws || true
 
       - name: Fleet as the server saw it
         if: always()

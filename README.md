@@ -123,9 +123,17 @@ For MCP tools (used by Claude Desktop, Claude Code, and other MCP clients):
 pip install -e ".[mcp]"     # adds the mcp dependency
 ```
 
-### Connect Agent
+### Connect a collector
 
-Modify collector YAML by adding the `opamp` extension:
+This server works with **any collector distro that ships
+`extension/opampextension`** — `otelcol-contrib`, a core build with the extension
+compiled in, a supervisor-managed collector, or a custom distro. Nothing has to be
+rebuilt to connect one: adding the block below is the whole integration.
+
+`collector/e2e.yaml` is the known-good config that CI runs against a real
+`otelcol-contrib` on every PR (`.github/workflows/collector-e2e.yml`, #113).
+
+**HTTP transport** — add the extension and name it in `service.extensions`:
 
 ```yaml
 extensions:
@@ -133,20 +141,104 @@ extensions:
     server:
       http:
         endpoint: http://127.0.0.1:4320/v1/opamp
+        polling_interval: 5s
+    agent_description:
+      non_identifying_attributes:
+        "agent.name": "collector-1"      # your label; `GET /agents` shows it
+        "environment": "production"
+
+service:
+  extensions: [opamp]                     # required, or the extension never starts
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]
 ```
 
-With `OPAMP_AGENT_AUTH=token` (see [Agent authentication](#agent-authentication-agent--server))
-the same block also carries the agent's credential:
+Restart the collector, then check it arrived:
+
+```bash
+curl --max-time 20 --connect-timeout 5 -s localhost:4320/agents | jq '.count, .agents[].id'
+opampctl agents list --pretty            # same data with names and capability tags
+```
+
+**WebSocket transport** — replace the `http` block with `ws` (the server needs
+`OPAMP_WS_ENABLED=true`). One block, not both: the extension uses whichever is
+present.
 
 ```yaml
 extensions:
   opamp:
     server:
-      http:
+      ws:
+        endpoint: ws://127.0.0.1:4320/v1/opamp
+```
+
+`server.ws` takes `endpoint` and `headers` only — `polling_interval` is an HTTP
+concept and is **rejected** as an unknown key (verified against `0.140.0`). A
+socket is server-push, so there is nothing to poll; the agent still sends its own
+heartbeats. Both transports carry the identical message handler, so the state in
+`/agents` is the same either way (`tests/test_ws_parity.py` asserts it).
+
+**Agent authentication** (`OPAMP_AGENT_AUTH=token`) — the credential rides in a
+header, because that is what `opampextension` supports:
+
+```yaml
+extensions:
+  opamp:
+    server:
+      http:                               # or `ws:`, with the same headers block
         endpoint: http://127.0.0.1:4320/v1/opamp
         headers:
           Authorization: "Bearer ${env:OPAMP_AGENT_TOKEN}"
 ```
+
+Mint it with `opampctl agents token create <agent-id>` (the response carries a
+paste-ready snippet), keep it out of git by passing it as an environment variable,
+and read the [cutover runbook](#cutover-runbook-off--token) before switching a
+running fleet — the token is bound to one `instance_uid`, so mint it *after* the
+agent has registered. `${env:…}` is expanded by the collector and the value is
+`configopaque`, so the agent's own effective-config report redacts it.
+
+**TLS** — terminate it in front of the server rather than in it: set
+`TLS_TERMINATED_UPSTREAM=true` (this asserts the posture; see
+[Before you expose this server](#before-you-expose-this-server)), keep port 4320
+bound to loopback, and point agents at the proxy:
+
+```yaml
+        endpoint: https://opamp.example.com/v1/opamp    # ws → wss://
+```
+
+`docker/nginx.conf` and `docker/Caddyfile` are ready-made terminators; forward
+`Upgrade`/`Connection` and a long read timeout so the WebSocket transport keeps
+working, and leave `Origin` intact.
+
+**Polling interval** — for HTTP this *is* the heartbeat. The server learns each
+agent's cadence and scales its staleness timeout to it, so a 60 s poller is fine;
+what it cannot tell apart is "slow poller" and "died on startup" before the second
+report, so a very long interval widens the window in which a restart looks like a
+new agent. 5–30 s is a good range.
+
+**Verifying it worked.** `/agents` shows the agent, its description attributes and
+its health. `GET /agent/{id}` shows the detail worth checking on day one:
+`available_components` present in full (the server asks once per hash, #77),
+`components` with the parts actually used by the pipeline, and `capabilities`
+telling you which optional features the agent will accept. `GET /health` reports
+`spec_version` and the server's own capability bits, so "will this agent
+interoperate?" is answerable without reading source.
+
+| Distro | Works? | Note |
+|---|---|---|
+| `otelcol-contrib` | ✅ | The e2e config in this repo, [verified in CI](.github/workflows/collector-e2e.yml) |
+| Custom/core build | ✅ | Only if it includes `extension/opampextension` |
+| `otelcol` (core, upstream) | ❌ | No `opamp` extension in the core distro — use contrib or a build that has it |
+| OpAMP Supervisor | ✅ | Different config shape; it can also consume connection settings (the collector extension cannot) |
+
+A **slim distro built with OCB** is an optional optimisation, not a requirement:
+`POST /agent/{id}/manifest` (and the UI) generates a manifest for exactly the
+components an agent uses, if you want to ship a smaller binary. Any distro works
+without it.
 
 ### Transports
 

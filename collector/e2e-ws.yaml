@@ -1,0 +1,44 @@
+extensions:
+  # WebSocket twin of `collector/e2e.yaml` (#114, #113). It exists to keep the
+  # documented connection settings honest: the "Connect a collector" section of the
+  # README shows this exact block, and CI runs it against a real collector, so a
+  # config key that the extension does not accept (e.g. `polling_interval` under
+  # `server.ws`, which it rejects) fails the build instead of a reader's afternoon.
+  #
+  # Deliberately no `polling_interval`: a socket is server-push, and the extension
+  # treats the key as an unknown field.
+  opamp:
+    server:
+      ws:
+        endpoint: ws://host.docker.internal:4320/v1/opamp
+    agent_description:
+      non_identifying_attributes:
+        "agent.name": "e2e-collector-ws"
+        "environment": "ci"
+    capabilities:
+      reports_health: true
+      reports_effective_config: true
+      reports_available_components: true
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 127.0.0.1:4317
+      http:
+        endpoint: 127.0.0.1:4318
+
+processors:
+  batch:
+
+exporters:
+  debug:
+    verbosity: normal
+
+service:
+  extensions: [opamp]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]

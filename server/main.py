@@ -285,6 +285,23 @@ PROM_FULL_STATE_REQUESTS = prom_client.Counter(
     ["reason"],
 )
 
+# #75: one uid, two agents. `action` is `reissued` when the agent was given a new
+# uid, `detected` when it was not (agent authentication, where the credential is the
+# identity, or the feature switched off).
+PROM_DUPLICATE_UIDS = prom_client.Counter(
+    "opamp_duplicate_instance_uid_total",
+    "Suspected duplicate instance_uids, by signal and action taken",
+    ["reason", "action"],
+)
+
+# #76: `OpAMP-Instance-UID` header values that were not usable, by reason. Separate
+# from duplicate detection: this counts what the client *said*, not what it did.
+PROM_UID_HEADER_PROBLEMS = prom_client.Counter(
+    "opamp_instance_uid_header_problems_total",
+    "OpAMP-Instance-UID request headers that were malformed or disagreed with the body",
+    ["reason"],
+)
+
 
 def _parse_cors_origins(raw: str) -> list:
     """Parse the CORS_ORIGINS env var (comma-separated origins; "*" = allow all)."""
@@ -931,6 +948,7 @@ def cleanup_stale_agents(now: Optional[datetime] = None) -> list:
         PROM_AGENT_HEALTH.remove(agent.agent_id)
         _METRICS_STORE.delete(agent.agent_id)
         AGENT_METRICS.pop(agent.agent_id, None)
+        DUPLICATE_UID_DETECTORS.forget(agent.agent_id)
         send_stale_agent_alert(agent.agent_id)
 
     update_metrics()
@@ -954,6 +972,91 @@ def report_full_state_interval() -> float:
     except ValueError:
         return 60.0
     return value if value >= 0 else 60.0
+
+
+def duplicate_uid_detection_enabled() -> bool:
+    """Is duplicate-`instance_uid` detection on? (#75) `OPAMP_DUPLICATE_UID_DETECTION`.
+
+    Default on: the cost of a false positive is one extra fleet entry, and the cost of
+    a missed duplicate is two agents silently overwriting each other. Read per call so
+    an operator can turn it off in a test or an emergency without a code change; when
+    it is off nothing is even observed, which is the honest meaning of "disabled".
+    """
+    raw = os.environ.get("OPAMP_DUPLICATE_UID_DETECTION", "true").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+# #75: one detector for the process. It is traffic analysis (in-memory), so it is not
+# part of `AGENT_REGISTRY`; the *outcome* (the replacement uid and why) is persisted
+# on the agent row. Tests that need their own instance monkeypatch this name.
+DUPLICATE_UID_DETECTORS = protocol.DuplicateUidDetector()
+
+
+def uid_header_strict() -> bool:
+    """Does an `OpAMP-Instance-UID`/body mismatch refuse the message? (#76)
+
+    Off by default: the body is authoritative, and a proxy that rewrites headers is a
+    legitimate deployment. When on, a mismatch is a `BAD_REQUEST` (HTTP 400, WS 1002).
+    """
+    raw = os.environ.get(protocol.STRICT_UID_HEADER_ENV, "false").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def check_uid_header(raw: str, instance_uid: bytes, transport: str) -> None:
+    """Cross-check the `OpAMP-Instance-UID` header against the body uid (#76).
+
+    Three outcomes, all of them cheap and none of them able to break a working client:
+
+    * no header, or one that agrees with the body — nothing happens;
+    * a value we cannot read as a uuid (and that is not the body uid written as plain
+      ascii, which is how every fixture and harness in this repo names its agents) —
+      one warning and one metric, then the body is believed;
+    * a readable value that disagrees with the body — one warning naming *both* uids
+      and one metric, then the body is believed again unless strict mode is on, in
+      which case the message is refused.
+
+    Raised as `protocol.BadRequest` rather than an `HTTPException` so the socket layer
+    answers exactly like HTTP: error frame, then close 1002.
+    """
+    if not raw:
+        return
+    stated = protocol.parse_instance_uid_header(raw)
+    if stated is None and raw.strip().encode("utf-8", "replace") == instance_uid:
+        # Lenient by design: non-UUID ids are how this project's own clients name
+        # themselves, and a header that matches the body is correct whatever it looks
+        # like.
+        return
+    if stated is None:
+        PROM_UID_HEADER_PROBLEMS.labels(reason="malformed").inc()
+        logger.bind(
+            event="opamp.uid_header.malformed",
+            transport=transport,
+            instance_uid=instance_uid.hex(),
+            header_value=raw[:64],
+        ).warning(
+            f"Ignoring unreadable {protocol.INSTANCE_UID_HEADER} header "
+            f"{raw[:64]!r}; using the message body ({instance_uid.hex()})"
+        )
+        return
+    if stated == instance_uid:
+        return
+    PROM_UID_HEADER_PROBLEMS.labels(reason="mismatch").inc()
+    logger.bind(
+        event="opamp.uid_header.mismatch",
+        transport=transport,
+        instance_uid=instance_uid.hex(),
+        header_uid=stated.hex(),
+        strict=uid_header_strict(),
+    ).warning(
+        f"{protocol.INSTANCE_UID_HEADER} header says {stated.hex()} but the message "
+        f"body says {instance_uid.hex()}; trusting the body"
+    )
+    if uid_header_strict():
+        raise protocol.BadRequest(
+            f"{protocol.INSTANCE_UID_HEADER} header ({stated.hex()}) does not match "
+            f"AgentToServer.instance_uid ({instance_uid.hex()})",
+            instance_uid=instance_uid,
+        )
 
 
 def _apply_status_report(
@@ -1060,6 +1163,7 @@ def _handle_agent_message(
     data: bytes,
     principal: "agent_auth.Principal | None" = None,
     transport: str = "http",
+    uid_header: str = "",
 ) -> ProcessedMessage:
     """Apply one `AgentToServer` message and build the `ServerToAgent` reply.
 
@@ -1076,6 +1180,10 @@ def _handle_agent_message(
     the HTTP transport answers 400 and the socket closes 1002, each after sending a
     `ServerErrorResponse{BAD_REQUEST}` with a human-readable reason. Nothing is
     registered or mutated, because every check here runs before `_apply`.
+
+    `uid_header` is the raw `OpAMP-Instance-UID` request header (#76). It is only ever
+    a signal — cross-checked against the body, never trusted over it — and a mismatch
+    is a warning unless `OPAMP_UID_HEADER_STRICT` turns it into a `BAD_REQUEST`.
 
     `transport` is only for observability (#108): the log line carries it, and the
     `opamp.message` span records `transport=http|ws`, which is the first question
@@ -1111,6 +1219,10 @@ def _handle_agent_message(
     )
     agent_id = binascii.hexlify(original_uid).decode('utf-8')
     agent_dict = MessageToDict(agent_msg)
+
+    # #76: the header is a hint, so check it before touching state — a strict-mode
+    # mismatch is a refusal, and the body is still the identity either way.
+    check_uid_header(uid_header, original_uid, transport)
 
     if principal is not None:
         # Identity comes from the credential, never from the body (D1). Reject
@@ -1153,6 +1265,48 @@ def _handle_agent_message(
             f"temporary uid {original_uid.hex()}"
         )
 
+    # #75: two agents can present one uid — a cloned VM, a restored backup, a broken
+    # id generator. One agent renaming its `service.instance.id` in place must *not*
+    # trigger this, so the detector fires on interleaving (see `DuplicateUidDetector`)
+    # rather than on any change of identity.
+    reissued_from = None
+    reissue_reason = None
+    if not wants_uid and duplicate_uid_detection_enabled():
+        reason = DUPLICATE_UID_DETECTORS.observe(
+            agent_id,
+            protocol.host_identity(agent_dict.get("agentDescription")),
+            agent_msg.sequence_num,
+        )
+        if reason is not None:
+            # A replacement uid is only usable when the credential is not the
+            # identity: a token is bound to the uid it was minted for (#94), so
+            # handing an authenticated agent a new uid would get it refused on its
+            # next message. Detect, count and log there; never silently break it.
+            action = "detected" if principal is not None else "reissued"
+            PROM_DUPLICATE_UIDS.labels(reason=reason, action=action).inc()
+            if principal is None:
+                reissued_from = agent_id
+                reissue_reason = reason
+                effective_uid = protocol.uuid7()
+                agent_id = binascii.hexlify(effective_uid).decode('utf-8')
+                DUPLICATE_UID_DETECTORS.confirm(reissued_from)
+            logger.bind(
+                event="agent.duplicate_uid",
+                reason=reason,
+                action=action,
+                original_uid=reissued_from or agent_msg.instance_uid.hex(),
+                agent_id=agent_id,
+                transport=transport,
+            ).warning(
+                f"Duplicate instance_uid {agent_msg.instance_uid.hex()} "
+                f"({reason}): "
+                + (
+                    f"issued replacement uid {agent_id}"
+                    if reissued_from
+                    else "not re-issuing, the credential is bound to the uid (#94)"
+                )
+            )
+
     # Bound here, not per log call: every line written while applying this message
     # (the offer decision, the audit write, the alert it may trigger) carries the
     # same `agent_id` without threading it through every function (#108).
@@ -1166,6 +1320,8 @@ def _handle_agent_message(
             instance_uid=effective_uid,
             reply_uid=original_uid,
             minted_uid=minted_uid,
+            reissued_from=reissued_from,
+            reissue_reason=reissue_reason,
         )
 
 
@@ -1179,9 +1335,23 @@ def _apply_agent_message(
     instance_uid: bytes | None = None,
     reply_uid: bytes | None = None,
     minted_uid: bytes | None = None,
+    reissued_from: str | None = None,
+    reissue_reason: str | None = None,
 ) -> ProcessedMessage:
-    """The state-mutating half of `_handle_agent_message`, inside the log/trace scope."""
+    """The state-mutating half of `_handle_agent_message`, inside the log/trace scope.
+
+    `minted_uid` is a replacement uid the server chose for an agent that sent none
+    (spec §Requesting instance_uid) and `reissued_from` is the *old* uid of an agent
+    whose uid turned out to be a duplicate (#75). Both end up in
+    `agent_identification.new_instance_uid`, and they differ in one thing that
+    matters: a minted temporary uid was never a real record, so it is thrown away,
+    while a re-issued uid belongs to a live agent whose own record must survive.
+    """
     effective_uid = bytes(agent_msg.instance_uid) if instance_uid is None else instance_uid
+    if minted_uid is None and reissued_from is not None:
+        # #75: the replacement travels in `agent_identification`, addressed to the
+        # uid the agent used in this message.
+        minted_uid = effective_uid
     response = ServerToAgent()
     # The reply is addressed to the uid the agent used in *this* message; a minted
     # replacement travels separately in `agent_identification.new_instance_uid`.
@@ -1244,6 +1414,11 @@ def _apply_agent_message(
                 agent_id=agent_id,
                 capabilities=agent_msg.capabilities,
                 description=agent_dict.get("agentDescription", {}),
+                # #75: the fleet view has to explain why this agent's id changed,
+                # which is the difference between "the server renamed me" and
+                # "something is cloning VMs".
+                uid_reissued_from=reissued_from,
+                uid_reissue_reason=reissue_reason,
             ), persist=False)
             response.flags = ServerToAgentFlags.ServerToAgentFlags_ReportFullState
             PROM_FULL_STATE_REQUESTS.labels(reason="new_agent").inc()
@@ -1294,6 +1469,7 @@ def _apply_agent_message(
             PROM_AGENT_HEALTH.remove(agent_id)
             _METRICS_STORE.delete(agent_id)
             AGENT_METRICS.pop(agent_id, None)
+            DUPLICATE_UID_DETECTORS.forget(agent_id)
             update_metrics()
 
         # #81: offer the desired config when (and only when) the agent's reported hash
@@ -1335,11 +1511,17 @@ def _apply_agent_message(
         # The reply still carries that temporary uid (multiplexing), while state and
         # future messages are keyed by the minted one. The temporary record is removed
         # rather than migrated: it was a placeholder, never an established agent.
+        # #75 uses the same field for a *re-issued* uid, but there the old record is a
+        # live agent's own state and must never be deleted.
         if minted_uid is not None:
             response.agent_identification.new_instance_uid = minted_uid
             temporary_uid = effective_uid if reply_uid is None else reply_uid
             temporary_id = binascii.hexlify(temporary_uid).decode('utf-8')
-            if temporary_id != agent_id and AGENT_REGISTRY.get(temporary_id) is not None:
+            if (
+                reissued_from is None
+                and temporary_id != agent_id
+                and AGENT_REGISTRY.get(temporary_id) is not None
+            ):
                 logger.bind(
                     event="agent.uid_minted_cleanup",
                     temporary_uid=temporary_id,
@@ -1370,12 +1552,14 @@ def _apply_agent_message(
     )
 
 
-# #76 will standardise this header; read it opportunistically now so a refused body
-# still logs the only identity it carries.
-INSTANCE_UID_HEADER = "opamp-instance-uid"
+# #76: read the `OpAMP-Instance-UID` header on every request. The body stays the
+# identity; the header is the fallback for bodies we cannot read (413, BAD_REQUEST) and
+# a cross-check for the rest.
+INSTANCE_UID_HEADER = protocol.INSTANCE_UID_HEADER
 
 
 def _instance_uid_header(request: Request) -> str:
+    """The raw header value, for log lines that have no parsed body to name."""
     return request.headers.get(INSTANCE_UID_HEADER, "")
 
 
@@ -1428,6 +1612,22 @@ async def opamp_endpoint(request: Request) -> Response:
     server is missing status. The reply then sets `ReportFullState` (at most once per
     `REPORT_FULL_STATE_MIN_INTERVAL_SECONDS` per agent).
 
+    **Duplicate `instance_uid`** (#75): two agents presenting one uid (a cloned VM, a
+    restored backup, a broken id generator) are detected from interleaved host
+    identities or a counter that keeps going backwards. The newcomer is answered with
+    `agent_identification.new_instance_uid` and keeps being served, under the new id,
+    with `uid_reissued_from` / `uid_reissue_reason` explaining it in `GET /agent/{id}`.
+    `OPAMP_DUPLICATE_UID_DETECTION=false` turns the check off. Re-issuing needs
+    `OPAMP_AGENT_AUTH=off`: a token is bound to the uid it was minted for (#94), so in
+    `token` mode a duplicate is logged and counted but never renamed.
+
+    **`OpAMP-Instance-UID` header** (#76): read on every request and cross-checked
+    against the body. A mismatch — or a value that is not a readable uuid — is logged
+    with both uids and counted in `opamp_instance_uid_header_problems_total`; the body
+    is always what identifies the agent. `OPAMP_UID_HEADER_STRICT=true` turns a
+    mismatch into a 400. When a body is refused (413, 415, 400) the header is the only
+    identity in the log line, because there is no parsed message to name.
+
     The same path also accepts a WebSocket upgrade when `OPAMP_WS_ENABLED=true`.
     """
     client = request.client.host if request.client else ""
@@ -1479,7 +1679,9 @@ async def opamp_endpoint(request: Request) -> Response:
         return _bad_request_response(exc)
 
     try:
-        result = _handle_agent_message(body, principal)
+        result = _handle_agent_message(
+            body, principal, uid_header=_instance_uid_header(request)
+        )
     except protocol.BadRequest as exc:
         logger.bind(
             event="opamp.message.rejected",

@@ -104,6 +104,12 @@ class SQLiteAgentStore:
                 conn.execute("ALTER TABLE agents ADD COLUMN pending_command TEXT")
             if "command_delivered_at" not in columns:
                 conn.execute("ALTER TABLE agents ADD COLUMN command_delivered_at TEXT")
+            # #75: why this agent's instance_uid changed. Null in both columns unless
+            # the server re-issued a uid because the old one was a duplicate.
+            if "uid_reissued_from" not in columns:
+                conn.execute("ALTER TABLE agents ADD COLUMN uid_reissued_from TEXT")
+            if "uid_reissue_reason" not in columns:
+                conn.execute("ALTER TABLE agents ADD COLUMN uid_reissue_reason TEXT")
 
     def load_all(self) -> Dict[str, "AgentState"]:
         agents = {}
@@ -121,8 +127,9 @@ class SQLiteAgentStore:
                                    remote_config_status, package_statuses, available_components,
                                    health, compliance, updated_at, last_remote_config_hash,
                                    remote_config_error, last_sequence_num, pending_command,
-                                   command_delivered_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                   command_delivered_at, uid_reissued_from,
+                                   uid_reissue_reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(agent_id) DO UPDATE SET
                     last_heartbeat=excluded.last_heartbeat,
                     healthy=excluded.healthy,
@@ -139,7 +146,9 @@ class SQLiteAgentStore:
                     remote_config_error=excluded.remote_config_error,
                     last_sequence_num=excluded.last_sequence_num,
                     pending_command=excluded.pending_command,
-                    command_delivered_at=excluded.command_delivered_at
+                    command_delivered_at=excluded.command_delivered_at,
+                    uid_reissued_from=excluded.uid_reissued_from,
+                    uid_reissue_reason=excluded.uid_reissue_reason
                 WHERE excluded.updated_at > agents.updated_at
             """, self._state_to_row(state))
 
@@ -168,6 +177,8 @@ class SQLiteAgentStore:
             state.last_sequence_num,
             json.dumps(state.pending_command) if state.pending_command else None,
             state.command_delivered_at,
+            state.uid_reissued_from,
+            state.uid_reissue_reason,
         )
 
     @staticmethod
@@ -217,6 +228,8 @@ class SQLiteAgentStore:
                 json.loads(_optional_column(row, "pending_command") or "null")
             ),
             command_delivered_at=_optional_column(row, "command_delivered_at"),
+            uid_reissued_from=_optional_column(row, "uid_reissued_from"),
+            uid_reissue_reason=_optional_column(row, "uid_reissue_reason"),
             sealed_effective_config=sealed if config_error else None,
             config_error=config_error,
         )
@@ -2042,6 +2055,11 @@ class AgentState:
     # #70: the last `AgentToServer.sequence_num` we accepted, so the next one can be
     # checked for "exactly one greater". None = no baseline yet (see sequence.is_gap).
     last_sequence_num: Optional[int] = None
+    # #75: set only on an agent whose uid was a duplicate of another agent's. The hex
+    # of the uid it presented and the signal that convicted it, so the fleet view can
+    # explain an id change instead of showing a row that silently appeared.
+    uid_reissued_from: Optional[str] = None
+    uid_reissue_reason: Optional[str] = None
     # #84: a server->agent command waiting to ride the agent's next poll. Persisted,
     # because HTTP has no push and a restart command lost on reboot is a silent no-op.
     # Cleared the moment it is delivered: re-delivering a restart every poll is a
@@ -2330,6 +2348,10 @@ class AgentState:
             # fields means no command was ever queued.
             "pending_command": self.pending_command,
             "command_delivered_at": self.command_delivered_at,
+            # #75: `None` for every agent whose uid was never re-issued; otherwise the
+            # uid the agent presented and the signal that convicted it.
+            "uid_reissued_from": self.uid_reissued_from,
+            "uid_reissue_reason": self.uid_reissue_reason,
             "package_statuses": self.package_statuses,
             "available_components": self.available_components,
             "components": self.components,

@@ -851,6 +851,58 @@ For the same reason, `GET /agent/{id}` reports `last_sequence_num` — the last
 `ReportFullState` ask, so "why did the server ask this agent for everything?" is
 answerable from the API instead of only from a log line.
 
+#### Duplicate `instance_uid`
+
+Two agents can present one uid — a cloned VM, a restored backup, a collector image
+with a broken id generator. Left alone they overwrite each other's status, so the
+server detects the condition and mints a replacement, per spec §Duplicate
+`instance_uid` Detection (#75).
+
+Detection is the interesting half, because a false positive renames a healthy agent:
+
+- **Interleaving host identity.** `service.instance.id` (or `host.name`) is taken
+  from `AgentDescription`. Two agents produce `A B A`; a single agent that *renames*
+  itself in place produces `A A B B B`, which is **not** a duplicate and is never
+  re-issued a uid;
+- **Counter regression.** A cloned VM reports the same `host.name` too, so there is
+  no identity signal at all. Two agents with independent `sequence_num` counters
+  alternating produce a counter that goes *backwards repeatedly* — two decreases in a
+  row. One decrease is an agent that restarted, and is left alone.
+
+The newcomer is answered with `agent_identification.new_instance_uid` and keeps being
+served under the new id — better than dropping an agent because its clone shares an
+id. The old uid's record stays with the agent that owns it, and the new row carries
+`uid_reissued_from` and `uid_reissue_reason` so `GET /agent/{id}` explains the rename.
+Counted in `opamp_duplicate_instance_uid_total{reason,action}`.
+
+Two limits, both deliberate:
+
+- **`OPAMP_AGENT_AUTH=token` cannot re-issue.** A token is bound to the uid it was
+  minted for (#94), so a server-minted uid would be refused as `uid_mismatch` on the
+  agent's very next message. In token mode the duplicate is detected, logged and
+  counted (`action="detected"`) but never renamed;
+- detection is in-memory. A restart loses the streak and re-detects within two
+  messages; the outcome (the new uid) is persisted.
+
+#### The `OpAMP-Instance-UID` header
+
+Clients SHOULD send the uid as a request header (spec §Plain HTTP Transport), and the
+Go SDK always does. The server reads it (#76) and uses it in exactly two ways, neither
+of which can break a working client:
+
+- **cross-check.** A value that disagrees with the body — or is not a uuid at all —
+  logs both uids and increments `opamp_instance_uid_header_problems_total{reason}`.
+  The body always wins, because proxies legitimately rewrite headers. Set
+  `OPAMP_UID_HEADER_STRICT=true` to make a mismatch a `400` instead;
+- **naming a body it refused.** For `413` (too large), `415` (unsupported encoding)
+  and `400` (unparseable), there is no parsed message to identify, so the header is the
+  uid in the log line. That is the difference between "an agent is sending garbage"
+  and "some agent is sending garbage".
+
+Uppercase, braces, a `urn:uuid:` prefix and bare 32-character hex are all accepted;
+a value that matches the body written as plain ascii is accepted too, which is how
+this project's own fixtures name their agents.
+
 ## Environment Variables
 
 | Variable | Default | Description |
@@ -876,6 +928,8 @@ answerable from the API instead of only from a log line.
 | `OPAMP_MAX_MESSAGE_BYTES` | `67108864` | Max OpAMP message size (64 MiB) on both transports; varint header included. HTTP request bodies are capped after gzip decompression. `/v1/metrics` (OTLP) is not affected |
 | `OPAMP_WS_OUTBOUND_QUEUE` | `32` | Per-connection WebSocket send queue depth; oldest is dropped when full. A dropped config frame is re-sent by reconciliation, never counted as a delivery (#102) |
 | `REPORT_FULL_STATE_MIN_INTERVAL_SECONDS` | `60` | Minimum gap between `ReportFullState` asks for one agent, when its `sequence_num` shows the server missed status. Stops a flapping counter from becoming a request storm; `0` disables the limit (#70) |
+| `OPAMP_DUPLICATE_UID_DETECTION` | `true` | Detect two agents presenting one `instance_uid` and answer with `agent_identification.new_instance_uid` (#75). `false` disables the check entirely (nothing is observed or counted) |
+| `OPAMP_UID_HEADER_STRICT` | `false` | `true` makes an `OpAMP-Instance-UID` header that disagrees with the message body a `400 BAD_REQUEST` (#76). Default: log both uids, trust the body |
 | `CONFIG_PUSH_RATE_PER_SECOND` | `20` | Config frames per second allowed on one WebSocket connection. Over the limit the push is `queued` (delivered on the next report), never blocked |
 | `CONFIG_PUSH_BURST` | `20` | Burst allowance per connection before the rate applies |
 | `CONFIG_PUSH_MAX_CONCURRENT` | `50` | Global cap on config frames queued but not yet written; over it, pushes degrade to `queued` |
@@ -1118,7 +1172,7 @@ The UI signs in the same way the CLI does — `POST /auth/session` — and then 
 | POST | `/auth/principals` | admin | Create an identity: `{"name", "role", "password", "expires_at"}`. scrypt-hashed; 409 taken name, 422 bad role/short password |
 | DELETE | `/auth/principals/{id}` | admin | Revoke an identity and close its sessions (row kept, name stays reserved) |
 | GET | `/auth/verify` | viewer | Validate a credential — any role passes (200, 401, or 429 when locked out); failures feed the lockout |
-| POST | `/v1/opamp` | 🔑 | OpAMP protocol endpoint — agents connect here (protobuf). With `OPAMP_AGENT_AUTH=token` the agent must send `Authorization: Bearer <token>`: 401 without a valid one, 403 when the token is for another `instance_uid`. Malformed input (including an empty `instance_uid`) is 400 with a `BAD_REQUEST` error body; a body over `OPAMP_MAX_MESSAGE_BYTES` (after decompression) is 413; an unsupported `Content-Encoding` is 415 |
+| POST | `/v1/opamp` | 🔑 | OpAMP protocol endpoint — agents connect here (protobuf). With `OPAMP_AGENT_AUTH=token` the agent must send `Authorization: Bearer <token>`: 401 without a valid one, 403 when the token is for another `instance_uid`. Malformed input (including an empty `instance_uid`) is 400 with a `BAD_REQUEST` error body; a body over `OPAMP_MAX_MESSAGE_BYTES` (after decompression) is 413; an unsupported `Content-Encoding` is 415. The `OpAMP-Instance-UID` header is read and cross-checked against the body (#76); a duplicate uid is answered with a server-generated replacement (#75) |
 | WS | `/v1/opamp` | 🔑 | Same endpoint over WebSocket when `OPAMP_WS_ENABLED=true`; credential checked before `accept()`, refusals close `1008`. Malformed messages (including an empty `instance_uid`) get a `BAD_REQUEST` error frame then close `1002`; oversized frames close `1009` |
 | POST | `/v1/metrics` | | OTLP/HTTP metrics ingestion from collectors (JSON or protobuf) |
 | GET | `/agents` | | List agents. Filters: `healthy=true\|false\|unknown`, `status=` (remote config status, or alias `remote_config_status=`), or any description attribute, e.g. `?environment=prod`. Repeated params are OR. Each agent carries a `credential` block |

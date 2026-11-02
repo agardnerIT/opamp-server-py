@@ -1,0 +1,42 @@
+extensions:
+  # CI e2e (#113): the only config in this repo that a *real* collector uses against
+  # the server in an automated test, so it is kept separate from the developer
+  # playground configs. `host.docker.internal` is the host as seen from the container:
+  # it exists by default on Docker Desktop and is mapped on Linux by
+  # `--add-host=host.docker.internal:host-gateway` (the workflow does both).
+  opamp:
+    server:
+      http:
+        endpoint: http://host.docker.internal:4320/v1/opamp
+        polling_interval: 2s
+    agent_description:
+      non_identifying_attributes:
+        "agent.name": "e2e-collector"
+        "environment": "ci"
+    capabilities:
+      reports_health: true
+      reports_effective_config: true
+      reports_available_components: true
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 127.0.0.1:4317
+      http:
+        endpoint: 127.0.0.1:4318
+
+processors:
+  batch:
+
+exporters:
+  debug:
+    verbosity: normal
+
+service:
+  extensions: [opamp]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]

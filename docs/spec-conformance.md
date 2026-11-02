@@ -150,9 +150,11 @@ makes, all of them tested:
 
 ## Not covered by this table
 
-* **Interoperability with a real client.** Asserted by hand against
-  `otel/opentelemetry-collector-contrib` and `opamp-go`, and in CI by the collector e2e
-  workflow ([#113](https://github.com/agardnerIT/opamp-server-py/issues/113)) — the one
-  thing a self-consistent test suite cannot prove.
+* **Interoperability with a real client.** Runs in CI on every PR
+  (`.github/workflows/collector-e2e.yml`, #113): `otelcol-contrib 0.140.0` with the
+  upstream `opamp` extension registers, reports health and its component list, and the
+  server builds its OCB manifest from the pipeline it actually runs. Asserted by
+  `scripts/collector_e2e.py`, which is also runnable locally. This is the one thing a
+  self-consistent test suite cannot prove.
 * **A supervisor's local agent management.** This is a server; it does not manage
   local processes, which is why several supervisor-only clauses are marked n/a.

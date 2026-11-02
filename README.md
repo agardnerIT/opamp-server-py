@@ -1598,6 +1598,28 @@ LOG_FORMAT=text pytest tests/ -v                   # readable local output
 pip install -e ".[dev,observability]" && OPAMP_TRACING_ENABLED=true pytest tests/ -v
 ```
 
+### End-to-end with a real collector (#113)
+
+Every other test asserts the server is self-consistent; this one runs the upstream
+`opamp` extension against it. Needs Docker.
+
+```bash
+python -m uvicorn server.main:app --host 0.0.0.0 --port 4320 &
+docker run -d --name opamp-e2e \
+  -v "$PWD/collector/e2e.yaml:/etc/otelcol-contrib/config.yaml" \
+  otel/opentelemetry-collector-contrib:0.140.0
+python scripts/collector_e2e.py --server http://localhost:4320
+```
+
+It waits for its *own* agent by name (`e2e-collector`), then asserts the chain the
+feature depends on: registered, healthy, a component list rather than just a hash
+(the #77 handshake), and a `POST /agent/{id}/manifest` containing exactly the
+components the pipeline uses, at the versions the collector reported. On Linux add
+`--add-host=host.docker.internal:host-gateway` to the `docker run`; Docker Desktop
+provides that name already. The same steps run on every PR in
+[`.github/workflows/collector-e2e.yml`](.github/workflows/collector-e2e.yml), marked
+non-blocking while it stabilises.
+
 ## Project Structure
 
 ```

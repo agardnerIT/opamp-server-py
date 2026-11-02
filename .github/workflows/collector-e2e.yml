@@ -1,0 +1,99 @@
+name: Collector e2e
+
+# The only workflow that tests a *real* OpAMP client (#113).
+#
+# Every other test in this repository proves the server is self-consistent. This one
+# runs `otel/opentelemetry-collector-contrib` with the upstream `opamp` extension
+# against the server and asserts what an operator would: the collector registered,
+# is healthy, handed over its component list, and the server can build an OCB manifest
+# from its *effective config*.
+#
+# Non-blocking on purpose (`continue-on-error`): it needs Docker, pulls a ~250 MB
+# image, and a green unit suite should never be red because Docker Hub was slow. Once
+# it has a stable streak, delete the `continue-on-error` line and let it gate.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # Its own group: a superseded e2e run must not cancel the CI run that gates a merge.
+  group: collector-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  collector-e2e:
+    name: otelcol-contrib against the server
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 10
+
+    env:
+      # Bump deliberately: this is the client implementation the server claims to
+      # interoperate with, so a silent floating tag would hide the thing being tested.
+      COLLECTOR_IMAGE: otel/opentelemetry-collector-contrib:0.140.0
+      SERVER_URL: http://localhost:4320
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install server dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Start the server
+        # 0.0.0.0, not the default 127.0.0.1: the collector runs in a container and
+        # reaches the host through the docker bridge. A fresh DATA_DIR keeps the run
+        # hermetic — no leftover fleet, no developer's database.
+        run: |
+          mkdir -p "$RUNNER_TEMP/opamp"
+          DATA_DIR="$RUNNER_TEMP/opamp" nohup python -m uvicorn server.main:app \
+            --host 0.0.0.0 --port 4320 > "$RUNNER_TEMP/server.log" 2>&1 &
+          for _ in $(seq 60); do
+            curl -sf "$SERVER_URL/health" >/dev/null && break
+            sleep 1
+          done
+          curl -sf "$SERVER_URL/health" | python -m json.tool
+
+      - name: Start the collector
+        # `host-gateway` is what makes `host.docker.internal` resolve on a Linux
+        # runner; Docker Desktop provides it without the flag, which is why the
+        # documented local command omits it.
+        run: |
+          docker run -d --name opamp-e2e \
+            --add-host=host.docker.internal:host-gateway \
+            -v "$PWD/collector/e2e.yaml:/etc/otelcol-contrib/config.yaml" \
+            "$COLLECTOR_IMAGE"
+
+      - name: Assert the collector is visible and buildable
+        # The script polls for its *own* agent by name, so a stray agent on the runner
+        # (or a leftover from another job) can never make this pass.
+        run: |
+          python scripts/collector_e2e.py \
+            --server "$SERVER_URL" \
+            --agent-name e2e-collector \
+            --timeout 120
+
+      - name: Server log
+        if: always()
+        run: cat "$RUNNER_TEMP/server.log" || true
+
+      - name: Collector log
+        if: always()
+        run: docker logs opamp-e2e || true
+
+      - name: Fleet as the server saw it
+        if: always()
+        run: curl -s "$SERVER_URL/agents" | python -m json.tool || true

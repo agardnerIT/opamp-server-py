@@ -292,6 +292,11 @@ mentions: silently dropping a bit is a symptom, an unclassified bit is what
 over-claims to every agent. `GET /health` publishes the same values, so "will my agent
 interoperate?" is answered without reading the source (#79).
 
+The same question, clause by clause — including what is **deliberately** different from
+the spec and why — is **[`docs/spec-conformance.md`](docs/spec-conformance.md)**, next
+to the machine-checked spec index in `tests/conformance/` (#80). That pair is what a
+spec bump should be reviewed against.
+
 Both transports accept credential headers, which is what makes per-agent
 authentication possible without a wire extension: `extension/opampextension` supports
 `server.http.headers` **and** `server.ws.headers` (verified against v0.140.0 — the

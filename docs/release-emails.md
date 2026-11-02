@@ -18,9 +18,12 @@ the project becomes the data controller for a list of email addresses.
 - `/health` reports `resend: false`, `github_webhook: false`, `turnstile: false`.
 - Admin page has a "Release emails" tab, gated on `UPDATE_SUBSCRIBE_URL` (empty
   by default, so the box is hidden).
-- 26 offline Worker tests pass; CI runs `npm test` and `npm run typecheck`.
+- Privacy policy at `/privacy` and a two-step deletion flow at `/delete` are
+  implemented; the policy is a draft in `src/privacy.ts`.
+- 38 offline Worker tests pass; CI runs `npm test` and `npm run typecheck`.
 - Still needed: Resend domain/segment/from/key, GitHub webhook secret, a test
-  address, and the privacy-policy URL. Turnstile is optional but recommended.
+  address, and confirmation of the privacy contact. Turnstile is optional but
+  recommended.
 
 ---
 
@@ -145,8 +148,31 @@ Resend.
 
 ### 3.5 Delete my data
 
-`privacy@<domain>` (or a form) → delete the contact via the Resend API/dashboard.
-The KV entries are transient and expire on their own.
+Double opt-in, like subscribing. `POST /delete` accepts an address, checks that
+it is in the release segment, and sends a confirmation email only if it is. The
+response is identical either way, so the endpoint cannot be used to enumerate
+subscribers. `GET /delete/confirm?token=` then:
+
+1. removes the address from **this** segment;
+2. deletes the global Resend contact only if no other segment still uses it, so
+   a Resend account shared with another project is not damaged;
+3. consumes the token.
+
+The email address is in the KV token for 24 h, then it expires. A `privacy@`
+mailbox remains for access/correction requests and for anyone who cannot use the
+form.
+
+### 3.6 Privacy policy
+
+`GET /privacy` serves the policy from `src/privacy.ts`. It covers only this list:
+what is collected (address, confirmation time, subscription status), why,
+consent, processors (Resend, Cloudflare), retention, unsubscribe, deletion,
+rights, and the no-tracking statement. The controller name and contact are
+configurable (`PRIVACY_CONTACT`); it is a draft for the owner to review.
+
+A data processing agreement is a legal document between the controller and
+Resend/Cloudflare, not an app page. The policy links their privacy policies; use
+their standard DPAs if one is required.
 
 ## 4. Worker API
 
@@ -170,6 +196,8 @@ tokens. Log the real reason server-side, without the address or IP.
 | Worker KV `pending:<token>` | email + timestamp | 24 h TTL |
 | Worker KV `sent:<hash>` | SHA-256 of the address | 10 min TTL |
 | Worker KV `release:<id>` | release id | 30 days |
+| Worker KV `delete:<token>` | email + timestamp, unconfirmed deletion | 24 h |
+| Worker KV `delete-sent:<hash>` | SHA-256 of the address | 10 min |
 | Resend contact | email, subscribed status, created_at, properties | until deleted |
 | Resend events | sends, deliveries, bounces, complaints, opens/clicks | plan-dependent |
 

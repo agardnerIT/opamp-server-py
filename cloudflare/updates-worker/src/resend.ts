@@ -19,6 +19,16 @@ function apiBase(env: Env): string {
   return (env.RESEND_API_BASE || "https://api.resend.com").replace(/\/+$/, "");
 }
 
+export function publicBaseUrl(env: Env): string {
+  return (env.PUBLIC_BASE_URL || "").replace(/\/+$/, "");
+}
+
+export function privacyLink(env: Env): string {
+  if (env.PRIVACY_URL) return env.PRIVACY_URL;
+  const base = publicBaseUrl(env);
+  return base ? `${base}/privacy` : "";
+}
+
 async function call(
   env: Env,
   path: string,
@@ -51,37 +61,15 @@ async function call(
   return data;
 }
 
-/**
- * Transactional confirmation email. Uses Resend's Idempotency-Key so a retry
- * within 24h does not send twice.
- */
-export async function sendConfirmation(
-  env: Env,
-  email: string,
-  token: string,
-  baseUrl: string,
-): Promise<void> {
-  const link = `${baseUrl}/confirm?token=${encodeURIComponent(token)}`;
-  const privacy = env.PRIVACY_URL
-    ? `\n\nPrivacy: ${env.PRIVACY_URL}`
-    : "";
-  const subject = "Confirm your opamp-server-py release emails";
+interface EmailMessage {
+  to: string;
+  subject: string;
+  text: string;
+  html: string;
+  idempotencyKey?: string;
+}
 
-  const text =
-    `You asked to receive release announcements for opamp-server-py.\n\n` +
-    `Confirm this address:\n${link}\n\n` +
-    `The link expires in 24 hours. If you did not request this, ignore this ` +
-    `email; nothing was added and you will not receive any more.${privacy}\n`;
-
-  const html =
-    `<p>You asked to receive release announcements for opamp-server-py.</p>` +
-    `<p><a href="${escapeHtml(link)}">Confirm this address</a></p>` +
-    `<p>The link expires in 24 hours. If you did not request this, ignore this ` +
-    `email; nothing was added and you will not receive any more.</p>` +
-    (env.PRIVACY_URL
-      ? `<p><a href="${escapeHtml(env.PRIVACY_URL)}">Privacy</a></p>`
-      : "");
-
+async function sendEmail(env: Env, message: EmailMessage): Promise<void> {
   await call(
     env,
     "/emails",
@@ -89,29 +77,89 @@ export async function sendConfirmation(
       method: "POST",
       body: JSON.stringify({
         from: env.RESEND_FROM,
-        to: [email],
-        subject,
-        text,
-        html,
+        to: [message.to],
+        subject: message.subject,
+        text: message.text,
+        html: message.html,
         ...(env.RESEND_REPLY_TO ? { reply_to: env.RESEND_REPLY_TO } : {}),
       }),
     },
-    `confirm-${await sha256Hex(email)}`,
+    message.idempotencyKey,
   );
 }
 
+function privacyBlock(env: Env): string {
+  const url = privacyLink(env);
+  return url ? `\n\nPrivacy: ${url}` : "";
+}
+
+/** Transactional confirmation email. Idempotent for 24 h per address. */
+export async function sendConfirmation(
+  env: Env,
+  email: string,
+  token: string,
+  baseUrl: string,
+): Promise<void> {
+  const link = `${baseUrl}/confirm?token=${encodeURIComponent(token)}`;
+  const subject = "Confirm your opamp-server-py release emails";
+
+  const text =
+    `You asked to receive release announcements for opamp-server-py.\n\n` +
+    `Confirm this address:\n${link}\n\n` +
+    `The link expires in 24 hours. If you did not request this, ignore this ` +
+    `email; nothing was added and you will not receive any more.` +
+    privacyBlock(env) +
+    `\n`;
+
+  const html =
+    `<p>You asked to receive release announcements for opamp-server-py.</p>` +
+    `<p><a href="${escapeHtml(link)}">Confirm this address</a></p>` +
+    `<p>The link expires in 24 hours. If you did not request this, ignore this ` +
+    `email; nothing was added and you will not receive any more.</p>` +
+    (privacyLink(env)
+      ? `<p><a href="${escapeHtml(privacyLink(env))}">Privacy</a></p>`
+      : "");
+
+  await sendEmail(env, {
+    to: email,
+    subject,
+    text,
+    html,
+    idempotencyKey: `confirm-${await sha256Hex(email)}`,
+  });
+}
+
 /**
- * Add or revive a contact in the one segment this Worker is allowed to write to.
- * Idempotent: an existing contact is patched back to subscribed and re-added to
- * the segment rather than duplicated.
+ * Addresses in the one segment this Worker is allowed to touch. `null` means
+ * the contact does not exist. Other segments are never modified.
+ */
+export async function contactSegmentIds(
+  env: Env,
+  email: string,
+): Promise<string[] | null> {
+  try {
+    const data = (await call(
+      env,
+      `/contacts/${encodeURIComponent(email)}/segments`,
+      { method: "GET" },
+    )) as { data?: Array<{ id: string }> };
+    return (data?.data ?? []).map((segment) => segment.id);
+  } catch (error) {
+    if (error instanceof ResendError && error.status === 404) return null;
+    throw error;
+  }
+}
+
+/**
+ * Add or revive a contact in the dedicated segment. Idempotent: an existing
+ * contact is patched back to subscribed and re-added to the segment rather than
+ * duplicated.
  */
 export async function ensureContact(env: Env, email: string): Promise<void> {
   const contactPath = `/contacts/${encodeURIComponent(email)}`;
+  const segments = await contactSegmentIds(env, email);
 
-  try {
-    await call(env, contactPath, { method: "GET" });
-  } catch (error) {
-    if (!(error instanceof ResendError) || error.status !== 404) throw error;
+  if (segments === null) {
     await call(env, "/contacts", {
       method: "POST",
       body: JSON.stringify({
@@ -127,11 +175,86 @@ export async function ensureContact(env: Env, email: string): Promise<void> {
     method: "PATCH",
     body: JSON.stringify({ unsubscribed: false }),
   });
-  await call(
-    env,
-    `${contactPath}/segments/${encodeURIComponent(env.RESEND_SEGMENT_ID!)}`,
-    { method: "POST" },
-  );
+
+  if (!segments.includes(env.RESEND_SEGMENT_ID!)) {
+    await call(
+      env,
+      `${contactPath}/segments/${encodeURIComponent(env.RESEND_SEGMENT_ID!)}`,
+      { method: "POST" },
+    );
+  }
+}
+
+/**
+ * Remove the address from our segment. The contact record is deleted only when
+ * no other segment still uses it, so this Worker cannot delete a contact that
+ * belongs to another Resend audience in the same account.
+ */
+export async function deleteSubscription(
+  env: Env,
+  email: string,
+): Promise<void> {
+  const contactPath = `/contacts/${encodeURIComponent(email)}`;
+  const segments = await contactSegmentIds(env, email);
+  if (segments === null || !segments.includes(env.RESEND_SEGMENT_ID!)) return;
+
+  try {
+    await call(
+      env,
+      `${contactPath}/segments/${encodeURIComponent(env.RESEND_SEGMENT_ID!)}`,
+      { method: "DELETE" },
+    );
+  } catch (error) {
+    // Already gone is the desired state.
+    if (!(error instanceof ResendError) || error.status !== 404) throw error;
+  }
+
+  const remaining = await contactSegmentIds(env, email);
+  if (remaining !== null && remaining.length === 0) {
+    await call(env, contactPath, { method: "DELETE" });
+  }
+}
+
+/** Transactional confirmation for a deletion request. */
+export async function sendDeletionConfirmation(
+  env: Env,
+  email: string,
+  token: string,
+  baseUrl: string,
+): Promise<void> {
+  const link = `${baseUrl}/delete/confirm?token=${encodeURIComponent(token)}`;
+  const subject = "Confirm deletion of your opamp-server-py release emails";
+
+  const text =
+    `You asked to delete this address from the opamp-server-py release ` +
+    `announcement list:\n${email}\n\n` +
+    `Confirm the deletion:\n${link}\n\n` +
+    `The link expires in 24 hours. This removes you from the list. If the ` +
+    `address is not used for anything else in our email provider, the contact ` +
+    `record is deleted too. If you did not request this, ignore this email; ` +
+    `nothing will change.` +
+    privacyBlock(env) +
+    `\n`;
+
+  const html =
+    `<p>You asked to delete this address from the opamp-server-py release ` +
+    `announcement list:</p><p><strong>${escapeHtml(email)}</strong></p>` +
+    `<p><a href="${escapeHtml(link)}">Confirm the deletion</a></p>` +
+    `<p>The link expires in 24 hours. This removes you from the list. If the ` +
+    `address is not used for anything else in our email provider, the contact ` +
+    `record is deleted too. If you did not request this, ignore this email; ` +
+    `nothing will change.</p>` +
+    (privacyLink(env)
+      ? `<p><a href="${escapeHtml(privacyLink(env))}">Privacy</a></p>`
+      : "");
+
+  await sendEmail(env, {
+    to: email,
+    subject,
+    text,
+    html,
+    idempotencyKey: `delete-${token}`,
+  });
 }
 
 export function releaseUrl(env: Env, tag: string): string {
@@ -151,6 +274,7 @@ export async function sendReleaseBroadcast(
   if (!isValidSemver(tag)) throw new ResendError(400, "invalid release tag");
 
   const url = releaseUrl(env, tag);
+  const privacy = privacyLink(env);
   const subject = `opamp-server-py ${tag} is available`;
   const footer =
     "\n\nYou are receiving this because you confirmed a subscription to " +
@@ -159,14 +283,20 @@ export async function sendReleaseBroadcast(
   const text =
     `A new opamp-server-py release is available: ${tag}\n\n` +
     `Release notes: ${url}${footer}\n\n` +
-    `Unsubscribe: {{{RESEND_UNSUBSCRIBE_URL}}}\n`;
+    `Unsubscribe: {{{RESEND_UNSUBSCRIBE_URL}}}` +
+    (privacy ? `\nPrivacy: ${privacy}` : "") +
+    `\n`;
 
   const html =
     `<p>A new opamp-server-py release is available: <strong>${escapeHtml(tag)}</strong></p>` +
     `<p><a href="${escapeHtml(url)}">Release notes</a></p>` +
     `<p>You are receiving this because you confirmed a subscription to ` +
     `opamp-server-py release announcements.</p>` +
-    `<p><a href="{{{RESEND_UNSUBSCRIBE_URL}}}">Unsubscribe</a></p>`;
+    `<p><a href="{{{RESEND_UNSUBSCRIBE_URL}}}">Unsubscribe</a>` +
+    (privacy
+      ? ` &middot; <a href="${escapeHtml(privacy)}">Privacy</a>`
+      : "") +
+    `</p>`;
 
   await call(env, "/broadcasts", {
     method: "POST",

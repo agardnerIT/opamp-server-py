@@ -1,4 +1,5 @@
 import type { Env } from "./env";
+import { privacyPolicyHtml } from "./privacy";
 import { escapeHtml } from "./validate";
 
 const STYLE = `
@@ -9,9 +10,12 @@ body {
   font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   background: Canvas; color: CanvasText;
 }
-main { width: min(34rem, calc(100% - 2rem)); padding: 2rem 0; }
+main { width: min(42rem, calc(100% - 2rem)); padding: 2rem 0; }
 h1 { font-size: 1.35rem; margin: 0 0 .5rem; }
+h2 { font-size: 1.05rem; margin: 1.6rem 0 .4rem; }
 p { margin: 0 0 1rem; }
+ul { margin: 0 0 1rem; padding-left: 1.3rem; }
+li { margin-bottom: .35rem; }
 label { display: flex; gap: .6rem; align-items: flex-start; margin: 1rem 0; }
 input[type=email] {
   width: 100%; padding: .7rem .8rem; font: inherit; border-radius: .45rem;
@@ -29,6 +33,21 @@ button:hover { background: #1d4ed8; }
 .message.error { background: color-mix(in srgb, #dc2626 18%, Canvas); }
 a { color: #2563eb; }
 `.trim();
+
+function baseUrl(env: Env): string {
+  return (env.PUBLIC_BASE_URL || "").replace(/\/+$/, "");
+}
+
+function privacyUrl(env: Env): string {
+  if (env.PRIVACY_URL) return env.PRIVACY_URL;
+  const base = baseUrl(env);
+  return base ? `${base}/privacy` : "";
+}
+
+function deleteUrl(env: Env): string {
+  const base = baseUrl(env);
+  return base ? `${base}/delete` : "";
+}
 
 export function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -64,10 +83,16 @@ function htmlResponse(body: string, status = 200): Response {
   return new Response(body, { status, headers: htmlHeaders() });
 }
 
+function footerLinks(env: Env): string {
+  const links: string[] = [];
+  const privacy = privacyUrl(env);
+  const del = deleteUrl(env);
+  if (privacy) links.push(`<a href="${escapeHtml(privacy)}">Privacy policy</a>`);
+  if (del) links.push(`<a href="${escapeHtml(del)}">Delete my data</a>`);
+  return links.length ? `<p class="note">${links.join(" &middot; ")}</p>` : "";
+}
+
 function layout(env: Env, title: string, content: string): string {
-  const privacy = env.PRIVACY_URL
-    ? `<p class="note"><a href="${escapeHtml(env.PRIVACY_URL)}">Privacy policy</a></p>`
-    : "";
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -79,31 +104,37 @@ function layout(env: Env, title: string, content: string): string {
 <body>
 <main>
 ${content}
-${privacy}
+${footerLinks(env)}
 </main>
 </body>
 </html>`;
+}
+
+function turnstileWidget(env: Env): string {
+  return env.TURNSTILE_SITE_KEY
+    ? `<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+<div class="cf-turnstile" data-sitekey="${escapeHtml(env.TURNSTILE_SITE_KEY)}"></div>`
+    : "";
+}
+
+function banner(options: { message?: string; error?: string }): string {
+  if (options.error) {
+    return `<p class="message error" role="alert">${escapeHtml(options.error)}</p>`;
+  }
+  if (options.message) {
+    return `<p class="message ok" role="status">${escapeHtml(options.message)}</p>`;
+  }
+  return "";
 }
 
 export function formPage(
   env: Env,
   options: { message?: string; error?: string; status?: number } = {},
 ): Response {
-  const turnstile = env.TURNSTILE_SITE_KEY
-    ? `<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
-<div class="cf-turnstile" data-sitekey="${escapeHtml(env.TURNSTILE_SITE_KEY)}"></div>`
-    : "";
-
-  const banner = options.error
-    ? `<p class="message error" role="alert">${escapeHtml(options.error)}</p>`
-    : options.message
-      ? `<p class="message ok" role="status">${escapeHtml(options.message)}</p>`
-      : "";
-
   const content = `
 <h1>opamp-server-py release emails</h1>
 <p>Get one email when a new opamp-server-py release is published. Nothing else.</p>
-${banner}
+${banner(options)}
 <form method="post" action="/subscribe">
   <label for="email">Email address</label>
   <input id="email" name="email" type="email" autocomplete="email"
@@ -114,12 +145,44 @@ ${banner}
     <span>I agree to receive release announcement emails. I can unsubscribe
     at any time.</span>
   </label>
-  ${turnstile}
+  ${turnstileWidget(env)}
   <button type="submit">Notify me</button>
 </form>
 <p class="note">You will receive a confirmation email first. Nothing is added
 until you click the link in it.</p>`;
-  return htmlResponse(layout(env, "opamp-server-py release emails", content), options.status ?? 200);
+  return htmlResponse(
+    layout(env, "opamp-server-py release emails", content),
+    options.status ?? 200,
+  );
+}
+
+export function deleteFormPage(
+  env: Env,
+  options: { message?: string; error?: string; status?: number } = {},
+): Response {
+  const content = `
+<h1>Delete your release emails</h1>
+<p>Enter the address you subscribed with. We will email a confirmation link;
+clicking it removes you from the release-announcement list.</p>
+${banner(options)}
+<form method="post" action="/delete">
+  <label for="delete-email">Email address</label>
+  <input id="delete-email" name="email" type="email" autocomplete="email"
+         inputmode="email" maxlength="254" required
+         placeholder="you@example.com">
+  ${turnstileWidget(env)}
+  <button type="submit">Send deletion link</button>
+</form>
+<p class="note">Nothing changes until you click the link in the email.</p>`;
+  return htmlResponse(
+    layout(env, "Delete your release emails", content),
+    options.status ?? 200,
+  );
+}
+
+export function privacyPage(env: Env): Response {
+  const content = privacyPolicyHtml(env, deleteUrl(env));
+  return htmlResponse(layout(env, "Privacy policy — opamp-server-py release emails", content));
 }
 
 export function messagePage(

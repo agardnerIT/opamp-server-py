@@ -101,6 +101,21 @@ function subscribeRequest(
   });
 }
 
+function deleteRequest(
+  fields: Record<string, string>,
+  acceptJson = true,
+): Request {
+  const headers: Record<string, string> = {
+    "content-type": "application/x-www-form-urlencoded",
+  };
+  if (acceptJson) headers.accept = "application/json";
+  return new Request("https://updates.test/delete", {
+    method: "POST",
+    headers,
+    body: new URLSearchParams(fields).toString(),
+  });
+}
+
 async function githubSignature(secret: string, body: string): Promise<string> {
   const key = await crypto.subtle.importKey(
     "raw",
@@ -431,6 +446,232 @@ describe("confirm", () => {
 
     expect(response.status).toBe(502);
     expect(await env.UPDATES_KV.get(`pending:${token}`)).toBeTruthy();
+  });
+});
+
+describe("privacy and deletion", () => {
+  it("serves the privacy policy and links to deletion", async () => {
+    const response = await worker.fetch(
+      new Request("https://updates.test/privacy"),
+      makeEnv(),
+    );
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    expect(html).toContain("Privacy policy");
+    expect(html).toContain("privacy@agardner.net");
+    expect(html).toContain("/delete");
+    expect(html).toContain("No open pixels");
+  });
+
+  it("serves a deletion form", async () => {
+    const response = await worker.fetch(
+      new Request("https://updates.test/delete"),
+      makeEnv(),
+    );
+    expect(response.status).toBe(200);
+    const html = await response.text();
+    expect(html).toContain('action="/delete"');
+    expect(html).toContain('name="email"');
+    expect(html).toContain("Nothing changes until you click");
+  });
+
+  it("emails a deletion link only for a member of the segment", async () => {
+    const calls = installFetch((call) => {
+      if (call.method === "GET" && call.url.includes("/segments")) {
+        return json({ data: [{ id: "seg_test" }] });
+      }
+      if (call.method === "POST" && call.url.endsWith("/emails")) {
+        return json({ id: "email_1" });
+      }
+      throw new Error(`unexpected ${call.method} ${call.url}`);
+    });
+    const env = makeEnv();
+
+    const response = await worker.fetch(
+      deleteRequest({ email: "User@Example.com" }),
+      env,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true });
+    expect(calls).toHaveLength(2);
+    expect(calls[0].url).toContain(
+      "/contacts/user%40example.com/segments",
+    );
+    expect(calls[1].body.to).toEqual(["user@example.com"]);
+    expect(calls[1].body.subject).toContain("deletion");
+    expect(calls[1].body.text).toContain(
+      "https://updates.test/delete/confirm?token=",
+    );
+    expect(calls[1].headers.get("idempotency-key")).toMatch(/^delete-/);
+
+    const token = /token=([A-Za-z0-9_-]{43})/.exec(calls[1].body.text)?.[1];
+    expect(token).toBeTruthy();
+    expect(await env.UPDATES_KV.get(`delete:${token}`)).toBeTruthy();
+  });
+
+  it("says nothing and sends nothing for an address not in the segment", async () => {
+    const calls = installFetch(() =>
+      json({ data: [{ id: "another_segment" }] }),
+    );
+    const response = await worker.fetch(
+      deleteRequest({ email: "user@example.com" }),
+      makeEnv(),
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true });
+    expect(calls).toHaveLength(1);
+    expect(calls[0].method).toBe("GET");
+  });
+
+  it("says nothing for a contact that does not exist", async () => {
+    const calls = installFetch(() => json({ message: "not found" }, 404));
+    const response = await worker.fetch(
+      deleteRequest({ email: "user@example.com" }),
+      makeEnv(),
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ ok: true });
+    expect(calls).toHaveLength(1);
+  });
+
+  it("does not email twice inside the deletion dedupe window", async () => {
+    const calls = installFetch((call) => {
+      if (call.method === "GET") return json({ data: [{ id: "seg_test" }] });
+      if (call.method === "POST") return json({ id: "email_1" });
+      throw new Error("unexpected");
+    });
+    const env = makeEnv();
+    await worker.fetch(deleteRequest({ email: "user@example.com" }), env);
+    await worker.fetch(deleteRequest({ email: "user@example.com" }), env);
+    expect(calls).toHaveLength(2);
+  });
+
+  it("rejects an invalid deletion address without touching Resend", async () => {
+    const calls = installFetch(() => json({}));
+    const response = await worker.fetch(
+      deleteRequest({ email: "not-an-email" }),
+      makeEnv(),
+    );
+    expect(response.status).toBe(400);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("removes the segment membership and deletes the orphan contact", async () => {
+    const env = makeEnv();
+    const token = randomToken();
+    await env.UPDATES_KV.put(
+      `delete:${token}`,
+      JSON.stringify({ email: "user@example.com", createdAt: new Date().toISOString() }),
+    );
+
+    let reads = 0;
+    const calls = installFetch((call) => {
+      if (call.method === "GET" && call.url.includes("/segments")) {
+        reads += 1;
+        return json({ data: reads === 1 ? [{ id: "seg_test" }] : [] });
+      }
+      if (call.method === "DELETE") return json({ deleted: true });
+      throw new Error(`unexpected ${call.method} ${call.url}`);
+    });
+
+    const response = await worker.fetch(
+      new Request(`https://updates.test/delete/confirm?token=${token}`),
+      env,
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain("Deleted");
+    expect(await env.UPDATES_KV.get(`delete:${token}`)).toBeNull();
+    expect(calls.map((call) => call.method)).toEqual([
+      "GET",
+      "DELETE",
+      "GET",
+      "DELETE",
+    ]);
+    expect(calls[1].url).toContain(
+      "/contacts/user%40example.com/segments/seg_test",
+    );
+    expect(calls[3].url).toContain("/contacts/user%40example.com");
+  });
+
+  it("keeps a contact that still belongs to another segment", async () => {
+    const env = makeEnv();
+    const token = randomToken();
+    await env.UPDATES_KV.put(
+      `delete:${token}`,
+      JSON.stringify({ email: "user@example.com", createdAt: new Date().toISOString() }),
+    );
+
+    let reads = 0;
+    const calls = installFetch((call) => {
+      if (call.method === "GET" && call.url.includes("/segments")) {
+        reads += 1;
+        return json({
+          data: reads === 1 ? [{ id: "seg_test" }, { id: "other" }] : [{ id: "other" }],
+        });
+      }
+      if (call.method === "DELETE") return json({ deleted: true });
+      throw new Error(`unexpected ${call.method} ${call.url}`);
+    });
+
+    const response = await worker.fetch(
+      new Request(`https://updates.test/delete/confirm?token=${token}`),
+      env,
+    );
+
+    expect(response.status).toBe(200);
+    expect(calls.map((call) => call.method)).toEqual(["GET", "DELETE", "GET"]);
+  });
+
+  it("rejects a replayed deletion token", async () => {
+    const calls = installFetch(() => {
+      throw new Error("unexpected fetch");
+    });
+    const response = await worker.fetch(
+      new Request(`https://updates.test/delete/confirm?token=${randomToken()}`),
+      makeEnv(),
+    );
+    expect(response.status).toBe(410);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("keeps the deletion token when Resend fails", async () => {
+    const env = makeEnv();
+    const token = randomToken();
+    await env.UPDATES_KV.put(
+      `delete:${token}`,
+      JSON.stringify({ email: "user@example.com", createdAt: new Date().toISOString() }),
+    );
+    installFetch((call) => {
+      if (call.method === "GET") return json({ data: [{ id: "seg_test" }] });
+      return json({ message: "nope" }, 500);
+    });
+
+    const response = await worker.fetch(
+      new Request(`https://updates.test/delete/confirm?token=${token}`),
+      env,
+    );
+
+    expect(response.status).toBe(502);
+    expect(await env.UPDATES_KV.get(`delete:${token}`)).toBeTruthy();
+  });
+
+  it("never logs the address during deletion", async () => {
+    installFetch((call) => {
+      if (call.method === "GET") return json({ data: [{ id: "seg_test" }] });
+      return json({ id: "email_1" });
+    });
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await worker.fetch(
+      deleteRequest({ email: "user@example.com" }),
+      makeEnv(),
+    );
+
+    const output = [...log.mock.calls, ...error.mock.calls].flat().join(" ");
+    expect(output).not.toContain("user@example.com");
   });
 });
 

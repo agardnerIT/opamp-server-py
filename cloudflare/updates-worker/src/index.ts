@@ -1,10 +1,19 @@
 import type { Env } from "./env";
-import { formPage, jsonResponse, messagePage } from "./pages";
 import {
+  deleteFormPage,
+  formPage,
+  jsonResponse,
+  messagePage,
+  privacyPage,
+} from "./pages";
+import {
+  contactSegmentIds,
+  deleteSubscription,
   ensureContact,
   ResendError,
   resendConfigured,
   sendConfirmation,
+  sendDeletionConfirmation,
   sendReleaseBroadcast,
 } from "./resend";
 import { verifyGitHubSignature } from "./sign";
@@ -22,12 +31,17 @@ const DEDUPE_TTL_SECONDS = 60 * 10; // 10 min
 const RELEASE_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
 const MAX_SUBSCRIBE_BYTES = 8 * 1024;
 const MAX_WEBHOOK_BYTES = 1024 * 1024;
+const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
 
 const GENERIC_SUBSCRIBE_MESSAGE =
   "If that address can be subscribed, a confirmation email is on its way. " +
   "Check your inbox (and spam). The link expires in 24 hours.";
 
-interface PendingSubscription {
+const GENERIC_DELETE_MESSAGE =
+  "If that address is on the list, a deletion email is on its way. " +
+  "Check your inbox (and spam). The link expires in 24 hours.";
+
+interface PendingEmail {
   email: string;
   createdAt: string;
 }
@@ -75,13 +89,23 @@ function errorResponse(
   return formPage(env, { error: message, status });
 }
 
-interface SubscribeInput {
+function deleteErrorResponse(
+  request: Request,
+  env: Env,
+  status: number,
+  message: string,
+): Response {
+  if (wantsJson(request)) return jsonResponse({ ok: false, error: message }, status);
+  return deleteFormPage(env, { error: message, status });
+}
+
+interface EmailFields {
   email: string;
   consent: boolean;
   turnstileToken: string;
 }
 
-async function parseSubscribe(request: Request): Promise<SubscribeInput> {
+async function parseFields(request: Request): Promise<EmailFields> {
   const contentType = (request.headers.get("content-type") || "").toLowerCase();
 
   if (contentType.includes("application/json")) {
@@ -111,6 +135,10 @@ async function parseSubscribe(request: Request): Promise<SubscribeInput> {
   };
 }
 
+function redirect(location: string): Response {
+  return new Response(null, { status: 303, headers: { Location: location } });
+}
+
 async function handleSubscribe(request: Request, env: Env): Promise<Response> {
   if (!resendConfigured(env)) {
     console.error(JSON.stringify({ event: "subscribe.not_configured" }));
@@ -122,7 +150,7 @@ async function handleSubscribe(request: Request, env: Env): Promise<Response> {
     );
   }
 
-  const input = await parseSubscribe(request);
+  const input = await parseFields(request);
   const email = normalizeEmail(input.email);
 
   if (!input.consent) {
@@ -164,14 +192,17 @@ async function handleSubscribe(request: Request, env: Env): Promise<Response> {
   if (await env.UPDATES_KV.get(dedupeKey)) {
     return wantsJson(request)
       ? jsonResponse({ ok: true, message: GENERIC_SUBSCRIBE_MESSAGE })
-      : new Response(null, { status: 303, headers: { Location: "/?state=sent" } });
+      : redirect("/?state=sent");
   }
 
   const token = randomToken();
   const pendingKey = `pending:${token}`;
   await env.UPDATES_KV.put(
     pendingKey,
-    JSON.stringify({ email, createdAt: new Date().toISOString() } satisfies PendingSubscription),
+    JSON.stringify({
+      email,
+      createdAt: new Date().toISOString(),
+    } satisfies PendingEmail),
     { expirationTtl: PENDING_TTL_SECONDS },
   );
   await env.UPDATES_KV.put(dedupeKey, "1", {
@@ -190,12 +221,12 @@ async function handleSubscribe(request: Request, env: Env): Promise<Response> {
   console.log(JSON.stringify({ event: "subscribe.confirmation_sent" }));
   return wantsJson(request)
     ? jsonResponse({ ok: true, message: GENERIC_SUBSCRIBE_MESSAGE })
-    : new Response(null, { status: 303, headers: { Location: "/?state=sent" } });
+    : redirect("/?state=sent");
 }
 
 async function handleConfirm(url: URL, env: Env): Promise<Response> {
   const token = url.searchParams.get("token") || "";
-  if (!/^[A-Za-z0-9_-]{43}$/.test(token)) {
+  if (!TOKEN_RE.test(token)) {
     return messagePage(
       env,
       "Link not valid",
@@ -205,7 +236,7 @@ async function handleConfirm(url: URL, env: Env): Promise<Response> {
   }
 
   const pendingKey = `pending:${token}`;
-  const pending = await env.UPDATES_KV.get<PendingSubscription>(pendingKey, "json");
+  const pending = await env.UPDATES_KV.get<PendingEmail>(pendingKey, "json");
   if (!pending) {
     return messagePage(
       env,
@@ -237,6 +268,140 @@ async function handleConfirm(url: URL, env: Env): Promise<Response> {
     "Subscription confirmed",
     "You will get an email when a new opamp-server-py release is published. " +
       "Every email has an unsubscribe link.",
+  );
+}
+
+async function handleDelete(request: Request, env: Env): Promise<Response> {
+  if (!resendConfigured(env)) {
+    console.error(JSON.stringify({ event: "delete.not_configured" }));
+    return deleteErrorResponse(
+      request,
+      env,
+      503,
+      "Deletion is not configured yet. Please try again later.",
+    );
+  }
+
+  const input = await parseFields(request);
+  const email = normalizeEmail(input.email);
+
+  if (!isValidEmail(email)) {
+    return deleteErrorResponse(
+      request,
+      env,
+      400,
+      "That email address does not look valid.",
+    );
+  }
+  if (
+    !(await verifyTurnstile(
+      env,
+      input.turnstileToken,
+      request.headers.get("CF-Connecting-IP"),
+    ))
+  ) {
+    return deleteErrorResponse(
+      request,
+      env,
+      400,
+      "The bot check did not pass. Please try again.",
+    );
+  }
+
+  const dedupeKey = `delete-sent:${await sha256Hex(email)}`;
+  if (await env.UPDATES_KV.get(dedupeKey)) {
+    return wantsJson(request)
+      ? jsonResponse({ ok: true, message: GENERIC_DELETE_MESSAGE })
+      : redirect("/delete?state=sent");
+  }
+
+  const segments = await contactSegmentIds(env, email);
+
+  // Not on this list: same response as a real member. No email is sent, so an
+  // attacker cannot use this endpoint to enumerate subscribers.
+  if (segments === null || !segments.includes(env.RESEND_SEGMENT_ID!)) {
+    return wantsJson(request)
+      ? jsonResponse({ ok: true, message: GENERIC_DELETE_MESSAGE })
+      : redirect("/delete?state=sent");
+  }
+
+  const token = randomToken();
+  const pendingKey = `delete:${token}`;
+  await env.UPDATES_KV.put(
+    pendingKey,
+    JSON.stringify({
+      email,
+      createdAt: new Date().toISOString(),
+    } satisfies PendingEmail),
+    { expirationTtl: PENDING_TTL_SECONDS },
+  );
+  await env.UPDATES_KV.put(dedupeKey, "1", {
+    expirationTtl: DEDUPE_TTL_SECONDS,
+  });
+
+  try {
+    await sendDeletionConfirmation(
+      env,
+      email,
+      token,
+      publicBaseUrl(request, env),
+    );
+  } catch (error) {
+    await env.UPDATES_KV.delete(pendingKey);
+    await env.UPDATES_KV.delete(dedupeKey);
+    throw error;
+  }
+
+  console.log(JSON.stringify({ event: "delete.confirmation_sent" }));
+  return wantsJson(request)
+    ? jsonResponse({ ok: true, message: GENERIC_DELETE_MESSAGE })
+    : redirect("/delete?state=sent");
+}
+
+async function handleDeleteConfirm(url: URL, env: Env): Promise<Response> {
+  const token = url.searchParams.get("token") || "";
+  if (!TOKEN_RE.test(token)) {
+    return messagePage(
+      env,
+      "Link not valid",
+      "This deletion link is not valid. Request a new one from the delete page.",
+      400,
+    );
+  }
+
+  const pendingKey = `delete:${token}`;
+  const pending = await env.UPDATES_KV.get<PendingEmail>(pendingKey, "json");
+  if (!pending) {
+    return messagePage(
+      env,
+      "Link expired",
+      "This deletion link has expired or was already used. " +
+        "You can request a new one from the delete page.",
+      410,
+    );
+  }
+
+  try {
+    await deleteSubscription(env, pending.email);
+  } catch (error) {
+    console.error(JSON.stringify({ event: "delete.resend_failed" }));
+    return messagePage(
+      env,
+      "Try again",
+      "We could not complete the deletion right now. " +
+        "Please try the link again in a minute.",
+      502,
+    );
+  }
+
+  await env.UPDATES_KV.delete(pendingKey);
+  console.log(JSON.stringify({ event: "delete.completed" }));
+  return messagePage(
+    env,
+    "Deleted",
+    "Your address has been removed from the opamp-server-py release " +
+      "announcement list. If it was not used for anything else in our email " +
+      "provider, the contact record was deleted too.",
   );
 }
 
@@ -322,6 +487,13 @@ function handleRoot(env: Env, url: URL): Response {
   return formPage(env);
 }
 
+function handleDeletePage(env: Env, url: URL): Response {
+  if (url.searchParams.get("state") === "sent") {
+    return deleteFormPage(env, { message: GENERIC_DELETE_MESSAGE });
+  }
+  return deleteFormPage(env);
+}
+
 function handleHealth(env: Env): Response {
   return jsonResponse({
     ok: true,
@@ -338,7 +510,6 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     try {
       const url = new URL(request.url);
-
       const isRead = request.method === "GET" || request.method === "HEAD";
 
       if (isRead && url.pathname === "/") {
@@ -349,6 +520,18 @@ export default {
       }
       if (request.method === "GET" && url.pathname === "/confirm") {
         return await handleConfirm(url, env);
+      }
+      if (isRead && url.pathname === "/privacy") {
+        return privacyPage(env);
+      }
+      if (isRead && url.pathname === "/delete") {
+        return handleDeletePage(env, url);
+      }
+      if (request.method === "POST" && url.pathname === "/delete") {
+        return await handleDelete(request, env);
+      }
+      if (request.method === "GET" && url.pathname === "/delete/confirm") {
+        return await handleDeleteConfirm(url, env);
       }
       if (request.method === "POST" && url.pathname === "/release") {
         return await handleRelease(request, env);

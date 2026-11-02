@@ -19,6 +19,7 @@
     "RESEND_REPLY_TO": "",
     "TURNSTILE_SITE_KEY": "",
     "PRIVACY_URL": "",
+    "PRIVACY_CONTACT": "privacy@agardner.net",
     "DASHBOARD_URL": "",
     "REPO_URL": "https://github.com/agardnerIT/opamp-server-py"
   }

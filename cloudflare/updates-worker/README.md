@@ -1,17 +1,22 @@
 # `opamp-updates` — release email Worker
 
 A one-way Cloudflare Worker between the self-hosted dashboard and the project's
-Resend account. It does exactly four things:
+Resend account. It exposes only these endpoints:
 
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/` | signup form (email + consent + Turnstile) |
 | `POST` | `/subscribe` | double opt-in: stores a 24 h token, sends a confirmation email |
 | `GET` | `/confirm?token=` | adds the confirmed address to the Resend segment |
+| `GET` | `/privacy` | release-list privacy policy |
+| `GET` | `/delete` | deletion request form |
+| `POST` | `/delete` | double opt-in deletion: sends a confirmation link |
+| `GET` | `/delete/confirm?token=` | removes the address from the release segment |
 | `POST` | `/release` | GitHub `release: published` webhook → Resend Broadcast |
 | `GET` | `/health` | configuration booleans; no secrets |
 
-There is **no** endpoint to list, read, or delete contacts. The Worker holds a
+There is **no** endpoint to list or read contacts. Deletion is a two-step,
+confirmed flow, not a one-shot public delete. The Worker holds a
 Resend `full_access` key (Resend only offers `full_access` or `sending_access`,
 and contacts/broadcasts need the former), so it is the trust boundary: keep the
 code small, review changes, and rotate the key if it is ever exposed.
@@ -29,7 +34,7 @@ cd cloudflare/updates-worker
 npm install
 cp .dev.vars.example .dev.vars   # fill in what you are testing
 npx wrangler dev                 # http://localhost:8787
-npm test                         # 24 Worker tests, no network
+npm test                         # 38 Worker tests, no network
 npm run typecheck
 ```
 
@@ -48,7 +53,8 @@ Edit the `vars` block in `wrangler.jsonc` and redeploy:
 | `RESEND_FROM` | verified sender, e.g. `opamp-server-py <updates@example.com>` |
 | `RESEND_REPLY_TO` | optional monitored reply address |
 | `TURNSTILE_SITE_KEY` | public widget key; leave empty to disable |
-| `PRIVACY_URL` | linked from the form, confirmation and broadcast |
+| `PRIVACY_URL` | override the policy link; default is `${PUBLIC_BASE_URL}/privacy` |
+| `PRIVACY_CONTACT` | deletion/access contact shown in the policy |
 | `DASHBOARD_URL` | "back to the dashboard" link on the confirmation page |
 
 Secrets (never in `wrangler.jsonc`, never in git):
@@ -102,15 +108,34 @@ never fires.
 | KV `pending:<token>` | email + timestamp, unconfirmed | 24 h |
 | KV `sent:<sha256(email)>` | hash only, anti-repeat | 10 min |
 | KV `release:<release.id>` | id only, anti-double-send | 30 days |
+| KV `delete:<token>` | email + timestamp, unconfirmed deletion | 24 h |
+| KV `delete-sent:<sha256(email)>` | hash only, anti-repeat | 10 min |
 | Resend contact | email, subscribed status, timestamps | until deleted |
 
 No names, hostnames, instance IDs, versions, fleet data, or IP addresses are
 stored by the Worker. Cloudflare request logs still contain IPs; set the Worker
 log retention deliberately.
 
+## Privacy policy and deletion
+
+`GET /privacy` serves the policy in `src/privacy.ts`. It is a draft: review the
+controller name, contact and retention wording before pointing the dashboard at
+this Worker.
+
+Deletion is also double opt-in. `POST /delete` sends a confirmation link only if
+the address is in the release segment; the response is identical whether or not
+it is, so the endpoint cannot be used to enumerate subscribers. The link removes
+the address from **this** segment. The global Resend contact is deleted only when
+no other segment still uses it, so a Resend account shared with another project
+is not damaged.
+
+A data processing agreement is a legal document between the controller and
+Resend/Cloudflare, not an app page. The policy links both processors' privacy
+policies; use their standard DPAs if one is required.
+
 ## Tests
 
-`npm test` runs 24 offline tests with a fake KV and a mocked `fetch`:
+`npm test` runs 38 offline tests with a fake KV and a mocked `fetch`:
 
 - generic response and one email on subscribe; no second email inside dedupe;
 - consent, email validation, body size, Turnstile failure;
@@ -118,6 +143,11 @@ log retention deliberately.
   failure leaves the link usable;
 - release webhook: valid HMAC, invalid HMAC, draft/prerelease skip, idempotent
   replay, non-semver tag;
+- privacy page and deletion form render; deletion emails only a segment member;
+  a non-member and a missing contact get the same response and no email;
+  confirmation removes the segment membership, deletes the orphan contact,
+  keeps a contact used by another segment, rejects replays and keeps the token
+  when Resend fails;
 - the broadcast contains the unsubscribe merge tag;
 - no email address reaches the logs;
 - `/health` never exposes secrets.

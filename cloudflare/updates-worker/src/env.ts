@@ -20,6 +20,7 @@ export interface Env {
   /** Public URL of this Worker, used in confirmation links. */
   PUBLIC_BASE_URL?: string;
   PRIVACY_URL?: string;
+  PRIVACY_CONTACT?: string;
   DASHBOARD_URL?: string;
   REPO_URL?: string;
 }

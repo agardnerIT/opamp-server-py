@@ -204,24 +204,45 @@ details are worth knowing:
   `opamp_full_state_requested_total{reason}` — `new_agent` for the registration
   baseline, `sequence_gap` for a repair.
 
-### Server capabilities
+### OpAMP specification and capability matrix
 
-The server advertises exactly what it implements: `AcceptsStatus`,
-`AcceptsEffectiveConfig` and `AcceptsPackagesStatus`, plus `OffersRemoteConfig`
-only while [config push](#remote-config-push) is allowed by the posture.
-`OffersPackages` (#82) and `OffersConnectionSettings` /
-`AcceptsConnectionSettingsRequest` (#83) stay **off** until those flows exist: a set
-bit is a promise an agent is entitled to act on, and a supervisor would otherwise
-wait for a connection-settings offer that never arrives. The classification lives
-in `server/remote_config.py`; a test fails when a proto bump adds an unclassified
-capability.
+This server targets **OpAMP [v0.20.0](https://github.com/open-telemetry/opamp-spec/releases/tag/v0.20.0)**
+— the generated stubs in `proto/` are built from that release (#66). `GET /health`
+returns `spec_version` and the exact server `capabilities` bitmask, so `opampctl`, the
+MCP server and the UI never hardcode either.
+
+Transports: **HTTP** (poll/reply) and **WebSocket** (`OPAMP_WS_ENABLED`, upgrade on
+`/v1/opamp`, #89) — same framing, same message handler, same auth.
+
+| Direction | Capability | Status |
+|---|---|---|
+| Server | `AcceptsStatus` | ✅ always advertised |
+| Server | `AcceptsEffectiveConfig` | ✅ always advertised (stored, redacted on read) |
+| Server | `AcceptsPackagesStatus` | ✅ always advertised (stored/reported only) |
+| Server | `OffersRemoteConfig` | ✅ advertised while the posture allows push (#81, #96) |
+| Server | `OffersPackages` | ❌ [#82](https://github.com/agardnerIT/opamp-server-py/issues/82) — stays off: a set bit is a promise |
+| Server | `OffersConnectionSettings` | ❌ [#83](https://github.com/agardnerIT/opamp-server-py/issues/83) |
+| Server | `AcceptsConnectionSettingsRequest` | ❌ [#83](https://github.com/agardnerIT/opamp-server-py/issues/83) |
+| Agent | `ReportsStatus`, `ReportsHealth`, `ReportsEffectiveConfig` | ✅ understood (health is optional; its absence is not unhealth) |
+| Agent | `ReportsAvailableComponents` | ✅ understood (drives validation warnings) |
+| Agent | `ReportsPackageStatuses` | ⚠️ stored and displayed, not acted on |
+| Agent | `AcceptsRemoteConfig` | ✅ required before a config is offered (`remote_config.decision_for`) |
+| Agent | `AcceptsRestartCommand` | ✅ [#84](https://github.com/agardnerIT/opamp-server-py/issues/84) — `POST /agent/{id}/restart`; 409 without the bit |
+| Agent | custom capabilities / messages | ❌ [#85](https://github.com/agardnerIT/opamp-server-py/issues/85) |
+
+The classification lives in `server/remote_config.py`
+(`ALWAYS_ADVERTISED` / `CONDITIONAL` / `UNIMPLEMENTED` / `RESERVED`), and
+`tests/test_capabilities.py` fails when a proto bump adds a capability none of them
+mentions: silently dropping a bit is a symptom, an unclassified bit is what
+over-claims to every agent. `GET /health` publishes the same values, so "will my agent
+interoperate?" is answered without reading the source (#79).
 
 Both transports accept credential headers, which is what makes per-agent
-authentication possible without a wire extension: `extension/opampextension`
-supports `server.http.headers` **and** `server.ws.headers` (verified against
-v0.140.0 — the values are `configopaque`, so the agent's own effective-config
-report redacts them), and `opamp-go` sends them on every HTTP request and on the
-WebSocket upgrade. The supervisor supports the same `headers` block.
+authentication possible without a wire extension: `extension/opampextension` supports
+`server.http.headers` **and** `server.ws.headers` (verified against v0.140.0 — the
+values are `configopaque`, so the agent's own effective-config report redacts them),
+and `opamp-go` sends them on every HTTP request and on the WebSocket upgrade. The
+supervisor supports the same `headers` block.
 
 ## Agent authentication (agent → server)
 
@@ -666,6 +687,15 @@ because one failed is a second outage. The pause carries one reason
 paused at batch 2". The two decisions stay human: retry the failed agents (an
 approver `reactivate`, #99) or roll back the applied ones — which runs as its own
 rollout, canary first, gated the same way.
+- **The HTTP surface** (#103): `POST /config/rollouts?proposal_id=…` creates a rollout
+  (approver; `dry_run: true` plans without approving), `GET /config/rollouts` and
+  `GET /config/rollouts/{id}` read it (viewer), `POST /config/rollouts/{id}/abort`
+  stops it (operator) and `POST /config/rollouts/{id}/rollback` undoes it as its own
+  gated rollout (approver). `POST /config/revisions/{id}/apply` is the same operation
+  under the flow's own verb, and `POST /config/revisions/{id}/validate` re-runs the
+  pipeline without changing anything. From the shell:
+  `opampctl config rollout plan|create|show|abort|rollback <id>`,
+  `opampctl config rollouts`, `opampctl config revalidate <proposal>`.
 - **Abort stops promotion immediately, and cannot recall.** `abort()` stops the
 next batch, leaves already-applied agents exactly as they are (the config is on
 the agent and it is running it), and leaves un-promoted agents held so a stopped
@@ -948,8 +978,8 @@ role below it:
 | Role | May | Why it exists |
 |---|---|---|
 | `viewer` | read everything (alert webhooks redacted) | a dashboard user should not need write access |
-| `operator` | propose changes, apply *approved* revisions, edit alerts, force compliance checks | the person who runs the fleet |
-| `approver` | approve / reject / roll back | the person who signs off — **deliberately not the same role** as `operator`, so two-phase config push (#99, #103) is an approval and not a formality |
+| `operator` | propose changes, apply *approved* revisions, start a staged rollout of an approved one, abort a rollout, deliver a config, ask an agent to restart, edit alerts, force compliance checks | the person who runs the fleet |
+| `approver` | approve / reject / reactivate, create a staged rollout (which *is* the approval), roll a rollout back | the person who signs off — **deliberately not the same role** as `operator`, so two-phase config push (#99, #103) is an approval and not a formality |
 | `admin` | everything, plus identity (principals, sessions) and fleet-wide actions | onboarding and break-glass |
 
 #### Principals (recommended)

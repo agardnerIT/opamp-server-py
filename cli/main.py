@@ -60,6 +60,10 @@ config_app = typer.Typer(
 agent_config_app = typer.Typer(
     help="Desired/effective config for one agent (#81)", no_args_is_help=True
 )
+rollout_app = typer.Typer(
+    help="Staged rollouts: plan, promote, abort, roll back (#101, #103)",
+    no_args_is_help=True,
+)
 audit_app = typer.Typer(
     help="Audit log: query, verify, export (#97)", no_args_is_help=True
 )
@@ -72,6 +76,7 @@ app.add_typer(compliance_app, name="compliance", help="OPA policy compliance")
 app.add_typer(alerts_app, name="alerts", help="Alert configuration (admin)")
 app.add_typer(auth_app, name="auth", help="Admin auth: mode, sessions, identities")
 app.add_typer(config_app, name="config", help="Remote config control plane")
+config_app.add_typer(rollout_app, name="rollout", help="Staged rollouts (#101)")
 app.add_typer(audit_app, name="audit", help="Audit log: query, verify, export")
 
 
@@ -495,6 +500,149 @@ def config_apply(
             note=note,
         )
     )
+
+
+@config_app.command("revalidate")
+def config_revalidate(
+    proposal_id: str = typer.Argument(..., help="Proposal id (prop-…)"),
+) -> None:
+    """Re-run validation for a proposal and change nothing (operator, live server only).
+
+    The pipeline runs against each resolved agent, so the inventory warnings are about
+    the machines an approval would actually reach. Compare `fingerprint` with the
+    stored `stored` verdict to see whether anything moved since it was proposed.
+    """
+    _run(lambda oc: oc.revalidate_config(proposal_id))
+
+
+@config_app.command("rollouts")
+def config_rollouts(
+    status: Optional[str] = typer.Option(
+        None, "--status", help="pending|running|paused|completed|aborted|cancelled"
+    ),
+    limit: int = typer.Option(100, "--limit", min=1, max=1000),
+) -> None:
+    """List staged rollouts, newest first, with per-state agent counts (viewer)."""
+    _run(lambda oc: oc.list_config_rollouts(status=status, limit=limit))
+
+
+@rollout_app.command("plan")
+def config_rollout_plan(
+    proposal_id: str = typer.Argument(..., help="Proposal id (prop-…)"),
+    canary_percent: Optional[float] = typer.Option(
+        None, "--canary-percent", help="Canary size as a % of the fleet [default: 5]"
+    ),
+    max_agents: Optional[int] = typer.Option(
+        None, "--max-agents", help="Absolute batch cap [default: 25]"
+    ),
+    max_percent: Optional[float] = typer.Option(
+        None, "--max-percent", help="Relative batch cap, % of fleet [default: 25]"
+    ),
+    health_gate: Optional[int] = typer.Option(
+        None, "--health-gate", help="Seconds a batch must stay green [default: 90]"
+    ),
+    restart: bool = typer.Option(
+        False, "--restart", help="Queue a restart for each agent once its batch passes"
+    ),
+) -> None:
+    """Dry run: show the exact batches and caps. Approves, holds and delivers nothing."""
+    _run(
+        lambda oc: oc.plan_config_rollout(
+            proposal_id,
+            canary_percent=canary_percent,
+            max_agents_per_batch=max_agents,
+            max_percent_per_batch=max_percent,
+            health_gate_seconds=health_gate,
+            restart_after_apply=restart,
+        )
+    )
+
+
+@rollout_app.command("create")
+def config_rollout_create(
+    proposal_id: str = typer.Argument(..., help="Proposal id (prop-…)"),
+    canary_percent: Optional[float] = typer.Option(None, "--canary-percent"),
+    max_agents: Optional[int] = typer.Option(None, "--max-agents"),
+    max_percent: Optional[float] = typer.Option(None, "--max-percent"),
+    health_gate: Optional[int] = typer.Option(None, "--health-gate"),
+    ttl_minutes: Optional[int] = typer.Option(
+        None, "--ttl-minutes", help="Cancel a stalled rollout after N minutes [default: 60]"
+    ),
+    restart: bool = typer.Option(
+        False, "--restart", help="Queue a restart for each agent once its batch passes"
+    ),
+    confirm_scope_change: bool = typer.Option(
+        False, "--confirm-scope-change",
+        help="Acknowledge that the selector now covers more agents than when proposed",
+    ),
+    override_reason: Optional[str] = typer.Option(
+        None, "--override-reason", help="Override a policy violation (recorded, audited)"
+    ),
+    note: Optional[str] = typer.Option(None, "--note", help="Reason, recorded in the audit log"),
+) -> None:
+    """Approve a proposal **and** stage it: canary first, gated after that (approver).
+
+    Creating the rollout is the approval. Only the canary batch is released; the rest
+    of the fleet stays held until the gate clears for the batch before it.
+    """
+    _run(
+        lambda oc: oc.create_config_rollout(
+            proposal_id,
+            note=note,
+            canary_percent=canary_percent,
+            max_agents_per_batch=max_agents,
+            max_percent_per_batch=max_percent,
+            health_gate_seconds=health_gate,
+            ttl_minutes=ttl_minutes,
+            restart_after_apply=restart,
+            confirm_scope_change=confirm_scope_change,
+            override_reason=override_reason,
+        )
+    )
+
+
+@rollout_app.command("show")
+def config_rollout_show(
+    rollout_id: str = typer.Argument(..., help="Rollout id (ro-…)"),
+) -> None:
+    """Batch progress, per-agent state and — when paused — exactly why (viewer)."""
+    _run(lambda oc: oc.get_config_rollout(rollout_id))
+
+
+@rollout_app.command("abort")
+def config_rollout_abort(
+    rollout_id: str = typer.Argument(..., help="Rollout id (ro-…)"),
+    reason: Optional[str] = typer.Option(None, "--reason"),
+) -> None:
+    """Stop promoting **now** (operator). Already-delivered configs are not recalled."""
+    _run(lambda oc: oc.abort_config_rollout(rollout_id, reason=reason))
+
+
+@rollout_app.command("rollback")
+def config_rollout_rollback(
+    rollout_id: str = typer.Argument(..., help="Rollout id (ro-…)"),
+    health_gate: Optional[int] = typer.Option(None, "--health-gate"),
+    note: Optional[str] = typer.Option(None, "--note"),
+) -> None:
+    """Roll back what this rollout applied, as its own gated rollout (approver)."""
+    _run(
+        lambda oc: oc.rollback_config_rollout(
+            rollout_id, note=note, health_gate_seconds=health_gate
+        )
+    )
+
+
+@agent_config_app.command("restart")
+def agent_restart(
+    agent_id: str = typer.Argument(..., help="Agent id (hex instance_uid)"),
+    reason: Optional[str] = typer.Option(None, "--reason", help="Recorded in the audit log"),
+) -> None:
+    """Ask an agent to restart on its next poll (operator, live server only).
+
+    Queued, delivered **exactly once**, and refused with 409 when the collector does
+    not set `accepts_restart_command: true` in its `opamp` extension.
+    """
+    _run(lambda oc: oc.restart_agent(agent_id, reason=reason))
 
 
 @config_app.command("rotate-key")

@@ -113,6 +113,13 @@ opampctl agents compliance <agent-id>
 | Reactivate poisoned (approver) | `config reactivate prop-… --reason …` | — | `POST /config/revisions/{id}/reactivate` |
 | Roll back one agent (approver) | `agents config rollback <id>` | — | `POST /agent/{id}/config/rollback` |
 | Deliver the active revision now (operator) | `agents config deliver <id>` | — | `POST /agent/{id}/config/deliver` |
+| Plan a staged rollout (dry run) | `config rollout plan prop-…` | — | `POST /config/rollouts` (`dry_run`) |
+| Create a rollout = approve + stage (approver) | `config rollout create prop-…` | — (never exposed) | `POST /config/rollouts` |
+| Rollout progress, per-agent state, pause reason | `config rollout show ro-…` / `config rollouts` | `get_config_rollout` / `list_config_rollouts` | `GET /config/rollouts[/{id}]` |
+| Stop promoting (operator) | `config rollout abort ro-… --reason …` | — | `POST /config/rollouts/{id}/abort` |
+| Undo a rollout, staged (approver) | `config rollout rollback ro-…` | — | `POST /config/rollouts/{id}/rollback` |
+| Re-run validation for a proposal (read-only) | `config revalidate prop-…` | — | `POST /config/revisions/{id}/validate` |
+| Restart an agent (operator, needs the capability) | `agents config restart <id>` | — | `POST /agent/{id}/restart` |
 | Fleet push (admin, confirmed) | `config apply --file f.yaml --attr env=prod --confirm` | — | `POST /config/apply` |
 | Re-encrypt stored bodies | `config rotate-key --db data/opamp.db` | — | — |
 | Offline (no server) | `--db data/opamp.db …` | — | — |
@@ -292,6 +299,41 @@ opampctl --password "$ADMIN_PASSWORD" agents config rollback <id> --note "why"
 - **Drift** in `agents config get` is `true | false | null` plus `missing` YAML
   paths. `null` means "cannot tell yet" (no effective config reported, or the
   revision is not active) — do not read it as healthy.
+
+### Staged rollouts (#101/#103)
+
+A rollout is how an approved config reaches a fleet: **canary first, then gated
+batches**. Creating one *is* the approval, so it needs `approver`; `config rollout
+plan` is the same call with `dry_run` and changes nothing.
+
+```bash
+opampctl --password "$ADMIN_PASSWORD" config rollout plan prop-…   # batches, caps, verdict
+opampctl --password "$ADMIN_PASSWORD" config rollout create prop-… --health-gate 90
+opampctl --password "$ADMIN_PASSWORD" config rollout show ro-…     # per-agent state
+opampctl --password "$ADMIN_PASSWORD" config rollout abort ro-… --reason "typo in exporter"
+opampctl --password "$ADMIN_PASSWORD" config rollout rollback ro-… # undo, staged
+```
+
+- **Promotion needs all four:** every agent in the batch reports `APPLIED` **with our
+  hash**, is `healthy` (only `healthy=false` blocks — health reporting is optional
+  upstream), has not gone silent, and
+  `CONFIG_PUSH_HEALTH_GATE_SECONDS` has elapsed since the last delivery in the batch.
+- **Nothing is delivered to a later batch while it waits.** Approval *holds* every
+  assignment (`desired.held: true`, delivery state `held`); the engine releases one
+  batch per gate pass. A new revision releases the hold.
+- **A pause is not a retry timer.** `paused_reason` is exactly one of `failed`,
+  `auto_reverted`, `agent_went_silent`, `unhealthy`, `delivery_unconfirmed`,
+  `superseded`. Nothing is retried and nothing is rolled back automatically: an
+  approver either `config reactivate`s the revision or starts a rollback rollout.
+- **`abort` cannot recall** a config that is already on an agent. It stops the next
+  batch, keeps un-promoted agents held, and leaves applied agents alone.
+- **TTL:** a running *or paused* rollout older than `CONFIG_PUSH_ROLLOUT_TTL_MINUTES`
+  is cancelled and audited (`reason: ttl_expired`) — expired holds stay held.
+- **`--restart`** queues a restart (#84) for each agent once its batch passes the
+  gate. Works only for collectors with `accepts_restart_command: true`; the others are
+  skipped with a log line, never silently "restarted".
+- **MCP can read rollouts, never create, abort or roll back one** (`get_config_rollout`,
+  `list_config_rollouts`). Creating a rollout is an approval (D9).
 
 ### What validation checks (#100)
 

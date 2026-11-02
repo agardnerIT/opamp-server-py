@@ -294,6 +294,38 @@ def list_config_revisions(
     )
 
 
+@mcp.tool()
+def list_config_rollouts(status: Optional[str] = None, limit: int = 50) -> str:
+    """Staged rollouts, newest first, with per-state agent counts (read-only).
+
+    Args:
+        status: pending|running|paused|completed|aborted|cancelled.
+        limit: Maximum rows.
+
+    Returns {"rollouts", "count", "statuses"}. Each row carries the batch progress
+    (`batch.current`/`batch.count`), the agent count, the per-agent state rollup and
+    `paused_reason` when it is paused.
+    """
+    return _tool(lambda oc: oc.list_config_rollouts(status=status, limit=limit))
+
+
+@mcp.tool()
+def get_config_rollout(rollout_id: str) -> str:
+    """One staged rollout: batch progress, per-agent state and the pause reason.
+
+    Read-only. `agents.states` is the rollup an operator reads ("N applied, K failed,
+    paused at batch 2") and `paused_reason` is one of `failed`, `auto_reverted`,
+    `agent_went_silent`, `unhealthy`, `delivery_unconfirmed`, `superseded` — never a
+    generic error, because the operator's next action differs per reason.
+
+    Deliberately absent: creating a rollout (which *is* the approval), aborting one and
+    rolling one back. Approval, abort and rollback are never MCP tools at any setting
+    (epic #93, D9): a client that can approve its own proposal has no separation of
+    duties, and one that can abort a rollout in flight can stop a human's remediation.
+    """
+    return _tool(lambda oc: oc.get_config_rollout(rollout_id))
+
+
 def propose_config(
     config_map: Dict[str, Any],
     scope: Dict[str, Any],

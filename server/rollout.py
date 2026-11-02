@@ -51,7 +51,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 import prometheus_client as prom_client
 from loguru import logger
 
-from server import audit, config_control, posture, remote_config
+from server import audit, commands, config_control, posture, remote_config
 from server.state import (
     AGENT_REGISTRY,
     AgentState,
@@ -487,6 +487,11 @@ STORE = SQLiteRolloutStore()
 class RolloutError(Exception):
     """A refused rollout operation, in HTTP terms the caller can pass through."""
 
+    def __init__(self, status_code: int, detail: Any):
+        self.status_code = status_code
+        self.detail = detail
+        super().__init__(str(detail))
+
 
 def _store() -> SQLiteRolloutStore:
     return STORE
@@ -566,6 +571,7 @@ def create_rollout(
     allow_endpoint_change_confirmed: bool = False,
     confirm_scope_change: bool = False,
     override_reason: Optional[str] = None,
+    restart_after_apply: bool = False,
     now: Optional[datetime] = None,
     deliver_fn: Optional[Callable[[str], Any]] = None,
 ) -> Dict[str, Any]:
@@ -593,7 +599,8 @@ def create_rollout(
     agent_ids = [revision["agent_id"] for revision in revisions]
     if not agent_ids:
         raise RolloutError(
-            f"proposal {proposal_id} approved no agents, so there is nothing to roll out"
+            409,
+            f"proposal {proposal_id} approved no agents, so there is nothing to roll out",
         )
 
     gate = health_gate_seconds() if gate_seconds is None else int(gate_seconds)
@@ -645,6 +652,7 @@ def create_rollout(
         current_batch=0,
         created_at=now.isoformat(),
         expires_at=expires_at,
+        restart_after_apply=int(bool(restart_after_apply)),
     )
 
     revision_of = {revision["agent_id"]: revision["revision_id"] for revision in revisions}
@@ -702,11 +710,12 @@ def create_rollback_rollout(
     store = _store()
     source = store.get(rollout_id)
     if source is None:
-        raise RolloutError(f"rollout {rollout_id} not found")
+        raise RolloutError(404, f"rollout {rollout_id} not found")
     if source.get("kind") == KIND_ROLLBACK:
         raise RolloutError(
+            409,
             "this rollout is already a rollback; roll forward with a new proposal "
-            "instead of rolling a rollback back"
+            "instead of rolling a rollback back",
         )
 
     rows = [
@@ -716,8 +725,9 @@ def create_rollback_rollout(
     ]
     if not rows:
         raise RolloutError(
+            409,
             f"rollout {rollout_id} has not applied to any agent, so there is nothing "
-            "to roll back"
+            "to roll back",
         )
 
     by_id = {agent.agent_id: agent for agent in agents}
@@ -734,7 +744,13 @@ def create_rollback_rollout(
             )
         except config_control.ConfigControlError as exc:
             raise RolloutError(
-                f"cannot roll back {agent_id}: {exc.detail}"
+                409,
+                {
+                    "message": f"cannot roll back {agent_id}",
+                    "cause": exc.detail,
+                    "hint": "a rollout can only be rolled back for agents that have a "
+                    "previous revision; push a new config or propose one instead",
+                },
             ) from exc
         revision_of[agent_id] = created["revision_id"]
 
@@ -1032,6 +1048,13 @@ def _advance(
             "waiting": len(verdict.waiting),
         }
 
+    # #84: "I pushed a config and it needs a restart" is one operator action. The
+    # restart is queued *after* the gate opens, so the config is applied before the
+    # collector restarts, and it is queued only for agents that advertise the
+    # capability (the others get a log line, not a silent no-op).
+    if int(rollout.get("restart_after_apply") or 0):
+        _queue_restarts(rollout, [row["agent_id"] for row in in_batch], by_id)
+
     batch_count = int(rollout.get("batch_count") or 1)
     if index + 1 >= batch_count:
         _complete(rollout, now)
@@ -1055,6 +1078,138 @@ def _last_delivery(
     stamps.extend(_parse_time(row.get("delivered_at")) for row in in_batch)
     present = [stamp for stamp in stamps if stamp is not None]
     return max(present) if present else None
+
+
+
+def _queue_restarts(
+    rollout: Mapping[str, Any],
+    agent_ids: Sequence[str],
+    by_id: Mapping[str, Optional[AgentState]],
+) -> List[str]:
+    """Queue a restart for each promoted agent that accepts one (#84, #101)."""
+    queued: List[str] = []
+    for agent_id in agent_ids:
+        state = by_id.get(agent_id)
+        if state is None:
+            continue
+        if not commands.accepts_restart(state):
+            logger.bind(
+                event="config.rollout.restart_skipped",
+                rollout_id=rollout["rollout_id"],
+                agent_id=agent_id,
+            ).info(
+                f"rollout {rollout['rollout_id']}: {agent_id} does not accept restart "
+                "commands; skipping the restart for this batch"
+            )
+            continue
+        try:
+            commands.request_restart(
+                agent_id,
+                principal=None,
+                reason=f"rollout {rollout['rollout_id']} batch "
+                f"{int(rollout.get('current_batch') or 0) + 1}",
+            )
+            queued.append(agent_id)
+        except commands.CommandError as exc:  # pragma: no cover - capability re-checked
+            logger.bind(
+                event="config.rollout.restart_failed",
+                rollout_id=rollout["rollout_id"],
+                agent_id=agent_id,
+            ).warning(f"could not queue a restart for {agent_id}: {exc.detail}")
+    if queued:
+        logger.bind(
+            event="config.rollout.restart",
+            rollout_id=rollout["rollout_id"],
+            agents=len(queued),
+        ).info(
+            f"rollout {rollout['rollout_id']}: restart queued for {len(queued)} agent(s)"
+        )
+    return queued
+
+
+def preview_rollout(
+    proposal_id: str,
+    *,
+    canary_percent_value: Optional[float] = None,
+    max_agents_per_batch_value: Optional[int] = None,
+    max_percent_per_batch_value: Optional[float] = None,
+    gate_seconds: Optional[int] = None,
+    ttl_minutes_value: Optional[int] = None,
+    restart_after_apply: bool = False,
+) -> Dict[str, Any]:
+    """The dry run (#103): resolve, plan and validate — **moves nothing**.
+
+    This is the button people press most, so it is cheap and it is honest about what
+    would happen: the exact batches, the canary, the caps in force and the stored
+    validation verdict. It does not approve, activate, hold or deliver anything, and
+    it refuses a proposal that has already been decided rather than pretending.
+    """
+    store = _store()
+    proposal = config_control.proposal_view(proposal_id)
+    statuses = proposal.get("statuses") or []
+    if statuses and statuses != ["proposed"]:
+        raise RolloutError(
+            409,
+            {
+                "message": f"proposal {proposal_id} is already {', '.join(statuses)}",
+                "hint": "a rollout can only be created from a proposed revision; "
+                "reactivate a poisoned one (#99) or propose a new revision",
+            },
+        )
+    agent_ids = sorted({row["agent_id"] for row in proposal["revisions"]})
+    if not agent_ids:
+        raise RolloutError(409, f"proposal {proposal_id} targets no agents")
+
+    gate = health_gate_seconds() if gate_seconds is None else int(gate_seconds)
+    ttl = ttl_minutes() if ttl_minutes_value is None else int(ttl_minutes_value)
+    batches = plan_batches(
+        agent_ids,
+        canary_percent_value=canary_percent_value,
+        max_agents_per_batch_value=max_agents_per_batch_value,
+        max_percent_per_batch_value=max_percent_per_batch_value,
+    )
+    verdict = (proposal["revisions"][0] or {}).get("verdict") or {}
+    return {
+        "dry_run": True,
+        "proposal_id": proposal_id,
+        "config_hash": proposal.get("config_hash"),
+        "status": "planned",
+        "agents": len(agent_ids),
+        "batch": {
+            "count": len(batches),
+            "canary_percent": (
+                canary_percent() if canary_percent_value is None else canary_percent_value
+            ),
+            "max_agents_per_batch": (
+                max_agents_per_batch()
+                if max_agents_per_batch_value is None
+                else max_agents_per_batch_value
+            ),
+            "max_percent_per_batch": (
+                max_percent_per_batch()
+                if max_percent_per_batch_value is None
+                else max_percent_per_batch_value
+            ),
+            "size": batch_size(
+                len(agent_ids),
+                max_agents_per_batch_value=max_agents_per_batch_value,
+                max_percent_per_batch_value=max_percent_per_batch_value,
+            ),
+            "health_gate_seconds": gate,
+            "ttl_minutes": ttl,
+            "restart_after_apply": bool(restart_after_apply),
+        },
+        "batches": [
+            {"batch": index, "agents": len(members), "agent_ids": members}
+            for index, members in enumerate(batches)
+        ],
+        "verdict": verdict or None,
+        "delivery": {
+            "state": "unchanged",
+            "reason": "dry_run",
+            "detail": "a dry run approves, holds and delivers nothing",
+        },
+    }
 
 
 def _expire(rollout: Mapping[str, Any], now: datetime) -> Dict[str, Any]:
@@ -1171,11 +1326,12 @@ def abort(
     store = _store()
     rollout = store.get(rollout_id)
     if rollout is None:
-        raise RolloutError(f"rollout {rollout_id} not found")
+        raise RolloutError(404, f"rollout {rollout_id} not found")
     if rollout.get("status") not in SQLiteRolloutStore.OPEN_STATUSES:
         raise RolloutError(
+            409,
             f"rollout {rollout_id} is {rollout.get('status')}; only an open rollout "
-            "can be aborted"
+            "can be aborted",
         )
     store.update(
         rollout_id,
@@ -1233,7 +1389,7 @@ def view(rollout_id: str) -> Dict[str, Any]:
     store = _store()
     rollout = store.get(rollout_id)
     if rollout is None:
-        raise RolloutError(f"rollout {rollout_id} not found")
+        raise RolloutError(404, f"rollout {rollout_id} not found")
     rows = store.agents(rollout_id)
     batches: List[Dict[str, Any]] = []
     for index in range(int(rollout.get("batch_count") or 0)):
@@ -1286,6 +1442,7 @@ def view(rollout_id: str) -> Dict[str, Any]:
             "max_percent_per_batch": rollout.get("max_percent_per_batch"),
             "health_gate_seconds": rollout.get("health_gate_seconds"),
             "ttl_minutes": rollout.get("ttl_minutes"),
+            "restart_after_apply": bool(rollout.get("restart_after_apply")),
             "started_at": rollout.get("batch_started_at"),
         },
         "agents": {
@@ -1303,7 +1460,7 @@ def list_rollouts(
     """Rollout listing, newest first. Metadata only, bodies are never involved."""
     if status and status not in SQLiteRolloutStore.STATUSES:
         raise RolloutError(
-            f"status must be one of {', '.join(SQLiteRolloutStore.STATUSES)}"
+            422, f"status must be one of {', '.join(SQLiteRolloutStore.STATUSES)}"
         )
     rows = _store().list(statuses=[status] if status else None, limit=limit)
     return {
@@ -1334,7 +1491,7 @@ def summary(rollout_id: str) -> Dict[str, Any]:
     """Read-only facts a route needs *before* auditing a decision (pre-write, #97)."""
     rollout = _store().get(rollout_id)
     if rollout is None:
-        raise RolloutError(f"rollout {rollout_id} not found")
+        raise RolloutError(404, f"rollout {rollout_id} not found")
     return {
         "rollout_id": rollout_id,
         "proposal_id": rollout.get("proposal_id"),

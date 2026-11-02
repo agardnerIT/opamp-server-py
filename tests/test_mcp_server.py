@@ -94,6 +94,8 @@ class TestRegistry:
             "list_policies", "validate_policies", "reload_policies",
             "get_alerts", "update_alerts", "test_alerts",
             "audit_log", "audit_verify", "audit_export",
+            # #103: rollouts are readable from MCP, never creatable/abortable here.
+            "list_config_rollouts", "get_config_rollout",
         }
         assert expected <= tools
 
@@ -424,6 +426,13 @@ class TestRemoteConfigTools:
             "reactivate_config",
             "rollback_config",
             "rollback_agent_config",
+            # #101/#103: creating a rollout IS the approval, and abort/rollback change
+            # what the fleet runs — never tools at any setting (D9).
+            "create_config_rollout",
+            "plan_config_rollout",
+            "abort_config_rollout",
+            "rollback_config_rollout",
+            "restart_agent",
         }
         assert not (names & forbidden)
         assert {"agent_config", "validate_config", "list_config_revisions"} <= names

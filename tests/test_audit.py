@@ -604,6 +604,16 @@ AUDITED_ROUTES = {
     # against a live machine, and a refusal on principal grounds adds a second row
     # with `result="error"` (pre-write, then act — #97).
     ("POST", "/agent/{agent_id}/config/deliver"): "config.deliver",
+    # #103: the staged rollout surface. Creating a rollout *is* the approval, so it
+    # records the decision (and its batch plan) before anything is delivered; abort and
+    # rollback are recorded by the engine/route respectively, each exactly once.
+    ("POST", "/config/rollouts"): "config.rollout.create",
+    ("POST", "/config/revisions/{proposal_id}/apply"): "config.rollout.create",
+    ("POST", "/config/rollouts/{rollout_id}/abort"): "config.rollout.abort",
+    ("POST", "/config/rollouts/{rollout_id}/rollback"): "config.rollout.rollback",
+    # #84: a restart is a privileged action against a live machine; the queue write
+    # happens after the row, and a refusal records `result="error"`.
+    ("POST", "/agent/{agent_id}/restart"): "agent.restart",
 }
 
 EXPLAINED_ROUTES = {
@@ -619,6 +629,9 @@ EXPLAINED_ROUTES = {
     # #81: a validator. It stores nothing and changes nothing — an AI agent asking
     # "would this config be accepted?" must not fill the audit log.
     ("POST", "/config/validate"): "pure validation, no state change",
+    # #103: re-running the pipeline reads a revision and parses it; it stores and moves
+    # nothing, so it is the same class of question as /config/validate.
+    ("POST", "/config/revisions/{proposal_id}/validate"): "pure validation, no state change",
 }
 
 

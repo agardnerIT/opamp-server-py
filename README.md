@@ -130,6 +130,14 @@ This server works with **any collector distro that ships
 compiled in, a supervisor-managed collector, or a custom distro. Nothing has to be
 rebuilt to connect one: adding the block below is the whole integration.
 
+That is a hard product rule, not an accident of the current code: **using this
+server must never require a proprietary or bespoke collector build.** Everything
+here is Apache-2.0 (see [LICENSE](LICENSE)), every component it talks to is
+upstream OpenTelemetry, and a stock `otelcol-contrib` is always supported. If a
+capability ever needs a component that upstream does not have, it will be published
+under an OSS license together with a written explanation of why it is needed —
+none is required today.
+
 `collector/e2e.yaml` is the known-good config that CI runs against a real
 `otelcol-contrib` on every PR (`.github/workflows/collector-e2e.yml`, #113).
 
@@ -1727,3 +1735,9 @@ opamp-server-py/
 ├── docker/          # TLS terminator examples (nginx, Caddy) for #96
 └── data/            # SQLite DB (+ generated admin_password)
 ```
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE). The server speaks the OpenTelemetry
+OpAMP protocol and has no proprietary components: any collector distro with the
+upstream `opamp` extension interoperates without modification.

@@ -11,6 +11,19 @@ the project becomes the data controller for a list of email addresses.
 
 ---
 
+## Current state (2026-11-02)
+
+- Worker deployed: `https://opamp-updates.tame-lamp8409.workers.dev`
+- KV namespace `UPDATES_KV` created; pending/dedupe/release-id keys are live.
+- `/health` reports `resend: false`, `github_webhook: false`, `turnstile: false`.
+- Admin page has a "Release emails" tab, gated on `UPDATE_SUBSCRIBE_URL` (empty
+  by default, so the box is hidden).
+- 26 offline Worker tests pass; CI runs `npm test` and `npm run typecheck`.
+- Still needed: Resend domain/segment/from/key, GitHub webhook secret, a test
+  address, and the privacy-policy URL. Turnstile is optional but recommended.
+
+---
+
 ## 1. Shape
 
 ```

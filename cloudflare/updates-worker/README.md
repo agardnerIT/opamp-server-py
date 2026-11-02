@@ -85,7 +85,8 @@ Repo → Settings → Webhooks → Add webhook:
 - Secret: the same value as `GITHUB_WEBHOOK_SECRET`
 - Events: **Releases** only
 
-The Worker verifies `X-Hub-Signature-256`, ignores drafts and prereleases, and
+The Worker verifies `X-Hub-Signature-256`, handles `published` and `released`
+(release-from-draft), ignores drafts and prereleases, and
 deduplicates by `release.id` in KV for 30 days. GitHub retries failed deliveries;
 a retry cannot double-send. Resend's own `Idempotency-Key` covers `/emails` but
 not `/broadcasts`, which is why the KV guard exists.

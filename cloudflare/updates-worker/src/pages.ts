@@ -87,7 +87,7 @@ ${privacy}
 
 export function formPage(
   env: Env,
-  options: { message?: string; error?: string } = {},
+  options: { message?: string; error?: string; status?: number } = {},
 ): Response {
   const turnstile = env.TURNSTILE_SITE_KEY
     ? `<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
@@ -119,7 +119,7 @@ ${banner}
 </form>
 <p class="note">You will receive a confirmation email first. Nothing is added
 until you click the link in it.</p>`;
-  return htmlResponse(layout(env, "opamp-server-py release emails", content));
+  return htmlResponse(layout(env, "opamp-server-py release emails", content), options.status ?? 200);
 }
 
 export function messagePage(

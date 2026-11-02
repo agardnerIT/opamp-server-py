@@ -72,7 +72,7 @@ function errorResponse(
   message: string,
 ): Response {
   if (wantsJson(request)) return jsonResponse({ ok: false, error: message }, status);
-  return formPage(env, { error: message });
+  return formPage(env, { error: message, status });
 }
 
 interface SubscribeInput {
@@ -271,7 +271,9 @@ async function handleRelease(request: Request, env: Env): Promise<Response> {
     return jsonResponse({ ok: false, error: "invalid payload" }, 400);
   }
 
-  if (payload.action !== "published") return new Response(null, { status: 204 });
+  if (payload.action !== "published" && payload.action !== "released") {
+    return new Response(null, { status: 204 });
+  }
 
   const release = payload.release;
   if (!release || release.draft === true || release.prerelease === true) {

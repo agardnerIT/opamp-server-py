@@ -269,6 +269,16 @@ describe("subscribe", () => {
     expect(calls).toHaveLength(0);
   });
 
+  it("returns the error status for a browser form submit", async () => {
+    installFetch(() => json({ id: "email_1" }));
+    const response = await worker.fetch(
+      subscribeRequest({ email: "user@example.com" }, false),
+      makeEnv(),
+    );
+    expect(response.status).toBe(400);
+    expect(await response.text()).toContain("tick the box");
+  });
+
   it("rejects an invalid address without sending", async () => {
     const calls = installFetch(() => json({ id: "email_1" }));
     const response = await worker.fetch(
@@ -454,6 +464,21 @@ describe("GitHub release webhook", () => {
     );
     expect(calls[0].body.text).toContain("{{{RESEND_UNSUBSCRIBE_URL}}}");
     expect(calls[0].body.html).toContain("{{{RESEND_UNSUBSCRIBE_URL}}}");
+  });
+
+  it("handles a draft promoted with action=released", async () => {
+    const secret = "whsec";
+    const body = JSON.stringify({
+      action: "released",
+      release: { id: 124, tag_name: "v0.2.1", draft: false, prerelease: false },
+    });
+    const calls = installFetch(() => json({ id: "broadcast_1" }));
+    const response = await worker.fetch(
+      releaseRequest(body, await githubSignature(secret, body)),
+      makeEnv(),
+    );
+    expect(response.status).toBe(200);
+    expect(calls).toHaveLength(1);
   });
 
   it("does not broadcast twice for the same release", async () => {

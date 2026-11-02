@@ -14,6 +14,7 @@ from ui.shared import (
     admin_request,
     render_sidebar,
     require_admin,
+    reissue_banner_text,
     show_slim_distro_builder_page,
     display_config_yaml,
     generate_manifest,
@@ -63,6 +64,10 @@ if agent_id_param:
         comps = detailed_agent.get("components") or (fleet_agent.get("components") if fleet_agent else detailed_agent.get("components"))
         last_heartbeat = detailed_agent.get("last_heartbeat") or (fleet_agent.get("last_heartbeat") if fleet_agent else detailed_agent.get("last_heartbeat"))
         effective_config = detailed_agent.get("effective_config")
+        # #75: present only when the server renamed this agent because its uid was a
+        # duplicate, so the page can explain an id change instead of it looking random.
+        uid_reissued_from = detailed_agent.get("uid_reissued_from") or (fleet_agent.get("uid_reissued_from") if fleet_agent else None)
+        uid_reissue_reason = detailed_agent.get("uid_reissue_reason") or (fleet_agent.get("uid_reissue_reason") if fleet_agent else None)
     else:
         agent = fleet_agent
         health = agent.get("healthy") if agent else None
@@ -71,12 +76,21 @@ if agent_id_param:
         comps = agent.get("components") if agent else {}
         last_heartbeat = agent.get("last_heartbeat") if agent else "N/A"
         effective_config = None
+        uid_reissued_from = agent.get("uid_reissued_from") if agent else None
+        uid_reissue_reason = agent.get("uid_reissue_reason") if agent else None
     
     health_color = "green" if health else "red" if health is False else "gray"
     health_text = "Healthy" if health else "Unhealthy" if health is False else "Unknown"
     health_icon = "✅" if health else "❌" if health is False else "⚪"
     
     st.markdown("### Agent Details")
+
+    # #75: two agents presented one instance_uid, so the server moved this one to a
+    # uid of its own. Worth a banner: an id change is a fleet anomaly an operator has
+    # to be able to explain without grepping logs. Wording is in ui/shared.py.
+    banner = reissue_banner_text(uid_reissued_from, uid_reissue_reason)
+    if banner:
+        st.warning(banner)
     
     col1, col2, col3, col4 = st.columns(4)
     

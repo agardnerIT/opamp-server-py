@@ -22,6 +22,7 @@ from ui.session import (  # re-exported so pages import one module
 )
 from server.manifest import generate_manifest, generate_ocb_command
 from server.posture import posture_warning
+from server import protocol  # #75: the duplicate-uid reason vocabulary
 from server.reports import (  # re-exported: report logic lives in server/reports.py
     generate_agent_report,
     generate_heavy_collectors_report,
@@ -637,3 +638,30 @@ def render_posture_banner(health_data):
     warning = posture_warning((health_data or {}).get("config_push") or {})
     if warning:
         st.error(warning)
+
+
+def reissue_banner_text(reissued_from, reason=None):
+    """The sentence shown when the server renamed an agent's `instance_uid` (#75).
+
+    Returns `None` for every agent whose uid was never re-issued, so the page reads
+    `if text := reissue_banner_text(...)`. Wording lives here rather than in the page
+    so it is testable without rendering Streamlit, and the reason vocabulary comes
+    from `server.protocol` so the UI cannot invent a second set of names.
+    """
+    if not reissued_from:
+        return None
+    reason_text = {
+        protocol.REASON_HOST_IDENTITY: (
+            "two agents reported different host identities under the same uid"
+        ),
+        protocol.REASON_SEQUENCE_REGRESSION: (
+            "its status counter kept going backwards, which two agents alternating "
+            "on one uid produce"
+        ),
+    }.get(reason, reason or "duplicate instance_uid")
+    return (
+        f"**instance_uid re-issued by the server.** This agent presented "
+        f"`{reissued_from}`, which another agent is using ({reason_text}). "
+        "It keeps reporting under the id above; counted in "
+        "`opamp_duplicate_instance_uid_total`."
+    )

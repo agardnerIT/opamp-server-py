@@ -616,3 +616,30 @@ def test_a_failed_validation_lists_the_yaml_paths(server):
     body = texts(app)
     assert "Validation failed" in body
     assert "service.pipelines" in body
+
+
+# --------------------------------------------------- #75: the re-issue banner
+
+
+def test_a_reissued_uid_explains_itself():
+    """The Agents page must be able to explain an id change, not just show one.
+
+    Tested as a string function rather than through `AppTest`, because the detail view
+    is addressed by a query param and `AppTest` has no way to set one. The page calls
+    the same function, so the wording cannot drift from what is asserted here.
+    """
+    from ui.shared import reissue_banner_text
+
+    assert reissue_banner_text(None, None) is None
+    assert reissue_banner_text("", "host_identity") is None
+
+    host = reissue_banner_text("ab" * 16, "host_identity")
+    assert "ab" * 16 in host
+    assert "different host identities" in host
+    assert "opamp_duplicate_instance_uid_total" in host
+
+    counter = reissue_banner_text("ab" * 16, "sequence_regression")
+    assert "counter kept going backwards" in counter
+
+    # An unknown reason is shown verbatim rather than swallowed.
+    assert "something odd" in reissue_banner_text("ab" * 16, "something odd")

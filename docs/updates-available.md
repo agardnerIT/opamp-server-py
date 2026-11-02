@@ -82,40 +82,21 @@ Endpoints:
 `GET` has no side effects, so crawlers, uptime probes and prefetchers cannot
 cause egress. `POST` is the only path that can trigger a check on demand.
 
-## 5. Email notifications (Resend)
+## 5. Release emails (central, opt-in)
 
-Goal: the admin gets an email when a new version appears, **without the project
-learning who they are.**
+The project runs a consent-based announcement list; the instance does not. The
+dashboard embeds a Cloudflare Worker form, and the address goes browser → Worker
+→ Resend. The instance stores nothing. Double opt-in, unsubscribe, deletion and
+the privacy policy are part of the Worker design.
 
-- Admin-only box in Settings/Updates: one email address, Save, Remove. Masked
-  when displayed (`a***@example.com`), never logged.
-- On save, send a confirmation email through Resend. Persist only if Resend
-  accepts it, which also verifies the address and the instance's configuration.
-- On a new version, send **one email per version** (track
-  `last_notified_version`). A server restart does not resend.
-- Content: current → new version, the fixed releases link, locally generated
-  upgrade commands, and an unsubscribe link. Plain text. No tracking pixels, no
-  click tracking, no per-recipient Resend tags, no unique links except the
-  unsubscribe token.
-- The email is sent by **the instance**, using the instance's own
-  `RESEND_API_KEY` and a `RESEND_FROM` address on a domain the operator has
-  verified in their Resend account. If either is unset, the box is hidden and
-  the feature is off.
-- Unsubscribe: signed local URL when `PUBLIC_URL` is set, plus a Remove button
-  in the UI; either deletes the row. The email is transactional, not marketing,
-  but it still gets an unsubscribe path.
+See [`release-emails.md`](release-emails.md) for the Worker + Resend
+architecture, the abuse controls, and the setup checklist.
 
-What Resend sees: recipient, sender, content, and the server's IP. Document that
-next to the box. The project sees nothing.
-
-**Do not ship a shared project Resend key or a project-run mailing list.** If
-the instance posted the address to a project endpoint, the project would collect
-exactly the install data this design avoids, plus GDPR, unsubscribe and abuse
-obligations. If a release newsletter is ever wanted, it belongs on the website
-as a separate opt-in, not inside the server.
-
-The email is sent during the instance's daily check. If the instance is down,
-there is no email — that is the price of keeping the subscriber list local.
+This is a conscious trade. The project now learns which addresses subscribed and
+when — exactly the install data the update check avoids. It is acceptable
+because the address is volunteered, double-confirmed, used only for release
+announcements, and deletable on request. It is not a usage ping, and the
+self-hosted server never sends it.
 
 ## 6. Privacy accounting
 
@@ -123,23 +104,25 @@ Leaves the instance:
 
 | Destination | What it sees | When |
 |---|---|---|
-| GitHub | source IP, time, the repo path | once per 24 h, only when `on` |
-| Resend | recipient, sender, content, source IP | only if email is configured and a new version appears |
+| GitHub | source IP, time, repo path | once per 24 h, only when `on` |
+| Cloudflare Worker | the email, browser IP, Turnstile token | only when an admin submits the form |
+| Resend | recipient email, sender, content, delivery events | on confirmation and on each broadcast |
 
-Never leaves: current version, instance ID, fleet size, agent data, configs,
-credentials, or the subscriber email to the project. No analytics, no usage
-ping, no browser-to-third-party requests (links are human clicks).
+Never leaves the instance automatically: current version, instance ID, fleet
+size, agent data, configs, or credentials. The update check is anonymous, and
+the email is voluntary and sent by the browser, not by the server.
 
-## 7. Configuration
+## 7. Configuration (server side)
 
 | Variable | Default | Notes |
 |---|---|---|
 | `UPDATE_CHECK` | `on` | `on` / `off`; off is documented as not recommended |
 | `UPDATE_CHECK_INTERVAL_HOURS` | `24` | |
 | `UPDATE_CHECK_TIMEOUT_SECONDS` | `5` | single attempt, no retries |
-| `RESEND_API_KEY` | unset | secret; env only, never in the DB or UI |
-| `RESEND_FROM` | unset | verified sender, e.g. `opamp-server <updates@example.com>` |
-| `PUBLIC_URL` | unset | used for the unsubscribe link |
+| `UPDATE_SUBSCRIBE_URL` | unset | public Worker signup URL; unset hides the email box |
+
+Resend and Cloudflare credentials belong to the Worker, never to the
+self-hosted server.
 
 ## 8. Remove the existing second beacon
 
@@ -158,12 +141,14 @@ path, one interval, one privacy story.
   trace headers, no body;
 - semver: `v` prefix, prerelease ordering, older/equal, bad strings, 404, drafts;
 - failure: timeout, oversized body, bad JSON, no partial state;
-- email: hidden without Resend config; subscribe sends confirmation; one email
-  per version; no tracking parameters; unsubscribe deletes; address masked in
-  API and absent from logs;
+- dashboard: the email box is hidden when `UPDATE_SUBSCRIBE_URL` is unset and
+  renders the configured Worker URL when set;
 - an autouse fixture sets `UPDATE_CHECK=off` and replaces the transport, so the
   suite can never make a real request;
-- UI: banner, off warning, upgrade commands contain only the validated version.
+- UI: banner, off warning, upgrade commands contain only the validated version;
+- the Worker has its own Miniflare/Vitest suite (subscribe, confirm, release,
+  signatures, idempotency, rate limits, Turnstile, no PII in logs) — see
+  `release-emails.md`.
 
 ## 10. Task list
 
@@ -173,17 +158,19 @@ path, one interval, one privacy story.
 | 2 | `server/updates.py` — fetch, validate, semver compare, cache, state file |
 | 3 | daily loop in lifespan + `GET /updates` + `POST /updates/check` |
 | 4 | sidebar banner, off warning, copyable commands |
-| 5 | `server/notifications.py` + Resend client + email UI/API |
-| 6 | client / `opampctl updates` / MCP tools |
-| 7 | fold `get_collector_versions()` into the same path |
-| 8 | tests, docs, `.env.sample`, README privacy section |
+| 5 | Cloudflare Worker + Resend list (see `release-emails.md`) |
+| 6 | dashboard iframe/box, gated on `UPDATE_SUBSCRIBE_URL` |
+| 7 | client / `opampctl updates` / MCP tools |
+| 8 | fold `get_collector_versions()` into the same path |
+| 9 | tests, docs, `.env.sample`, README privacy section |
 
-## 11. One question before implementation
+## 11. Decision locked
 
-The Resend key: is it **per instance** (each operator configures their own, the
-server sends to the admin's address, the project learns nothing — recommended),
-or **project-wide** (the server posts addresses to a project service that sends
-the mail)? The second turns the project into the data controller for a list of
-operators and their addresses, which is the opposite of the "we aren't getting
-the install info" goal. If that is what you meant, say so and I will write the
-trade-off down explicitly before building it.
+The email list is **central**: a Cloudflare Worker adds confirmed addresses to
+the project's Resend segment, and a GitHub release webhook sends the broadcast.
+The self-hosted server stores no address and holds no Resend key. The privacy
+cost (the project learns who subscribed) is accepted and written down in
+`release-emails.md`.
+
+Open setup questions — Cloudflare hostname/token, Resend segment/domain/key,
+GitHub webhook, consent text — are listed in §14 of that document.

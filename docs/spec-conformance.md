@@ -143,10 +143,16 @@ makes, all of them tested:
 
 | Clause | Status | Pinned by | Notes |
 |---|---|---|---|
-| Framing and message handling identical to HTTP | ✅ | `tests/test_ws.py` (parity class) | Same handler, so the two cannot drift |
-| Close codes: policy violation, protocol error, 1009 oversize | ✅ | `tests/test_ws.py` | Refused upgrade for overload, per the deviation above |
-| Multiplexing several uids on one socket | ✅ | `tests/test_ws.py` | The reply is addressed to the uid in the message |
-| Lifecycle/backpressure/parity hardening | ⚠️ partial | [#90](https://github.com/agardnerIT/opamp-server-py/issues/90), [#91](https://github.com/agardnerIT/opamp-server-py/issues/91) | Outbound queue drops the oldest frame and relies on reconciliation; a dropped config frame is re-sent, never counted as delivered (#102) |
+| Framing and message handling identical to HTTP | ✅ | `tests/test_ws_parity.py` (8 cases, both transports), `test_a_message_produces_the_same_state_over_either_transport` | Same handler, so the two cannot drift; the parity cases assert the *state*, not the plumbing |
+| §WebSocket Message Size Limits — receive limit, 1009 on breach, never dispatched | ✅ | `test_a_frame_over_the_size_limit_closes_1009`, `tests/test_framing.py` | Limit includes the varint header and is read per frame |
+| §WebSocket Message Size Limits — MUST NOT send an oversized `ServerToAgent` | ✅ | `tests/test_ws_lifecycle.py::test_an_oversized_reply_is_refused_without_killing_the_socket` | Refused before `send_bytes`, counted in `opamp_ws_messages_total{outcome="too_big"}`, and the connection keeps serving |
+| Close codes: 1002 on a malformed frame (after a readable `BAD_REQUEST`), 1008 when the transport is off, 1009 on oversize | ✅ | `test_a_malformed_frame_gets_a_bad_request_then_closes_1002`, `test_a_refused_handshake_closes_1008`, `tests/test_ws.py` | §Closing Connection: the error frame is sent *before* the close, so the agent can log why |
+| Server-initiated close on shutdown | ⚠️ delegation | — | uvicorn closes live sockets with 1001 as the ASGI server shuts down; this server does not add a second lifecycle owner. Recorded so the absence is deliberate |
+| Multiplexing several uids on one socket | ✅ | `tests/test_ws.py`, `tests/ws_client.py` | The reply is addressed to the uid in the message; the test client asserts it on every `recv()` |
+| §Restoring / duplicate connections: newest socket wins, no close | ✅ | `tests/test_ws.py` | Replacement identity is #75's business, not the socket's |
+| Reconnect keeps state; the `ReportFullState` ask follows the *counter*, not the socket | ✅ | `tests/test_ws_lifecycle.py` (3 reconnect cases) | A continuing counter across a reconnect stays quiet; a reset counter is a gap, because a collector restart resets it |
+| Abrupt close is not a disconnect | ✅ | `tests/test_ws_lifecycle.py` | The uid is unbound but state is kept: removal belongs to the stale sweep (#69) |
+| Backpressure: bounded queue, oldest dropped, counter incremented | ✅ | `tests/test_push_delivery.py`, `tests/test_ws.py` | A dropped config frame is re-sent by reconciliation, never counted as delivered (#102) |
 
 ## Not covered by this table
 

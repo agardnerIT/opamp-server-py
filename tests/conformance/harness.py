@@ -200,10 +200,19 @@ def agent_message(
     return message
 
 
-def status_only(uid: bytes, *, sequence_num: int = 0, healthy: bool = True):
-    """§Agent Status Compression: a message carrying only what changed."""
+def status_only(
+    uid: bytes, *, sequence_num: int = 0, healthy: bool = True, last_error: str = ""
+):
+    """§Agent Status Compression: a message carrying only what changed.
+
+    `last_error` exists because of a proto3 trap: `healthy = False` is the *default*
+    value, so an unhealthy health message with nothing else in it serialises to an
+    absent `health` sub-message and the server never sees it. A real agent says why.
+    """
     message = agent_message(uid, sequence_num=sequence_num)
     message.health.healthy = healthy
+    if last_error:
+        message.health.last_error = last_error
     return message
 
 

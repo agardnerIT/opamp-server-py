@@ -21,6 +21,7 @@ from server import agent_auth, protocol
 from server.framing import decode_message, encode_message
 from server.main import _handle_agent_message, app
 from server.state import AGENT_REGISTRY
+from tests.conformance.harness import opamp_send, parse_reply
 from server.ws import CLOSE_PROTOCOL_ERROR, REGISTRY
 
 BAD_REQUEST = opamp_pb2.ServerErrorResponseType_BadRequest
@@ -41,24 +42,10 @@ def frame(msg: opamp_pb2.AgentToServer) -> bytes:
     return encode_message(msg.SerializeToString())
 
 
-def post(client: TestClient, body: bytes, **headers):
-    return client.post(
-        "/v1/opamp",
-        content=body,
-        headers={"Content-Type": "application/x-protobuf", **headers},
-    )
-
-
-def parse(response) -> opamp_pb2.ServerToAgent:
-    reply = opamp_pb2.ServerToAgent()
-    reply.ParseFromString(response.content)
-    return reply
-
-
 def assert_bad_request(response, *, contains: str = "") -> opamp_pb2.ServerToAgent:
     assert response.status_code == 400, response.text
     assert response.headers["content-type"] == "application/x-protobuf"
-    reply = parse(response)
+    reply = parse_reply(response)
     assert reply.error_response.type == BAD_REQUEST
     assert reply.error_response.error_message
     if contains:
@@ -93,7 +80,7 @@ def ws_on(monkeypatch):
 
 class TestBadRequest:
     def test_empty_uid_is_refused_and_registers_nothing(self, client):
-        response = post(client, message().SerializeToString())
+        response = opamp_send(client, message().SerializeToString())
 
         reply = assert_bad_request(response, contains="instance_uid")
         assert reply.instance_uid == b""
@@ -102,7 +89,7 @@ class TestBadRequest:
     def test_unparseable_body_is_refused_with_a_readable_reason(self, client):
         # Field 1 (length-delimited) announces 255 bytes and then stops: protobuf
         # cannot parse it, unlike "almost anything is an unknown field" bodies.
-        response = post(client, b"\x0a\xff")
+        response = opamp_send(client, b"\x0a\xff")
 
         assert_bad_request(response, contains="malformed AgentToServer")
         assert AGENT_REGISTRY.count == 0
@@ -111,18 +98,18 @@ class TestBadRequest:
         # Deliberate: readable ASCII ids are used by every harness and by existing
         # fleets. Only an empty uid is rejected (see server/protocol.py).
         uid = b"test_opamp_00123456"  # 19 bytes
-        response = post(client, message(uid).SerializeToString())
+        response = opamp_send(client, message(uid).SerializeToString())
 
         assert response.status_code == 200
-        assert parse(response).instance_uid == uid
+        assert parse_reply(response).instance_uid == uid
         assert AGENT_REGISTRY.get(uid.hex()) is not None
 
     def test_valid_16_byte_uid_is_unchanged(self, client):
         uid = bytes.fromhex("ab" * 16)
-        response = post(client, message(uid).SerializeToString())
+        response = opamp_send(client, message(uid).SerializeToString())
 
         assert response.status_code == 200
-        reply = parse(response)
+        reply = parse_reply(response)
         assert reply.instance_uid == uid
         assert reply.capabilities > 0
         assert not reply.HasField("error_response")
@@ -132,12 +119,12 @@ class TestBadRequest:
 class TestRequestInstanceUid:
     def test_mints_a_uuid7_and_registers_under_it(self, client):
         temporary = b"temporary-uid-01"
-        response = post(
+        response = opamp_send(
             client, message(temporary, flags=REQUEST_UID).SerializeToString()
         )
 
         assert response.status_code == 200
-        reply = parse(response)
+        reply = parse_reply(response)
         new_uid = reply.agent_identification.new_instance_uid
         assert len(new_uid) == 16
         assert new_uid[6] >> 4 == 7  # version nibble
@@ -150,20 +137,20 @@ class TestRequestInstanceUid:
 
     def test_minted_uid_is_usable_on_the_next_message(self, client):
         temporary = b"temporary-uid-02"
-        first = post(client, message(temporary, flags=REQUEST_UID).SerializeToString())
-        new_uid = parse(first).agent_identification.new_instance_uid
+        first = opamp_send(client, message(temporary, flags=REQUEST_UID).SerializeToString())
+        new_uid = parse_reply(first).agent_identification.new_instance_uid
 
-        second = post(client, message(new_uid).SerializeToString())
+        second = opamp_send(client, message(new_uid).SerializeToString())
         assert second.status_code == 200
         assert AGENT_REGISTRY.get(new_uid.hex()) is not None
 
     def test_temporary_record_is_cleaned_up(self, client):
         temporary = bytes.fromhex("cd" * 16)
-        assert post(client, message(temporary).SerializeToString()).status_code == 200
+        assert opamp_send(client, message(temporary).SerializeToString()).status_code == 200
         assert AGENT_REGISTRY.get(temporary.hex()) is not None
 
-        response = post(client, message(temporary, flags=REQUEST_UID).SerializeToString())
-        new_uid = parse(response).agent_identification.new_instance_uid
+        response = opamp_send(client, message(temporary, flags=REQUEST_UID).SerializeToString())
+        new_uid = parse_reply(response).agent_identification.new_instance_uid
 
         assert AGENT_REGISTRY.get(temporary.hex()) is None
         assert AGENT_REGISTRY.get(new_uid.hex()) is not None
@@ -173,10 +160,10 @@ class TestRequestInstanceUid:
         uid = bytes.fromhex("33" * 16)
         token, _ = agent_auth.issue_token(uid.hex())
 
-        response = post(
+        response = opamp_send(
             client,
             message(uid, flags=REQUEST_UID).SerializeToString(),
-            Authorization=f"Bearer {token}",
+            headers={"Authorization": f"Bearer {token}"},
         )
 
         assert_bad_request(response, contains="RequestInstanceUid")

@@ -12,6 +12,7 @@ from google.protobuf.json_format import MessageToDict, ParseDict
 from proto import opamp_pb2
 from server import main
 from server.state import AgentRegistry, SQLiteAgentStore
+from tests.conformance.harness import expect_reply, opamp_send
 from tests.uids import uid
 
 
@@ -54,18 +55,6 @@ def full_report(healthy=True):
     )
 
 
-def send(client, message):
-    response = client.post(
-        "/v1/opamp",
-        content=message.SerializeToString(),
-        headers={"Content-Type": "application/x-protobuf"},
-    )
-    assert response.status_code == 200
-    reply = opamp_pb2.ServerToAgent()
-    reply.ParseFromString(response.content)
-    return reply
-
-
 @pytest.mark.parametrize("healthy", [True, False])
 def test_first_report_is_visible_without_another_poll(isolated_server, healthy):
     client, registry, alert = isolated_server
@@ -77,7 +66,7 @@ def test_first_report_is_visible_without_another_poll(isolated_server, healthy):
         for kind in ("health", "effective_config", "available_components", "package_status", "heartbeat")
     }
 
-    reply = send(client, message)
+    reply = expect_reply(opamp_send(client, message))
 
     assert reply.flags == opamp_pb2.ServerToAgentFlags.ServerToAgentFlags_ReportFullState
     detail = client.get(f"/agent/{agent_id}").json()
@@ -102,13 +91,13 @@ def test_later_report_updates_status_without_reregistering(isolated_server):
     client, registry, alert = isolated_server
     message = full_report()
     agent_id = binascii.hexlify(message.instance_uid).decode()
-    send(client, message)
+    expect_reply(opamp_send(client, message))
     connected_at = registry.get(agent_id).connected_at
     message.health.healthy = False
     message.health.last_error = "unavailable"
     message.package_statuses.packages["collector"].agent_has_version = "2.0.0"
 
-    reply = send(client, message)
+    reply = expect_reply(opamp_send(client, message))
 
     detail = client.get(f"/agent/{agent_id}").json()
     assert reply.flags == 0
@@ -122,10 +111,10 @@ def test_heartbeat_without_status_preserves_first_report(isolated_server):
     client, registry, alert = isolated_server
     message = full_report()
     agent_id = binascii.hexlify(message.instance_uid).decode()
-    send(client, message)
+    expect_reply(opamp_send(client, message))
     before = client.get(f"/agent/{agent_id}").json()
 
-    send(client, opamp_pb2.AgentToServer(instance_uid=message.instance_uid))
+    expect_reply(opamp_send(client, opamp_pb2.AgentToServer(instance_uid=message.instance_uid)))
 
     after = client.get(f"/agent/{agent_id}").json()
     for field in ("healthy", "description", "effective_config", "available_components", "package_statuses", "remote_config_status"):

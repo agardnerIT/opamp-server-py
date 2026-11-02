@@ -40,6 +40,7 @@ from server.main import (
 )
 from server.state import AGENT_REGISTRY
 from server.ws import REGISTRY as WS_REGISTRY
+from tests.conformance.harness import expect_reply, opamp_send
 
 UID = bytes.fromhex("ab" * 16)
 AGENT_ID = UID.hex()
@@ -62,20 +63,6 @@ def message(
         attribute.key = uid_field
         attribute.value.string_value = host
     return msg.SerializeToString()
-
-
-def post(client: TestClient, body: bytes, header: str | None = None):
-    headers = {"Content-Type": "application/x-protobuf"}
-    if header is not None:
-        headers["OpAMP-Instance-UID"] = header
-    return client.post("/v1/opamp", content=body, headers=headers)
-
-
-def reply(response) -> opamp_pb2.ServerToAgent:
-    assert response.status_code == 200, response.text
-    parsed = opamp_pb2.ServerToAgent()
-    parsed.ParseFromString(response.content)
-    return parsed
 
 
 def problems(reason: str) -> float:
@@ -213,7 +200,7 @@ def test_forget_drops_everything_about_a_uid():
 
 def test_a_matching_header_changes_nothing(client):
     before = problems("mismatch")
-    response = post(client, message(), header=str(uuid.UUID(bytes=UID)))
+    response = opamp_send(client, message(), headers={"OpAMP-Instance-UID": str(uuid.UUID(bytes=UID))})
     assert response.status_code == 200
     assert AGENT_REGISTRY.get(AGENT_ID) is not None
     assert problems("mismatch") == before
@@ -221,7 +208,7 @@ def test_a_matching_header_changes_nothing(client):
 
 def test_an_uppercase_header_is_accepted(client):
     before = problems("malformed")
-    response = post(client, message(), header=str(uuid.UUID(bytes=UID)).upper())
+    response = opamp_send(client, message(), headers={"OpAMP-Instance-UID": str(uuid.UUID(bytes=UID)).upper()})
     assert response.status_code == 200
     assert problems("malformed") == before
 
@@ -229,7 +216,7 @@ def test_an_uppercase_header_is_accepted(client):
 def test_a_mismatch_is_logged_and_counted_but_the_body_wins(client):
     before = problems("mismatch")
     other = uuid.UUID(bytes=bytes.fromhex("cd" * 16))
-    response = post(client, message(), header=str(other))
+    response = opamp_send(client, message(), headers={"OpAMP-Instance-UID": str(other)})
     assert response.status_code == 200
     # The body is authoritative: the agent exists under its own uid, not the header's.
     assert AGENT_REGISTRY.get(AGENT_ID) is not None
@@ -239,7 +226,7 @@ def test_a_mismatch_is_logged_and_counted_but_the_body_wins(client):
 
 def test_a_malformed_header_is_ignored_never_raised(client):
     before = problems("malformed")
-    response = post(client, message(), header="garbage")
+    response = opamp_send(client, message(), headers={"OpAMP-Instance-UID": "garbage"})
     assert response.status_code == 200
     assert AGENT_REGISTRY.get(AGENT_ID) is not None
     assert problems("malformed") == before + 1
@@ -247,7 +234,7 @@ def test_a_malformed_header_is_ignored_never_raised(client):
 
 def test_an_absent_header_changes_nothing(client):
     before = (problems("mismatch"), problems("malformed"))
-    response = post(client, message())
+    response = opamp_send(client, message())
     assert response.status_code == 200
     assert (problems("mismatch"), problems("malformed")) == before
 
@@ -256,7 +243,7 @@ def test_an_ascii_header_matching_a_non_uuid_body_is_accepted(client):
     """This repo's own fixtures use readable ids; that header is still correct."""
     ascii_uid = b"collector-0001"
     before = problems("malformed")
-    response = post(client, message(uid=ascii_uid), header="collector-0001")
+    response = opamp_send(client, message(uid=ascii_uid), headers={"OpAMP-Instance-UID": "collector-0001"})
     assert response.status_code == 200
     assert problems("malformed") == before
 
@@ -264,7 +251,7 @@ def test_an_ascii_header_matching_a_non_uuid_body_is_accepted(client):
 def test_strict_mode_refuses_a_mismatch_and_changes_no_state(client, monkeypatch):
     monkeypatch.setenv("OPAMP_UID_HEADER_STRICT", "true")
     other = uuid.UUID(bytes=bytes.fromhex("cd" * 16))
-    response = post(client, message(), header=str(other))
+    response = opamp_send(client, message(), headers={"OpAMP-Instance-UID": str(other)})
     assert response.status_code == 400
     parsed = opamp_pb2.ServerToAgent()
     parsed.ParseFromString(response.content)
@@ -276,7 +263,7 @@ def test_strict_mode_refuses_a_mismatch_and_changes_no_state(client, monkeypatch
 def test_an_oversized_body_still_logs_the_header(client, monkeypatch):
     """413 has no parsed body, so the header is the only identity there is."""
     monkeypatch.setenv("OPAMP_MAX_MESSAGE_BYTES", "64")
-    response = post(client, message(host="a" * 256), header=str(uuid.UUID(bytes=UID)))
+    response = opamp_send(client, message(host="a" * 256), headers={"OpAMP-Instance-UID": str(uuid.UUID(bytes=UID))})
     assert response.status_code == 413
 
 
@@ -285,20 +272,20 @@ def test_an_oversized_body_still_logs_the_header(client, monkeypatch):
 
 def test_a_duplicate_uid_is_reissued_and_both_agents_survive(client):
     before = duplicates(protocol.REASON_HOST_IDENTITY, "reissued")
-    first = post(client, message(host="vm-a"))
-    second = post(client, message(host="vm-b"))
-    third = post(client, message(host="vm-a"))
+    first = opamp_send(client, message(host="vm-a"))
+    second = opamp_send(client, message(host="vm-b"))
+    third = opamp_send(client, message(host="vm-a"))
     assert first.status_code == second.status_code == third.status_code == 200
 
     # The first two messages are indistinguishable from one agent changing its mind;
     # the *return* to `vm-a` is what proves there are two.
-    assert reply(first).agent_identification.new_instance_uid == b""
-    assert reply(second).agent_identification.new_instance_uid == b""
+    assert expect_reply(first).agent_identification.new_instance_uid == b""
+    assert expect_reply(second).agent_identification.new_instance_uid == b""
 
-    reissued = reply(third).agent_identification.new_instance_uid
+    reissued = expect_reply(third).agent_identification.new_instance_uid
     assert len(reissued) == 16 and reissued != UID
     # The reply is addressed to the uid the agent sent, as the spec requires.
-    assert reply(third).instance_uid == UID
+    assert expect_reply(third).instance_uid == UID
 
     new_id = reissued.hex()
     agents = {entry["id"]: entry for entry in client.get("/agents").json()["agents"]}
@@ -311,9 +298,9 @@ def test_a_duplicate_uid_is_reissued_and_both_agents_survive(client):
 
 
 def test_the_reissued_uid_is_persisted(client):
-    post(client, message(host="vm-a"))
-    post(client, message(host="vm-b"))
-    reissued = reply(post(client, message(host="vm-a"))).agent_identification.new_instance_uid
+    opamp_send(client, message(host="vm-a"))
+    opamp_send(client, message(host="vm-b"))
+    reissued = expect_reply(opamp_send(client, message(host="vm-a"))).agent_identification.new_instance_uid
     stored = AGENT_REGISTRY._store.load_all()
     assert reissued.hex() in stored
     assert stored[reissued.hex()].uid_reissued_from == AGENT_ID
@@ -321,18 +308,18 @@ def test_the_reissued_uid_is_persisted(client):
 
 def test_one_more_poll_under_the_old_uid_is_suppressed(client):
     """The duplicate needs a poll or two to adopt its new uid; don't mint per poll."""
-    post(client, message(host="vm-a"))
-    post(client, message(host="vm-b"))
-    reply(post(client, message(host="vm-a")))
-    fourth = post(client, message(host="vm-b"))
-    assert reply(fourth).agent_identification.new_instance_uid == b""
+    opamp_send(client, message(host="vm-a"))
+    opamp_send(client, message(host="vm-b"))
+    expect_reply(opamp_send(client, message(host="vm-a")))
+    fourth = opamp_send(client, message(host="vm-b"))
+    assert expect_reply(fourth).agent_identification.new_instance_uid == b""
     assert len(client.get("/agents").json()["agents"]) == 2
 
 
 def test_a_rename_in_place_is_not_reissued(client):
     before = duplicates(protocol.REASON_HOST_IDENTITY, "reissued")
     for host in ("vm-a", "vm-a", "vm-b", "vm-b", "vm-b"):
-        assert reply(post(client, message(host=host))).agent_identification.new_instance_uid == b""
+        assert expect_reply(opamp_send(client, message(host=host))).agent_identification.new_instance_uid == b""
     agents = client.get("/agents").json()["agents"]
     assert len(agents) == 1
     assert agents[0]["uid_reissued_from"] is None
@@ -341,10 +328,10 @@ def test_a_rename_in_place_is_not_reissued(client):
 
 def test_a_clone_with_the_same_host_name_is_caught_by_the_counter(client):
     before = duplicates(protocol.REASON_SEQUENCE_REGRESSION, "reissued")
-    post(client, message(host="vm-clone", sequence_num=20))
-    post(client, message(host="vm-clone", sequence_num=10))
-    reissued = reply(
-        post(client, message(host="vm-clone", sequence_num=5))
+    opamp_send(client, message(host="vm-clone", sequence_num=20))
+    opamp_send(client, message(host="vm-clone", sequence_num=10))
+    reissued = expect_reply(
+        opamp_send(client, message(host="vm-clone", sequence_num=5))
     ).agent_identification.new_instance_uid
     assert reissued and reissued != UID
     assert duplicates(protocol.REASON_SEQUENCE_REGRESSION, "reissued") == before + 1
@@ -354,7 +341,7 @@ def test_detection_can_be_disabled(client, monkeypatch):
     monkeypatch.setenv("OPAMP_DUPLICATE_UID_DETECTION", "false")
     before = duplicates(protocol.REASON_HOST_IDENTITY, "reissued")
     for host in ("vm-a", "vm-b", "vm-a", "vm-b"):
-        assert reply(post(client, message(host=host))).agent_identification.new_instance_uid == b""
+        assert expect_reply(opamp_send(client, message(host=host))).agent_identification.new_instance_uid == b""
     assert len(client.get("/agents").json()["agents"]) == 1
     assert duplicates(protocol.REASON_HOST_IDENTITY, "reissued") == before
 

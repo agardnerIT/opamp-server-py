@@ -1,6 +1,7 @@
 import pytest
 import tempfile
 from pathlib import Path
+from tests.uids import uid
 from server.state import AgentRegistry, AgentState, utcnow, CAPABILITY_TAGS, COMPONENT_TYPES, parse_effective_config, SQLiteAgentStore
 from datetime import datetime, timedelta
 
@@ -21,17 +22,17 @@ def temp_db():
 class TestAgentState:
     def test_agent_state_creation(self):
         state = AgentState(
-            instance_uid=b"test123",
+            instance_uid=uid("test123"),
             agent_id="test123"
         )
         assert state.agent_id == "test123"
-        assert state.instance_uid == b"test123"
+        assert state.instance_uid == uid("test123")
         assert state.healthy is None
         assert state.capabilities == 0
 
     def test_agent_state_to_dict(self):
         state = AgentState(
-            instance_uid=b"test456",
+            instance_uid=uid("test456"),
             agent_id="test456",
             healthy=True
         )
@@ -43,7 +44,7 @@ class TestAgentState:
     def test_capability_tags_all_bits_set(self):
         all_caps = sum(CAPABILITY_TAGS.keys())
         state = AgentState(
-            instance_uid=b"test_caps",
+            instance_uid=uid("test_caps"),
             agent_id="test_caps",
             capabilities=all_caps
         )
@@ -52,7 +53,7 @@ class TestAgentState:
 
     def test_capability_tags_empty_when_zero(self):
         state = AgentState(
-            instance_uid=b"test_no_caps",
+            instance_uid=uid("test_no_caps"),
             agent_id="test_no_caps",
             capabilities=0
         )
@@ -60,7 +61,7 @@ class TestAgentState:
 
     def test_capability_tags_subset(self):
         state = AgentState(
-            instance_uid=b"test_some_caps",
+            instance_uid=uid("test_some_caps"),
             agent_id="test_some_caps",
             capabilities=0x00000001 | 0x00000040
         )
@@ -71,32 +72,32 @@ class TestAgentState:
         assert "Reports Own Metrics" in labels
 
     def test_detect_type_receiver(self):
-        state = AgentState(instance_uid=b"test", agent_id="test")
+        state = AgentState(instance_uid=uid("test"), agent_id="test")
         assert state._detect_type("receivers/otlp") == "receiver"
 
     def test_detect_type_processor(self):
-        state = AgentState(instance_uid=b"test", agent_id="test")
+        state = AgentState(instance_uid=uid("test"), agent_id="test")
         assert state._detect_type("processors/batch") == "processor"
 
     def test_detect_type_exporter(self):
-        state = AgentState(instance_uid=b"test", agent_id="test")
+        state = AgentState(instance_uid=uid("test"), agent_id="test")
         assert state._detect_type("exporters/otlp") == "exporter"
 
     def test_detect_type_extension(self):
-        state = AgentState(instance_uid=b"test", agent_id="test")
+        state = AgentState(instance_uid=uid("test"), agent_id="test")
         assert state._detect_type("extensions/zpages") == "extension"
 
     def test_detect_type_connector(self):
-        state = AgentState(instance_uid=b"test", agent_id="test")
+        state = AgentState(instance_uid=uid("test"), agent_id="test")
         assert state._detect_type("connectors/forward") == "connector"
 
     def test_detect_type_unknown(self):
-        state = AgentState(instance_uid=b"test", agent_id="test")
+        state = AgentState(instance_uid=uid("test"), agent_id="test")
         assert state._detect_type("some/random") == "unknown"
 
     def test_components_groups_by_type(self):
         state = AgentState(
-            instance_uid=b"test_comps",
+            instance_uid=uid("test_comps"),
             agent_id="test_comps",
             available_components={
                 "components": {
@@ -115,7 +116,7 @@ class TestAgentState:
 
     def test_components_marks_used_status(self):
         state = AgentState(
-            instance_uid=b"test_used",
+            instance_uid=uid("test_used"),
             agent_id="test_used",
             available_components={
                 "components": {
@@ -248,14 +249,14 @@ class TestAgentRegistry:
         assert temp_db.list_all() == []
 
     def test_register_agent(self, temp_db):
-        state = AgentState(instance_uid=b"test", agent_id="test")
+        state = AgentState(instance_uid=uid("test"), agent_id="test")
         temp_db.register("test", state)
         
         assert temp_db.count == 1
         assert temp_db.get("test") == state
 
     def test_remove_agent(self, temp_db):
-        state = AgentState(instance_uid=b"test", agent_id="test")
+        state = AgentState(instance_uid=uid("test"), agent_id="test")
         temp_db.register("test", state)
         
         result = temp_db.remove("test")
@@ -267,15 +268,15 @@ class TestAgentRegistry:
         assert result is False
 
     def test_update_agent(self, temp_db):
-        state = AgentState(instance_uid=b"test", agent_id="test", healthy=None)
+        state = AgentState(instance_uid=uid("test"), agent_id="test", healthy=None)
         temp_db.register("test", state)
         
         temp_db.update("test", healthy=True)
         assert temp_db.get("test").healthy is True
 
     def test_list_all(self, temp_db):
-        temp_db.register("a", AgentState(instance_uid=b"a", agent_id="a"))
-        temp_db.register("b", AgentState(instance_uid=b"b", agent_id="b"))
+        temp_db.register("a", AgentState(instance_uid=uid("a"), agent_id="a"))
+        temp_db.register("b", AgentState(instance_uid=uid("b"), agent_id="b"))
         
         agents = temp_db.list_all()
         assert len(agents) == 2

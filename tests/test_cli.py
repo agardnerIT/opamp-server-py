@@ -16,6 +16,7 @@ from cli.main import app
 from server.main import app as server_app
 from server.state import AGENT_REGISTRY, AgentState, SQLiteAgentStore, SQLiteMetricsStore
 from tests.asgi_transport import InProcessASGITransport
+from tests.uids import uid
 
 runner = CliRunner()
 
@@ -260,14 +261,14 @@ def offline_db(tmp_path):
     db = tmp_path / "opamp.db"
     store = SQLiteAgentStore(db)
     store.upsert(AgentState(
-        instance_uid=b"aaaa1111aaaa1111",
+        instance_uid=uid("cli-agent-a"),
         agent_id="aaaa1111aaaa1111",
         available_components=AVAILABLE_COMPONENTS,
         effective_config=effective_config(),
         remote_config_status="APPLIED",
     ))
     store.upsert(AgentState(
-        instance_uid=b"bbbb2222bbbb2222",
+        instance_uid=uid("cli-agent-b"),
         agent_id="bbbb2222bbbb2222",
         description={"identifyingAttributes": {}, "nonIdentifyingAttributes": {}},
     ))

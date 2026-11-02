@@ -37,6 +37,7 @@ from server.framing import decode_message, encode_message
 from server.main import app
 from server.state import AGENT_REGISTRY, AgentState
 from server.ws import REGISTRY
+from tests.conformance.harness import opamp_send
 
 UID = bytes.fromhex("78" * 16)
 
@@ -47,14 +48,6 @@ def message(uid: bytes = UID) -> bytes:
     msg.capabilities = opamp_pb2.AgentCapabilities.AgentCapabilities_ReportsStatus
     msg.health.healthy = True
     return msg.SerializeToString()
-
-
-def post(client, body: bytes | None = None, **headers):
-    return client.post(
-        "/v1/opamp",
-        content=message() if body is None else body,
-        headers={"Content-Type": "application/x-protobuf", **headers},
-    )
 
 
 def frame(body: bytes) -> bytes:
@@ -109,7 +102,7 @@ def test_disabled_by_default_accepts_everything(client):
     """An operator who never opted in must not see a single 503, however slow."""
     throttle.record_sample(60.0)  # a minute behind; irrelevant while disabled
     assert throttle.should_shed() is False
-    response = post(client)
+    response = opamp_send(client, message())
     assert response.status_code == 200
     assert AGENT_REGISTRY.get(UID.hex()) is not None
     assert client.get("/health").json()["throttle"]["enabled"] is False
@@ -127,7 +120,7 @@ def test_defaults_are_off_thirty_seconds_and_one_second_of_lag(monkeypatch):
 def test_overload_returns_503_with_retry_after_and_changes_nothing(client, throttling):
     before = sample("opamp_throttled_requests_total", {"transport": "http"})
 
-    response = post(client)
+    response = opamp_send(client, message())
 
     assert response.status_code == 503
     assert response.headers["Retry-After"] == "30"
@@ -154,31 +147,31 @@ def test_retry_after_header_follows_configuration(client, monkeypatch):
     monkeypatch.setenv("OPAMP_THROTTLE_ENABLED", "true")
     monkeypatch.setenv("OPAMP_THROTTLE_RETRY_AFTER_SECONDS", "90")
     throttle.record_sample(5.0)
-    assert post(client).headers["Retry-After"] == "90"
+    assert opamp_send(client, message()).headers["Retry-After"] == "90"
 
 
 def test_threshold_is_configurable(client, monkeypatch):
     monkeypatch.setenv("OPAMP_THROTTLE_ENABLED", "true")
     monkeypatch.setenv("OPAMP_THROTTLE_MAX_LAG_SECONDS", "2")
     throttle.record_sample(1.5)
-    assert post(client).status_code == 200
+    assert opamp_send(client, message()).status_code == 200
     throttle.record_sample(2.5)
-    assert post(client).status_code == 503
+    assert opamp_send(client, message()).status_code == 503
 
 
 def test_gate_releases_the_moment_the_loop_catches_up(client, throttling):
     """A sticky gate would turn `Retry-After` into a self-inflicted outage."""
-    assert post(client).status_code == 503
+    assert opamp_send(client, message()).status_code == 503
 
     throttle.record_sample(0.0)
 
     assert throttle.should_shed() is False
-    assert post(client).status_code == 200
+    assert opamp_send(client, message()).status_code == 200
 
 
 def test_monitoring_and_admin_routes_are_never_throttled(client, throttling):
     """Throttling your own monitoring turns a slow server into a blind one."""
-    assert post(client).status_code == 503
+    assert opamp_send(client, message()).status_code == 503
 
     assert client.get("/health").status_code == 200
     assert client.get("/metrics").status_code == 200
@@ -194,14 +187,14 @@ def test_monitoring_and_admin_routes_are_never_throttled(client, throttling):
 def test_refusal_happens_before_the_body_is_read(client, throttling, monkeypatch):
     """A shedding server must not decompress and parse the message it refuses."""
     monkeypatch.setenv("OPAMP_MAX_MESSAGE_BYTES", "16")
-    response = post(client, body=message())
+    response = opamp_send(client, message())
     assert response.status_code == 503  # not 413: the body was never read
 
 
 def test_identity_is_checked_before_load(client, throttling, monkeypatch):
     """401 stays 401 under overload: a bad credential is not a capacity problem."""
     monkeypatch.setenv("OPAMP_AGENT_AUTH", "token")
-    response = post(client)
+    response = opamp_send(client, message())
     assert response.status_code == 401
     assert "Retry-After" not in response.headers
 

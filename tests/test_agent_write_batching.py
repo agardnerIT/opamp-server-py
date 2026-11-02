@@ -18,6 +18,7 @@ from unittest.mock import Mock
 from proto import opamp_pb2
 from server import main
 from server.state import AgentRegistry, SQLiteAgentStore
+from tests.conformance.harness import expect_status, opamp_send
 from tests.uids import uid
 
 
@@ -68,15 +69,6 @@ def full_report(healthy=True, version="1.0.0"):
     )
 
 
-def send(client, message):
-    response = client.post(
-        "/v1/opamp",
-        content=message.SerializeToString(),
-        headers={"Content-Type": "application/x-protobuf"},
-    )
-    assert response.status_code == 200
-
-
 def stored_row(db_path, agent_id):
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -88,7 +80,7 @@ def test_new_agent_message_writes_the_row_once(isolated_server):
     message = full_report()
     agent_id = binascii.hexlify(message.instance_uid).decode()
 
-    send(client, message)
+    expect_status(opamp_send(client, message))
 
     assert registry._store.upserts == 1
     row = stored_row(db_path, agent_id)
@@ -102,11 +94,11 @@ def test_unchanged_status_report_writes_nothing(isolated_server):
     client, registry, db_path = isolated_server
     message = full_report()
     agent_id = binascii.hexlify(message.instance_uid).decode()
-    send(client, message)
+    expect_status(opamp_send(client, message))
     after_first = registry._store.upserts
 
     for _ in range(5):
-        send(client, message)
+        expect_status(opamp_send(client, message))
 
     assert registry._store.upserts == after_first
     assert stored_row(db_path, agent_id)["healthy"] == 1
@@ -116,14 +108,14 @@ def test_changed_field_groups_are_written_once_per_message(isolated_server):
     client, registry, db_path = isolated_server
     message = full_report()
     agent_id = binascii.hexlify(message.instance_uid).decode()
-    send(client, message)
+    expect_status(opamp_send(client, message))
     after_first = registry._store.upserts
 
     message.health.healthy = False
     message.health.last_error = "unavailable"
     message.package_statuses.packages["collector"].agent_has_version = "2.0.0"
     message.remote_config_status.status = 2
-    send(client, message)
+    expect_status(opamp_send(client, message))
 
     assert registry._store.upserts == after_first + 1
     row = stored_row(db_path, agent_id)
@@ -137,11 +129,11 @@ def test_bare_heartbeat_is_flushed_only_when_the_stored_heartbeat_is_stale(
     client, registry, db_path = isolated_server
     message = full_report()
     agent_id = binascii.hexlify(message.instance_uid).decode()
-    send(client, message)
+    expect_status(opamp_send(client, message))
     after_first = registry._store.upserts
     heartbeat = opamp_pb2.AgentToServer(instance_uid=message.instance_uid)
 
-    send(client, heartbeat)
+    expect_status(opamp_send(client, heartbeat))
     assert registry._store.upserts == after_first
 
     # Pretend the last persisted heartbeat is old enough to matter for recovery.
@@ -152,6 +144,6 @@ def test_bare_heartbeat_is_flushed_only_when_the_stored_heartbeat_is_stale(
     registry._persisted_at[agent_id] = (
         time.monotonic() - (main.HEARTBEAT_PERSIST_SECONDS + 1)
     )
-    send(client, heartbeat)
+    expect_status(opamp_send(client, heartbeat))
     assert registry._store.upserts == after_first + 1
     assert stored_row(db_path, agent_id)["health"] is not None

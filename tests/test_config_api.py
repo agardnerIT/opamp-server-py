@@ -21,7 +21,8 @@ from fastapi.testclient import TestClient
 
 from proto import opamp_pb2
 from server import admin_auth, agent_auth, audit, crypto, remote_config
-from server.main import _handle_agent_message, app
+from tests.conformance.harness import handle_message as reply
+from server.main import app
 from server.state import AGENT_REGISTRY, SQLiteCredentialStore
 from server.ws import REGISTRY as WS_REGISTRY
 
@@ -77,12 +78,6 @@ def agent_message(
             )
         msg.remote_config_status.error_message = error
     return msg.SerializeToString()
-
-
-def reply(data: bytes) -> opamp_pb2.ServerToAgent:
-    message = opamp_pb2.ServerToAgent()
-    message.ParseFromString(_handle_agent_message(data).response)
-    return message
 
 
 @pytest.fixture(autouse=True)

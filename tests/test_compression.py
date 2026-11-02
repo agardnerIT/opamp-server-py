@@ -26,6 +26,7 @@ from proto import opamp_pb2
 from server.main import GZIP_MIN_RESPONSE_BYTES, app
 from server.state import AGENT_REGISTRY
 from server.ws import REGISTRY as WS_REGISTRY
+from tests.conformance.harness import opamp_send
 
 UID = bytes.fromhex("ef" * 16)
 AGENT_ID = UID.hex()
@@ -55,14 +56,6 @@ def client(monkeypatch):
         AGENT_REGISTRY.remove(agent_id)
 
 
-def post(client, body: bytes, **headers):
-    return client.post(
-        "/v1/opamp",
-        content=body,
-        headers={"Content-Type": "application/x-protobuf", **headers},
-    )
-
-
 # --- request side -----------------------------------------------------------
 
 
@@ -76,7 +69,7 @@ def test_gzipped_request_stores_exactly_the_same_state_as_a_plain_one(client):
     """
     volatile = {"connected_at", "last_heartbeat", "report_interval_seconds"}
 
-    plain = post(client, status_message(healthy=True))
+    plain = opamp_send(client, status_message(healthy=True))
     assert plain.status_code == 200
     plain_state = {
         k: v for k, v in client.get(f"/agent/{AGENT_ID}").json().items() if k not in volatile
@@ -85,10 +78,10 @@ def test_gzipped_request_stores_exactly_the_same_state_as_a_plain_one(client):
     AGENT_REGISTRY.remove(AGENT_ID)
     assert client.get(f"/agent/{AGENT_ID}").status_code == 404
 
-    gzipped = post(
+    gzipped = opamp_send(
         client,
         gzip.compress(status_message(healthy=True)),
-        **{"Content-Encoding": "gzip"},
+        headers={"Content-Encoding": "gzip"},
     )
 
     assert gzipped.status_code == 200
@@ -103,10 +96,10 @@ def test_gzipped_request_stores_exactly_the_same_state_as_a_plain_one(client):
 
 def test_x_gzip_is_accepted_as_an_alias(client):
     """`x-gzip` is the historical spelling and is still in the wild."""
-    response = post(
+    response = opamp_send(
         client,
         gzip.compress(status_message()),
-        **{"Content-Encoding": "x-gzip"},
+        headers={"Content-Encoding": "x-gzip"},
     )
 
     assert response.status_code == 200
@@ -114,14 +107,14 @@ def test_x_gzip_is_accepted_as_an_alias(client):
 
 
 def test_identity_encoding_is_a_plain_body(client):
-    response = post(client, status_message(), **{"Content-Encoding": "identity"})
+    response = opamp_send(client, status_message(), headers={"Content-Encoding": "identity"})
 
     assert response.status_code == 200
     assert AGENT_REGISTRY.count == 1
 
 
 def test_corrupt_gzip_is_400_with_no_state_change(client):
-    response = post(client, b"this is not gzip", **{"Content-Encoding": "gzip"})
+    response = opamp_send(client, b"this is not gzip", headers={"Content-Encoding": "gzip"})
 
     assert response.status_code == 400
     reply = opamp_pb2.ServerToAgent()
@@ -133,7 +126,7 @@ def test_corrupt_gzip_is_400_with_no_state_change(client):
 def test_truncated_gzip_is_400(client):
     payload = gzip.compress(status_message())[:-6]
 
-    response = post(client, payload, **{"Content-Encoding": "gzip"})
+    response = opamp_send(client, payload, headers={"Content-Encoding": "gzip"})
 
     assert response.status_code == 400
     assert AGENT_REGISTRY.count == 0
@@ -144,7 +137,7 @@ def test_gzip_bomb_is_refused_on_the_decompressed_size(client, monkeypatch):
     monkeypatch.setenv("OPAMP_MAX_MESSAGE_BYTES", "4096")
     bomb = gzip.compress(b"\x00" * (64 * 1024 * 1024))
 
-    response = post(client, bomb, **{"Content-Encoding": "gzip"})
+    response = opamp_send(client, bomb, headers={"Content-Encoding": "gzip"})
 
     assert response.status_code == 413
     assert AGENT_REGISTRY.count == 0
@@ -160,7 +153,7 @@ def test_gzip_does_not_raise_the_effective_limit(client, monkeypatch):
     big = status_message(description="x" * 2000)
     assert len(gzip.compress(big)) < 512  # the wire bytes fit, the message does not
 
-    response = post(client, gzip.compress(big), **{"Content-Encoding": "gzip"})
+    response = opamp_send(client, gzip.compress(big), headers={"Content-Encoding": "gzip"})
 
     assert response.status_code == 413
 
@@ -170,7 +163,7 @@ def test_gzip_does_not_raise_the_effective_limit(client, monkeypatch):
 
 def test_small_opamp_reply_is_not_compressed(client):
     """A capabilities-sized reply is not worth gzipping, so it stays plain."""
-    response = post(client, status_message(), **{"Accept-Encoding": "gzip"})
+    response = opamp_send(client, status_message(), headers={"Accept-Encoding": "gzip"})
 
     assert response.status_code == 200
     assert "content-encoding" not in {k.lower() for k in response.headers}
@@ -183,7 +176,7 @@ def test_large_response_is_gzipped_when_the_client_asks(client):
     msg.effective_config.config_map.config_map["collector.yaml"].body = (
         b"receivers:\n  otlp:\n    protocols:\n      grpc:\n" + b"# padding\n" * 400
     )
-    assert post(client, msg.SerializeToString()).status_code == 200
+    assert opamp_send(client, msg.SerializeToString()).status_code == 200
 
     gzipped = client.get(f"/agent/{AGENT_ID}", headers={"Accept-Encoding": "gzip"})
     plain = client.get(f"/agent/{AGENT_ID}", headers={"Accept-Encoding": "identity"})
@@ -201,7 +194,7 @@ def test_response_advertises_vary_accept_encoding(client):
     msg = opamp_pb2.AgentToServer()
     msg.instance_uid = UID
     msg.effective_config.config_map.config_map["c.yaml"].body = b"x" * 4000
-    post(client, msg.SerializeToString())
+    opamp_send(client, msg.SerializeToString())
 
     response = client.get(f"/agent/{AGENT_ID}", headers={"Accept-Encoding": "gzip"})
 
@@ -212,7 +205,7 @@ def test_no_accept_encoding_means_a_plain_response(client):
     msg = opamp_pb2.AgentToServer()
     msg.instance_uid = UID
     msg.effective_config.config_map.config_map["c.yaml"].body = b"x" * 4000
-    post(client, msg.SerializeToString())
+    opamp_send(client, msg.SerializeToString())
 
     response = client.get(f"/agent/{AGENT_ID}", headers={"Accept-Encoding": ""})
 

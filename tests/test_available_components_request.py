@@ -36,14 +36,14 @@ from proto import opamp_pb2
 from server.main import app
 from server.state import AGENT_REGISTRY, COMPONENTS_IGNORED_LOG_AT, SQLiteAgentStore
 from server.ws import REGISTRY as WS_REGISTRY
+from tests.conformance.harness import (
+    asks_for_components,
+    asks_for_full_state,
+    opamp_send,
+)
 
 UID = bytes.fromhex("77" * 16)
 AGENT_ID = UID.hex()
-
-ASK_FOR_COMPONENTS = (
-    opamp_pb2.ServerToAgentFlags.ServerToAgentFlags_ReportAvailableComponents
-)
-FULL_STATE = opamp_pb2.ServerToAgentFlags.ServerToAgentFlags_ReportFullState
 
 HASH_A = b"\xaa\x01"
 HASH_B = b"\xbb\x02"
@@ -94,21 +94,6 @@ def report(
     return msg.SerializeToString()
 
 
-def reply(response) -> opamp_pb2.ServerToAgent:
-    assert response.status_code == 200
-    parsed = opamp_pb2.ServerToAgent()
-    parsed.ParseFromString(response.content)
-    return parsed
-
-
-def asks_for_components(response) -> bool:
-    return bool(reply(response).flags & ASK_FOR_COMPONENTS)
-
-
-def asks_for_full_state(response) -> bool:
-    return bool(reply(response).flags & FULL_STATE)
-
-
 @pytest.fixture
 def client(monkeypatch):
     WS_REGISTRY.reset()
@@ -122,12 +107,6 @@ def client(monkeypatch):
         AGENT_REGISTRY.remove(agent_id)
 
 
-def post(client, body: bytes):
-    return client.post(
-        "/v1/opamp", content=body, headers={"Content-Type": "application/x-protobuf"}
-    )
-
-
 def metric(counter, **labels) -> float:
     return counter.labels(**labels)._value.get()
 
@@ -136,7 +115,7 @@ def metric(counter, **labels) -> float:
 
 
 def test_hash_only_report_makes_the_next_reply_ask_for_the_details(client):
-    response = post(client, report(component_hash=HASH_A))
+    response = opamp_send(client, report(component_hash=HASH_A))
 
     assert asks_for_components(response)
     # Persisted in our hex form, which is what the API and the one-shot check use.
@@ -147,7 +126,7 @@ def test_hash_only_report_makes_the_next_reply_ask_for_the_details(client):
 
 
 def test_full_components_are_never_asked_about(client):
-    response = post(client, report(component_hash=HASH_A, components=FULL_COMPONENTS))
+    response = opamp_send(client, report(component_hash=HASH_A, components=FULL_COMPONENTS))
 
     assert asks_for_components(response) is False
     assert AGENT_REGISTRY.get(AGENT_ID).last_requested_components_hash is None
@@ -155,15 +134,15 @@ def test_full_components_are_never_asked_about(client):
 
 def test_report_with_neither_hash_nor_components_is_not_asked(client):
     """Nothing to key a one-shot ask on: asking would be a request per message."""
-    response = post(client, report(component_hash=None))
+    response = opamp_send(client, report(component_hash=None))
 
     assert asks_for_components(response) is False
 
 
 def test_follow_up_with_full_components_answers_the_ask(client):
-    assert asks_for_components(post(client, report(component_hash=HASH_A)))
+    assert asks_for_components(opamp_send(client, report(component_hash=HASH_A)))
 
-    response = post(
+    response = opamp_send(
         client,
         report(component_hash=HASH_A, components=FULL_COMPONENTS, health=HEALTH_USING_OTLP),
     )
@@ -176,40 +155,40 @@ def test_follow_up_with_full_components_answers_the_ask(client):
 
 
 def test_agent_that_keeps_sending_the_same_hash_is_asked_once(client):
-    assert asks_for_components(post(client, report(component_hash=HASH_A)))
+    assert asks_for_components(opamp_send(client, report(component_hash=HASH_A)))
 
     for _ in range(4):
-        assert asks_for_components(post(client, report(component_hash=HASH_A))) is False
+        assert asks_for_components(opamp_send(client, report(component_hash=HASH_A))) is False
 
     agent = AGENT_REGISTRY.get(AGENT_ID)
     assert agent.components_request_ignored == COMPONENTS_IGNORED_LOG_AT
 
 
 def test_a_changed_hash_is_asked_about_again(client):
-    assert asks_for_components(post(client, report(component_hash=HASH_A)))
-    assert asks_for_components(post(client, report(component_hash=HASH_A))) is False
+    assert asks_for_components(opamp_send(client, report(component_hash=HASH_A)))
+    assert asks_for_components(opamp_send(client, report(component_hash=HASH_A))) is False
 
-    assert asks_for_components(post(client, report(component_hash=HASH_B)))
+    assert asks_for_components(opamp_send(client, report(component_hash=HASH_B)))
     assert AGENT_REGISTRY.get(AGENT_ID).last_requested_components_hash == HASH_B.hex()
     # The counter is about the *current* ask, not the agent's whole life.
     assert AGENT_REGISTRY.get(AGENT_ID).components_request_ignored == 0
 
 
 def test_ignoring_the_ask_is_visible_in_state_and_resets_on_compliance(client):
-    post(client, report(component_hash=HASH_A))
+    opamp_send(client, report(component_hash=HASH_A))
     for _ in range(COMPONENTS_IGNORED_LOG_AT + 2):
-        post(client, report(component_hash=HASH_A))
+        opamp_send(client, report(component_hash=HASH_A))
 
     detail = client.get(f"/agent/{AGENT_ID}").json()
     assert detail["components_request_ignored"] == COMPONENTS_IGNORED_LOG_AT
 
-    post(client, report(component_hash=HASH_A, components=FULL_COMPONENTS))
+    opamp_send(client, report(component_hash=HASH_A, components=FULL_COMPONENTS))
 
     assert client.get(f"/agent/{AGENT_ID}").json()["components_request_ignored"] == 0
 
 
 def test_disconnecting_agent_is_not_asked(client):
-    response = post(client, report(component_hash=HASH_A, disconnect=True))
+    response = opamp_send(client, report(component_hash=HASH_A, disconnect=True))
 
     assert asks_for_components(response) is False
     assert AGENT_REGISTRY.get(AGENT_ID) is None
@@ -217,10 +196,10 @@ def test_disconnecting_agent_is_not_asked(client):
 
 def test_both_asks_can_ride_one_reply(client):
     """#70 (sequence gap) and #77 (hash-only components) are independent."""
-    post(client, report(component_hash=HASH_A, sequence_num=1))
-    post(client, report(component_hash=HASH_A, sequence_num=2))
+    opamp_send(client, report(component_hash=HASH_A, sequence_num=1))
+    opamp_send(client, report(component_hash=HASH_A, sequence_num=2))
 
-    response = post(client, report(component_hash=HASH_B, sequence_num=9))
+    response = opamp_send(client, report(component_hash=HASH_B, sequence_num=9))
 
     assert asks_for_full_state(response)
     assert asks_for_components(response)
@@ -230,7 +209,7 @@ def test_both_asks_can_ride_one_reply(client):
 
 
 def test_requested_hash_survives_a_restart(client):
-    post(client, report(component_hash=HASH_A))
+    opamp_send(client, report(component_hash=HASH_A))
 
     reloaded = SQLiteAgentStore(AGENT_REGISTRY._store.db_path).load_all()[AGENT_ID]
     assert reloaded.last_requested_components_hash == HASH_A.hex()
@@ -239,7 +218,7 @@ def test_requested_hash_survives_a_restart(client):
     AGENT_REGISTRY._agents.clear()
     AGENT_REGISTRY._agents.update({AGENT_ID: reloaded})
 
-    assert asks_for_components(post(client, report(component_hash=HASH_A))) is False
+    assert asks_for_components(opamp_send(client, report(component_hash=HASH_A))) is False
 
 
 def test_an_existing_database_gains_the_columns_by_migration(tmp_path):
@@ -285,9 +264,9 @@ def test_metric_counts_asks_by_reason(client):
     before_first = metric(server_main.PROM_COMPONENTS_REQUESTS, reason="hash_only")
     before_changed = metric(server_main.PROM_COMPONENTS_REQUESTS, reason="hash_changed")
 
-    post(client, report(component_hash=HASH_A))  # first hash -> hash_only
-    post(client, report(component_hash=HASH_A))  # same hash, already asked
-    post(client, report(component_hash=HASH_B))  # agent upgraded -> hash_changed
+    opamp_send(client, report(component_hash=HASH_A))  # first hash -> hash_only
+    opamp_send(client, report(component_hash=HASH_A))  # same hash, already asked
+    opamp_send(client, report(component_hash=HASH_B))  # agent upgraded -> hash_changed
 
     assert (
         metric(server_main.PROM_COMPONENTS_REQUESTS, reason="hash_only")
@@ -302,9 +281,9 @@ def test_metric_counts_asks_by_reason(client):
 def test_metric_counts_an_agent_that_ignores_the_ask(client):
     before = server_main.PROM_COMPONENTS_IGNORED._value.get()
 
-    post(client, report(component_hash=HASH_A))
+    opamp_send(client, report(component_hash=HASH_A))
     for _ in range(COMPONENTS_IGNORED_LOG_AT + 2):
-        post(client, report(component_hash=HASH_A))
+        opamp_send(client, report(component_hash=HASH_A))
 
     # Counted once when it crosses the threshold, not once per ignored poll.
     assert server_main.PROM_COMPONENTS_IGNORED._value.get() == before + 1

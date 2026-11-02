@@ -25,7 +25,8 @@ from server import (
     remote_config,
     rollout,
 )
-from server.main import _handle_agent_message, app
+from tests.conformance.harness import handle_message as reply
+from server.main import app
 from server.state import AGENT_REGISTRY, SQLiteCredentialStore, SQLiteRolloutStore
 from server.ws import REGISTRY as WS_REGISTRY
 
@@ -96,12 +97,6 @@ def agent_message(
         if hash_b64:
             msg.remote_config_status.last_remote_config_hash = base64.b64decode(hash_b64)
     return msg.SerializeToString()
-
-
-def reply(data: bytes) -> opamp_pb2.ServerToAgent:
-    message = opamp_pb2.ServerToAgent()
-    message.ParseFromString(_handle_agent_message(data).response)
-    return message
 
 
 def poll(**kwargs) -> opamp_pb2.ServerToAgent:

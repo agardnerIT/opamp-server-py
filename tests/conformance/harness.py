@@ -58,6 +58,91 @@ DEFAULT_CAPABILITIES = (
 )
 
 
+def opamp_send(
+    http: Any,
+    body: Any = None,
+    *,
+    headers: Optional[Mapping[str, str]] = None,
+    gzip_body: bool = False,
+    raw_body: Optional[bytes] = None,
+    content_length: Optional[int] = None,
+) -> Any:
+    """POST one OpAMP message and return the raw response.
+
+    `http` is anything with `post(path, content=..., headers=...)` — `TestClient` or an
+    `httpx.Client` over the in-process ASGI transport — so this is the single
+    implementation of the request envelope for every suite (#112). `body` may be an
+    `AgentToServer` or already-serialised bytes; `raw_body` replaces it when the point
+    of the test is a body that is not a valid message.
+    """
+    if raw_body is not None:
+        payload = raw_body
+    elif body is None:
+        payload = b""
+    elif isinstance(body, (bytes, bytearray)):
+        payload = bytes(body)
+    elif hasattr(body, "SerializeToString"):
+        payload = body.SerializeToString()
+    else:
+        # An iterable/stream goes through untouched: that is how a chunked body with no
+        # `Content-Length` is sent, which is the only way to exercise the streaming cap.
+        payload = body
+
+    request_headers: Dict[str, str] = {"Content-Type": PROTOBUF}
+    if gzip_body:
+        assert isinstance(payload, (bytes, bytearray)), "gzip_body needs a byte body"
+        payload = gzip.compress(bytes(payload))
+        request_headers["Content-Encoding"] = "gzip"
+    if content_length is not None:
+        request_headers["Content-Length"] = str(content_length)
+    request_headers.update(headers or {})
+    return http.post(OPAMP_PATH, content=payload, headers=request_headers)
+
+
+def handle_message(
+    body: bytes,
+    principal: Any = None,
+    transport: str = "http",
+    uid_header: str = "",
+) -> opamp_pb2.ServerToAgent:
+    """Drive the OpAMP message handler directly (no HTTP) and parse the reply.
+
+    For suites whose subject is the *decision* rather than the envelope — config
+    push, rollouts — where a socket would only add a status code to assert. The
+    handler is the same one both transports call, so this cannot diverge from what an
+    agent would receive.
+
+    Imported lazily: this module is imported by suites that never touch the server
+    module graph, and `server.main` binds its stores at import time (#112).
+    """
+    from server.main import _handle_agent_message
+
+    processed = _handle_agent_message(body, principal, transport, uid_header)
+    reply = opamp_pb2.ServerToAgent()
+    reply.ParseFromString(processed.response)
+    return reply
+
+
+def parse_reply(response: Any) -> opamp_pb2.ServerToAgent:
+    """Parse a `ServerToAgent` body without judging the status code."""
+    reply = opamp_pb2.ServerToAgent()
+    reply.ParseFromString(response.content)
+    return reply
+
+
+def expect_status(response: Any, status: int = 200) -> Any:
+    """Assert the status code and hand the response back, for call chaining."""
+    assert response.status_code == status, (
+        f"expected {status}, got {response.status_code}: {response.text!r}"
+    )
+    return response
+
+
+def expect_reply(response: Any, status: int = 200) -> opamp_pb2.ServerToAgent:
+    """Assert the status code and parse the `ServerToAgent` reply."""
+    return parse_reply(expect_status(response, status))
+
+
 class OpampHarness:
     """An in-process OpAMP client. One per test, like the server it drives."""
 
@@ -68,47 +153,19 @@ class OpampHarness:
 
     # -- HTTP -------------------------------------------------------------
 
-    def send(
-        self,
-        message: Optional[opamp_pb2.AgentToServer] = None,
-        *,
-        headers: Optional[Mapping[str, str]] = None,
-        gzip_body: bool = False,
-        raw_body: Optional[bytes] = None,
-        content_length: Optional[int] = None,
-    ) -> httpx.Response:
-        """POST one `AgentToServer` (or a deliberately broken body) and return the reply.
-
-        `raw_body` replaces the encoded message (an unparseable body, a truncated
-        gzip); `gzip_body` compresses whatever body results; `content_length` overrides
-        the declared length, which is how the "refuse before reading" path is reached
-        without allocating the oversized body.
-        """
-        body = raw_body if raw_body is not None else message.SerializeToString()
-        request_headers: Dict[str, str] = {"Content-Type": PROTOBUF}
-        if gzip_body:
-            body = gzip.compress(body)
-            request_headers["Content-Encoding"] = "gzip"
-        if content_length is not None:
-            request_headers["Content-Length"] = str(content_length)
-        request_headers.update(headers or {})
-        return self._http.post(OPAMP_PATH, content=body, headers=request_headers)
+    def send(self, message: Any = None, **send_kwargs: Any) -> Any:
+        """`opamp_send()` over this harness's client (see that function for options)."""
+        return opamp_send(self._http, message, **send_kwargs)
 
     def expect(
         self,
-        message: Optional[opamp_pb2.AgentToServer] = None,
+        message: Any = None,
         *,
         status: int = 200,
         **send_kwargs: Any,
     ) -> opamp_pb2.ServerToAgent:
         """`send()` and parse the reply, asserting the status code first."""
-        response = self.send(message, **send_kwargs)
-        assert response.status_code == status, (
-            f"expected {status}, got {response.status_code}: {response.text!r}"
-        )
-        reply = opamp_pb2.ServerToAgent()
-        reply.ParseFromString(response.content)
-        return reply
+        return expect_reply(self.send(message, **send_kwargs), status)
 
     def get(self, path: str) -> httpx.Response:
         """Read an admin/agent endpoint from the same in-process server."""
@@ -259,17 +316,30 @@ def unsupported_optional_message(uid: bytes, *, sequence_num: int = 2):
 # -- reply accessors ----------------------------------------------------------
 
 
-def has_flag(reply: opamp_pb2.ServerToAgent, flag: int) -> bool:
-    return bool(reply.flags & flag)
+def _as_reply(value: Any) -> opamp_pb2.ServerToAgent:
+    """Accept either a parsed reply or a raw HTTP response.
+
+    Test suites differ in whether they assert on the envelope or the message; taking
+    both keeps call sites readable without a per-file wrapper (#112). A raw response is
+    required to be a 200 first: flag accessors are used for *negative* assertions too,
+    and "no flags" must never be satisfied by a message the server refused.
+    """
+    if isinstance(value, opamp_pb2.ServerToAgent):
+        return value
+    return expect_reply(value)
 
 
-def asks_for_full_state(reply: opamp_pb2.ServerToAgent) -> bool:
+def has_flag(reply: Any, flag: int) -> bool:
+    return bool(_as_reply(reply).flags & flag)
+
+
+def asks_for_full_state(reply: Any) -> bool:
     return has_flag(
         reply, opamp_pb2.ServerToAgentFlags.ServerToAgentFlags_ReportFullState
     )
 
 
-def asks_for_components(reply: opamp_pb2.ServerToAgent) -> bool:
+def asks_for_components(reply: Any) -> bool:
     return has_flag(
         reply,
         opamp_pb2.ServerToAgentFlags.ServerToAgentFlags_ReportAvailableComponents,

@@ -22,6 +22,7 @@ from proto import opamp_pb2
 from server.http_body import BodyTooLarge, read_body
 from server.main import app
 from server.state import AGENT_REGISTRY
+from tests.conformance.harness import opamp_send
 from server.ws import REGISTRY
 
 UID = bytes.fromhex("ab" * 16)
@@ -58,19 +59,11 @@ def no_push(monkeypatch):
     monkeypatch.delenv("OPAMP_AGENT_AUTH", raising=False)
 
 
-def post(client, body: bytes, **headers):
-    return client.post(
-        "/v1/opamp",
-        content=body,
-        headers={"Content-Type": "application/x-protobuf", **headers},
-    )
-
-
 def test_content_length_over_limit_is_413_and_mutates_nothing(client, monkeypatch):
     limit = 64
     monkeypatch.setenv("OPAMP_MAX_MESSAGE_BYTES", str(limit))
 
-    response = post(client, message(limit + 1).SerializeToString())
+    response = opamp_send(client, message(limit + 1).SerializeToString())
 
     assert response.status_code == 413
     assert AGENT_REGISTRY.count == 0
@@ -80,7 +73,7 @@ def test_body_exactly_at_the_limit_is_accepted(client, monkeypatch):
     body = message(64).SerializeToString()
     monkeypatch.setenv("OPAMP_MAX_MESSAGE_BYTES", str(len(body)))
 
-    response = post(client, body)
+    response = opamp_send(client, body)
 
     assert response.status_code == 200
     assert AGENT_REGISTRY.get(UID.hex()) is not None
@@ -90,7 +83,7 @@ def test_one_byte_over_the_limit_is_413(client, monkeypatch):
     body = message(64).SerializeToString()
     monkeypatch.setenv("OPAMP_MAX_MESSAGE_BYTES", str(len(body) - 1))
 
-    response = post(client, body)
+    response = opamp_send(client, body)
 
     assert response.status_code == 413
     assert AGENT_REGISTRY.count == 0
@@ -101,7 +94,7 @@ def test_chunked_body_over_limit_is_413(client, monkeypatch):
     monkeypatch.setenv("OPAMP_MAX_MESSAGE_BYTES", "64")
     chunks = (b"x" * 32 for _ in range(100))
 
-    response = post(client, chunks)
+    response = opamp_send(client, chunks)
 
     assert response.status_code == 413
     assert AGENT_REGISTRY.count == 0
@@ -113,7 +106,7 @@ def test_gzipped_body_within_limit_is_accepted(client, monkeypatch):
     body = gzip.compress(message().SerializeToString())
     monkeypatch.setenv("OPAMP_MAX_MESSAGE_BYTES", "256")
 
-    response = post(client, body, **{"Content-Encoding": "gzip"})
+    response = opamp_send(client, body, headers={"Content-Encoding": "gzip"})
 
     assert response.status_code == 200
     assert AGENT_REGISTRY.get(UID.hex()) is not None
@@ -125,7 +118,7 @@ def test_gzip_bomb_is_413_on_the_decompressed_size(client, monkeypatch):
     body = gzip.compress(b"\x00" * 4096)
     assert len(body) < limit  # the wire size is fine; the expansion is not
 
-    response = post(client, body, **{"Content-Encoding": "gzip"})
+    response = opamp_send(client, body, headers={"Content-Encoding": "gzip"})
 
     assert response.status_code == 413
     assert AGENT_REGISTRY.count == 0
@@ -136,7 +129,7 @@ def test_corrupt_gzip_is_bad_request(client, monkeypatch):
 
     monkeypatch.setenv("OPAMP_MAX_MESSAGE_BYTES", "256")
 
-    response = post(client, b"not actually gzip", **{"Content-Encoding": "gzip"})
+    response = opamp_send(client, b"not actually gzip", headers={"Content-Encoding": "gzip"})
 
     assert response.status_code == 400
     reply = opamp_pb2.ServerToAgent()
@@ -160,7 +153,7 @@ def test_unknown_content_encoding_is_415_not_a_silent_partial_success(client, mo
 
     monkeypatch.setenv("OPAMP_MAX_MESSAGE_BYTES", "256")
 
-    response = post(client, b"whatever", **{"Content-Encoding": "br"})
+    response = opamp_send(client, b"whatever", headers={"Content-Encoding": "br"})
 
     assert response.status_code == 415
     reply = opamp_pb2.ServerToAgent()

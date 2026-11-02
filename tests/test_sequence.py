@@ -33,6 +33,7 @@ from server import sequence
 from server.main import app
 from server.state import AGENT_REGISTRY, AgentState, SQLiteAgentStore
 from server.ws import REGISTRY as WS_REGISTRY
+from tests.conformance.harness import asks_for_full_state, opamp_send
 
 UID = bytes.fromhex("cd" * 16)
 AGENT_ID = UID.hex()
@@ -46,17 +47,6 @@ def message(sequence_num: int = 0, healthy: bool = True) -> bytes:
     msg.capabilities = opamp_pb2.AgentCapabilities.AgentCapabilities_ReportsStatus
     msg.health.healthy = healthy
     return msg.SerializeToString()
-
-
-def reply(response) -> opamp_pb2.ServerToAgent:
-    assert response.status_code == 200
-    parsed = opamp_pb2.ServerToAgent()
-    parsed.ParseFromString(response.content)
-    return parsed
-
-
-def asks_for_full_state(response) -> bool:
-    return bool(reply(response).flags & FULL_STATE)
 
 
 @pytest.fixture
@@ -73,12 +63,6 @@ def client(monkeypatch):
     WS_REGISTRY.reset()
     for agent_id in list(AGENT_REGISTRY._agents):
         AGENT_REGISTRY.remove(agent_id)
-
-
-def post(client, body: bytes):
-    return client.post(
-        "/v1/opamp", content=body, headers={"Content-Type": "application/x-protobuf"}
-    )
 
 
 # --- pure gap arithmetic ----------------------------------------------------
@@ -125,24 +109,24 @@ def test_sequence_num_zero_never_asks_even_after_a_real_counter():
 
 
 def test_new_agent_gets_one_report_full_state_request(client):
-    response = post(client, message(sequence_num=1))
+    response = opamp_send(client, message(sequence_num=1))
 
     assert asks_for_full_state(response)
 
 
 def test_in_order_counter_never_asks(client):
-    post(client, message(sequence_num=1))
-    post(client, message(sequence_num=2))
+    opamp_send(client, message(sequence_num=1))
+    opamp_send(client, message(sequence_num=2))
 
     for current in (3, 4, 5):
-        assert asks_for_full_state(post(client, message(sequence_num=current))) is False
+        assert asks_for_full_state(opamp_send(client, message(sequence_num=current))) is False
 
 
 def test_sequence_gap_sets_report_full_state(client):
-    post(client, message(sequence_num=1))
-    post(client, message(sequence_num=2))
+    opamp_send(client, message(sequence_num=1))
+    opamp_send(client, message(sequence_num=2))
 
-    gap = post(client, message(sequence_num=5))
+    gap = opamp_send(client, message(sequence_num=5))
 
     assert asks_for_full_state(gap)
     # The state itself is still applied: asking for full state is not a refusal.
@@ -151,24 +135,24 @@ def test_sequence_gap_sets_report_full_state(client):
 
 
 def test_duplicate_sequence_num_is_a_gap(client):
-    post(client, message(sequence_num=1))
-    post(client, message(sequence_num=2))
+    opamp_send(client, message(sequence_num=1))
+    opamp_send(client, message(sequence_num=2))
 
-    assert asks_for_full_state(post(client, message(sequence_num=2)))
+    assert asks_for_full_state(opamp_send(client, message(sequence_num=2)))
 
 
 def test_agent_that_never_sets_sequence_num_is_left_alone(client):
     """Every message is `sequence_num=0`: no baseline, so no ask after the first."""
-    assert asks_for_full_state(post(client, message(sequence_num=0)))  # new agent
+    assert asks_for_full_state(opamp_send(client, message(sequence_num=0)))  # new agent
     for _ in range(3):
-        assert asks_for_full_state(post(client, message(sequence_num=0))) is False
+        assert asks_for_full_state(opamp_send(client, message(sequence_num=0))) is False
 
     assert client.get(f"/agent/{AGENT_ID}").json()["last_sequence_num"] is None
 
 
 def test_counter_is_persisted_and_survives_a_restart(client, tmp_path):
-    post(client, message(sequence_num=1))
-    post(client, message(sequence_num=2))
+    opamp_send(client, message(sequence_num=1))
+    opamp_send(client, message(sequence_num=2))
 
     # A fresh store over the same database is what a restarted server sees.
     reloaded = SQLiteAgentStore(AGENT_REGISTRY._store.db_path).load_all()[AGENT_ID]
@@ -207,35 +191,35 @@ def test_an_existing_database_gains_the_column_by_migration(tmp_path):
 
 def test_rate_limit_suppresses_a_second_ask(client, monkeypatch):
     monkeypatch.setenv("REPORT_FULL_STATE_MIN_INTERVAL_SECONDS", "60")
-    post(client, message(sequence_num=1))
-    post(client, message(sequence_num=2))
+    opamp_send(client, message(sequence_num=1))
+    opamp_send(client, message(sequence_num=2))
 
-    assert asks_for_full_state(post(client, message(sequence_num=9)))
+    assert asks_for_full_state(opamp_send(client, message(sequence_num=9)))
     # Still broken, still within the window: ask again would be a storm.
-    assert asks_for_full_state(post(client, message(sequence_num=20))) is False
+    assert asks_for_full_state(opamp_send(client, message(sequence_num=20))) is False
 
 
 def test_rate_limit_expires_so_a_still_broken_agent_is_eventually_asked(client, monkeypatch):
     monkeypatch.setenv("REPORT_FULL_STATE_MIN_INTERVAL_SECONDS", "60")
-    post(client, message(sequence_num=1))
-    post(client, message(sequence_num=2))
+    opamp_send(client, message(sequence_num=1))
+    opamp_send(client, message(sequence_num=2))
 
-    assert asks_for_full_state(post(client, message(sequence_num=9)))
+    assert asks_for_full_state(opamp_send(client, message(sequence_num=9)))
 
     # Wind the per-agent timer back instead of sleeping.
     AGENT_REGISTRY._full_state_requested_at[AGENT_ID] -= 61
-    assert asks_for_full_state(post(client, message(sequence_num=20)))
+    assert asks_for_full_state(opamp_send(client, message(sequence_num=20)))
 
 
 def test_disconnecting_agent_is_not_asked_for_full_state(client):
-    post(client, message(sequence_num=1))
-    post(client, message(sequence_num=2))
+    opamp_send(client, message(sequence_num=1))
+    opamp_send(client, message(sequence_num=2))
 
     msg = opamp_pb2.AgentToServer()
     msg.instance_uid = UID
     msg.sequence_num = 9
     msg.agent_disconnect.SetInParent()
-    response = post(client, msg.SerializeToString())
+    response = opamp_send(client, msg.SerializeToString())
 
     assert asks_for_full_state(response) is False
     assert AGENT_REGISTRY.get(AGENT_ID) is None
@@ -275,9 +259,9 @@ def test_metric_counts_asks_by_reason(client):
     before_new = _metric("opamp_full_state_requested_total", reason="new_agent")
     before_gap = _metric("opamp_full_state_requested_total", reason="sequence_gap")
 
-    post(client, message(sequence_num=1))  # new agent
-    post(client, message(sequence_num=2))
-    post(client, message(sequence_num=7))  # gap
+    opamp_send(client, message(sequence_num=1))  # new agent
+    opamp_send(client, message(sequence_num=2))
+    opamp_send(client, message(sequence_num=7))  # gap
 
     assert _metric("opamp_full_state_requested_total", reason="new_agent") == before_new + 1
     assert _metric("opamp_full_state_requested_total", reason="sequence_gap") == before_gap + 1

@@ -812,6 +812,62 @@ BENCH_WORKERS=4 python3 scripts/bench_opamp_capacity.py                  # why n
 One client process saturates its own GIL at ~1,200 msg/s, so a single-process
 client under-reports server capacity — use `BENCH_CLIENTS` to spread the load.
 
+### Overload shedding (#78)
+
+When the box is genuinely behind, the polite failure is a refusal the client already
+understands. With `OPAMP_THROTTLE_ENABLED=true`, `POST /v1/opamp` answers
+**`503` + `Retry-After`** instead of accepting work it cannot finish. The WebSocket
+transport refuses the **upgrade** the same way — `503` + `Retry-After` on the
+handshake — because that is the backoff a real client applies. The spec's in-band
+`ServerErrorResponse{UNAVAILABLE, retry_info}` was implemented first and measured
+against `otelcol-contrib` 0.162 (opamp-go v0.24): the client ignores `retry_info` on
+an established socket, tears it down on any `error_response` and reconnects
+immediately — a restart stampede became ~300 reconnects/s per agent, so the throttle
+amplified the load it was meant to shed. `Retry-After` on a refused upgrade *is*
+honoured (verified: 30.0 s apart). An already-open socket is therefore never cut off
+mid-stream; its next reconnect is what gets shed. 503 rather than 429 because 429
+means "you sent too much" and this means "I cannot take it"; the spec allows either.
+
+**One signal: event-loop lag.** With one worker on one event loop and a synchronous
+message handler, an in-flight request counter never rises above ~1 and registry size
+measures fleet size, not load. Lag does mean the backlog: a sampler wakes every
+100 ms and compares when it should have woken with when it did. Over
+`OPAMP_THROTTLE_MAX_LAG_SECONDS` (default `1.0`; measured p99 request latency is
+~32 ms at 32 concurrent clients), new agent messages are refused.
+
+Four decisions worth knowing:
+
+* **Off by default.** For a handful of collectors, overload means the box is already
+  in trouble and throttling only makes the failure polite. Turn it on for restart
+  stampedes, autoscaler signals, or a fleet with a very short `polling_interval`.
+* **`/health`, `/metrics` and every admin route are exempt by construction.** Only
+  the agent protocol path is gated. Throttling your own monitoring turns a slow
+  server into a blind one.
+* **The gate releases as soon as the lag does.** `Retry-After` is a promise, not a
+  cooldown: a recovered server accepts work on the next poll.
+* **The stale reaper stands down** while shedding, and for
+  `OPAMP_THROTTLE_REAPER_GRACE_SECONDS` (default `180`) after the last refusal. A
+  throttled agent is silent on purpose — deleting it would reset `connected_at`, drop
+  its persisted metrics and fire `stale_agent` + `new_agent` for a client that is
+  doing exactly what it was told (#69). It is counted in
+  `opamp_stale_reaper_deferrals_total`, so "the reaper stopped" is visible.
+* **The refusal happens before the body is read**, so a shedding server does not
+  decompress and parse the message it is about to reject — and an unauthenticated
+  request is still `401`: identity is checked before load.
+
+`Retry-After` never goes below **30 s**; the spec says "the minimum recommended retry
+interval is 30 seconds", so a configured `5` is raised rather than honoured. Verify
+it the way an agent sees it:
+
+```bash
+curl -si -X POST localhost:4320/v1/opamp --data-binary @msg.bin | head -3
+# HTTP/1.1 503 Service Unavailable
+# retry-after: 30
+curl -s localhost:4320/health | jq .throttle
+# {"enabled": true, "max_lag_seconds": 1.0, "retry_after_seconds": 30,
+#  "lag_seconds": 2.4, "shedding": true}
+```
+
 ## When an agent counts as gone (#69)
 
 The server learns each agent's reporting cadence instead of guessing it. The
@@ -930,6 +986,10 @@ this project's own fixtures name their agents.
 | `REPORT_FULL_STATE_MIN_INTERVAL_SECONDS` | `60` | Minimum gap between `ReportFullState` asks for one agent, when its `sequence_num` shows the server missed status. Stops a flapping counter from becoming a request storm; `0` disables the limit (#70) |
 | `OPAMP_DUPLICATE_UID_DETECTION` | `true` | Detect two agents presenting one `instance_uid` and answer with `agent_identification.new_instance_uid` (#75). `false` disables the check entirely (nothing is observed or counted) |
 | `OPAMP_UID_HEADER_STRICT` | `false` | `true` makes an `OpAMP-Instance-UID` header that disagrees with the message body a `400 BAD_REQUEST` (#76). Default: log both uids, trust the body |
+| `OPAMP_THROTTLE_ENABLED` | `false` | Refuse agent messages with `503` + `Retry-After` when the server is behind (#78). Off by default; `/health`, `/metrics` and admin routes are never throttled. See [Overload shedding](#overload-shedding-78) |
+| `OPAMP_THROTTLE_MAX_LAG_SECONDS` | `1.0` | The overload signal: how late the event loop wakes from a 100 ms sleep. Above it, agent requests are refused |
+| `OPAMP_THROTTLE_RETRY_AFTER_SECONDS` | `30` | `Retry-After` value. Raised to 30 if configured lower — the spec's minimum recommendation |
+| `OPAMP_THROTTLE_REAPER_GRACE_SECONDS` | `180` | How long the stale-agent reaper stands down after the last refusal, so a throttled agent is not deleted as dead (#69) |
 | `CONFIG_PUSH_RATE_PER_SECOND` | `20` | Config frames per second allowed on one WebSocket connection. Over the limit the push is `queued` (delivered on the next report), never blocked |
 | `CONFIG_PUSH_BURST` | `20` | Burst allowance per connection before the rate applies |
 | `CONFIG_PUSH_MAX_CONCURRENT` | `50` | Global cap on config frames queued but not yet written; over it, pushes degrade to `queued` |
@@ -986,6 +1046,15 @@ including a traceback.
 | `opamp_admin_auth_failures_total{reason}` | counter | Brute force / misconfigured client |
 
 Values are already public on `/health`; nothing secret is added to the scrape.
+
+**Overload (#78) metrics.** Only meaningful when `OPAMP_THROTTLE_ENABLED=true`, but
+always published, because "were we behind?" is the first question after a slow day:
+
+| Metric | Type | Why |
+|---|---|---|
+| `opamp_event_loop_lag_seconds` | gauge | The signal itself: how late the loop woke from a 100 ms sleep |
+| `opamp_throttled_requests_total{transport="http\|ws"}` | counter | How many agent messages were refused, by transport |
+| `opamp_stale_reaper_deferrals_total` | counter | Cleanup ticks that stood down because the server was shedding load |
 
 **Traces (opt-in).** `pip install -e ".[observability]"` then
 `OPAMP_TRACING_ENABLED=true` and point `OTEL_EXPORTER_OTLP_ENDPOINT` at your
@@ -1172,8 +1241,8 @@ The UI signs in the same way the CLI does — `POST /auth/session` — and then 
 | POST | `/auth/principals` | admin | Create an identity: `{"name", "role", "password", "expires_at"}`. scrypt-hashed; 409 taken name, 422 bad role/short password |
 | DELETE | `/auth/principals/{id}` | admin | Revoke an identity and close its sessions (row kept, name stays reserved) |
 | GET | `/auth/verify` | viewer | Validate a credential — any role passes (200, 401, or 429 when locked out); failures feed the lockout |
-| POST | `/v1/opamp` | 🔑 | OpAMP protocol endpoint — agents connect here (protobuf). With `OPAMP_AGENT_AUTH=token` the agent must send `Authorization: Bearer <token>`: 401 without a valid one, 403 when the token is for another `instance_uid`. Malformed input (including an empty `instance_uid`) is 400 with a `BAD_REQUEST` error body; a body over `OPAMP_MAX_MESSAGE_BYTES` (after decompression) is 413; an unsupported `Content-Encoding` is 415. The `OpAMP-Instance-UID` header is read and cross-checked against the body (#76); a duplicate uid is answered with a server-generated replacement (#75) |
-| WS | `/v1/opamp` | 🔑 | Same endpoint over WebSocket when `OPAMP_WS_ENABLED=true`; credential checked before `accept()`, refusals close `1008`. Malformed messages (including an empty `instance_uid`) get a `BAD_REQUEST` error frame then close `1002`; oversized frames close `1009` |
+| POST | `/v1/opamp` | 🔑 | OpAMP protocol endpoint — agents connect here (protobuf). With `OPAMP_AGENT_AUTH=token` the agent must send `Authorization: Bearer <token>`: 401 without a valid one, 403 when the token is for another `instance_uid`. Malformed input (including an empty `instance_uid`) is 400 with a `BAD_REQUEST` error body; a body over `OPAMP_MAX_MESSAGE_BYTES` (after decompression) is 413; an unsupported `Content-Encoding` is 415; when the server is overloaded the request is 503 with `Retry-After` and no state change (#78). The `OpAMP-Instance-UID` header is read and cross-checked against the body (#76); a duplicate uid is answered with a server-generated replacement (#75) |
+| WS | `/v1/opamp` | 🔑 | Same endpoint over WebSocket when `OPAMP_WS_ENABLED=true`; credential checked before `accept()`, refusals close `1008`. Malformed messages (including an empty `instance_uid`) get a `BAD_REQUEST` error frame then close `1002`; oversized frames close `1009`; an overloaded server refuses the upgrade with `503` + `Retry-After` (#78) |
 | POST | `/v1/metrics` | | OTLP/HTTP metrics ingestion from collectors (JSON or protobuf) |
 | GET | `/agents` | | List agents. Filters: `healthy=true\|false\|unknown`, `status=` (remote config status, or alias `remote_config_status=`), or any description attribute, e.g. `?environment=prod`. Repeated params are OR. Each agent carries a `credential` block |
 | GET | `/agent/{id}` | | Agent details incl. latest OTLP metrics and `credential` state (`enrolled`, `active`, `last_seen_at`, `revoked_at` — never a token) |

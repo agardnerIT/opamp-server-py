@@ -75,6 +75,7 @@ from server import (
     remote_config,
     rollout,
     sequence,
+    throttle,
     tracing,
 )
 from server.http_body import BodyTooLarge, UnsupportedEncoding, read_body
@@ -226,6 +227,10 @@ async def lifespan(app: FastAPI):
     # #81: the desired-config cache is loaded once; the message path must not read
     # SQLite per message (#109).
     remote_config.REGISTRY.reload()
+    # #78: the overload sampler. Cheap (one 100ms sleep loop) and harmless when the
+    # gate is off — the gauge it publishes is worth having either way, because
+    # "were we behind?" is the first question after a slow afternoon.
+    throttle.start()
     _cleanup_task = asyncio.create_task(periodic_cleanup())
     # #101: the staged rollout engine. Separate from the 15s cleanup tick on purpose:
     # promotion latency and stale-agent reaping are unrelated knobs.
@@ -235,6 +240,7 @@ async def lifespan(app: FastAPI):
         _cleanup_task.cancel()
     if _rollout_task:
         _rollout_task.cancel()
+    throttle.stop()
     tracing.shutdown_tracing()
 
 prom_client.REGISTRY.unregister(prom_client.PROCESS_COLLECTOR)
@@ -300,6 +306,14 @@ PROM_UID_HEADER_PROBLEMS = prom_client.Counter(
     "opamp_instance_uid_header_problems_total",
     "OpAMP-Instance-UID request headers that were malformed or disagreed with the body",
     ["reason"],
+)
+
+# #78: how many cleanup ticks stood down because the server was shedding load. A
+# reaper that silently stopped for an hour is an outage nobody notices until the
+# dashboard is full of corpses, so the deferral is a number, not only a log line.
+PROM_REAPER_DEFERRALS = prom_client.Counter(
+    "opamp_stale_reaper_deferrals_total",
+    "Stale-agent cleanup ticks skipped because the server was overloaded (#78)",
 )
 
 
@@ -911,6 +925,22 @@ def cleanup_stale_agents(now: Optional[datetime] = None) -> list:
     clock instead of `sleep()`.
     """
     now = now or datetime.now(timezone.utc)
+    # #78/#69: an agent told to "retry after 30s" cannot move its heartbeat until it
+    # gets through, so reaping during a throttle storm deletes exactly the agents
+    # that are behaving correctly. Stand down for the fleet rather than guess which
+    # silent agents are throttled: the 503 path never parses a body, so it does not
+    # know their ids either.
+    if throttle.hold_reaper():
+        PROM_REAPER_DEFERRALS.inc()
+        logger.bind(
+            event="agent.reaper.deferred",
+            reason="overload",
+            lag_seconds=round(throttle.last_lag_seconds(), 3),
+            agents=AGENT_REGISTRY.count,
+        ).debug(
+            "skipping stale-agent cleanup: server is shedding load (#78)"
+        )
+        return []
     stale = []
 
     for agent in AGENT_REGISTRY.list_all():
@@ -1629,6 +1659,14 @@ async def opamp_endpoint(request: Request) -> Response:
     identity in the log line, because there is no parsed message to name.
 
     The same path also accepts a WebSocket upgrade when `OPAMP_WS_ENABLED=true`.
+
+    **Overload (#78):** when the gate is enabled (`OPAMP_THROTTLE_ENABLED`) and the
+    event loop is behind by more than `OPAMP_THROTTLE_MAX_LAG_SECONDS`, this endpoint
+    answers **503** with `Retry-After` (seconds, never below 30 — the spec's minimum
+    recommendation) instead of accepting the work. Off by default. `/health`,
+    `/metrics` and every admin route are exempt by construction: throttling your own
+    monitoring turns a slow server into a blind one. 503 rather than 429 because 429
+    means "you sent too much" and this is "I cannot take it".
     """
     client = request.client.host if request.client else ""
     principal, reason = agent_auth.authenticate(request.headers)
@@ -1642,6 +1680,27 @@ async def opamp_endpoint(request: Request) -> Response:
             detail="invalid agent credential",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+    # #78: overload shedding, checked *after* identity and *before* the body is read,
+    # so a server that cannot keep up does not decompress and parse the message it is
+    # refusing. 503 (not 429: 429 means "you sent too much", 503 means "this server is
+    # unavailable") plus `Retry-After`, which opamp-go honours; without the header it
+    # falls back to exponential backoff. No state is touched: the agent is still the
+    # agent it was, just unanswered.
+    if throttle.should_shed():
+        throttle.mark_throttled(throttle.TRANSPORT_HTTP)
+        logger.bind(
+            event="opamp.throttled",
+            transport="http",
+            client=client,
+            instance_uid=_instance_uid_header(request),
+            lag_seconds=round(throttle.last_lag_seconds(), 3),
+            retry_after_seconds=throttle.retry_after_seconds(),
+        ).warning(
+            "refusing OpAMP request: server overloaded, retry after "
+            f"{throttle.retry_after_seconds()}s"
+        )
+        return Response(status_code=503, headers=throttle.headers())
 
     try:
         body = await read_body(request)
@@ -1738,6 +1797,19 @@ async def opamp_ws_endpoint(websocket: WebSocket) -> None:
     to a different credential closes the socket with 1008 mid-stream. A browser
     `Origin` must also satisfy `CORS_ORIGINS`, because WebSocket upgrades are not
     covered by `CORSMiddleware`.
+
+    **Overload (#78).** When the gate is on and the loop is behind, the upgrade is
+    denied with **HTTP 503 + `Retry-After`** instead of being accepted. The spec's
+    WebSocket half of §Throttling is the in-band
+    `ServerErrorResponse{UNAVAILABLE, retry_info}`, and that shape was tried first:
+    opamp-go v0.24 (the reference client, and what `otelcol-contrib` binds) ignores
+    `retry_info` on an established socket, tears the socket down the moment it sees
+    an `error_response`, and reconnects immediately — a restart stampede became ~300
+    reconnects per second per agent, i.e. the throttle amplified the load it was
+    meant to shed. The same client *does* honour `Retry-After` on a refused upgrade
+    (verified: retries 30.0 s apart, matching the header), so the refusal is at the
+    handshake. Consequence, stated plainly: an **already-open** socket is not cut
+    off mid-stream — its next reconnect is shed instead.
     """
     if not ws_enabled():
         await websocket.close(code=CLOSE_POLICY_VIOLATION)
@@ -1758,6 +1830,26 @@ async def opamp_ws_endpoint(websocket: WebSocket) -> None:
         )
         logger.warning(f"Refusing OpAMP WebSocket upgrade: {reason}")
         await websocket.close(code=CLOSE_POLICY_VIOLATION)
+        return
+
+    if throttle.should_shed():
+        # #78: refuse the upgrade, not the message. See the docstring — a
+        # mid-stream refusal makes the reference client hot-loop, and `Retry-After`
+        # on the handshake is the one backoff opamp-go actually applies here.
+        throttle.mark_throttled(throttle.TRANSPORT_WS)
+        logger.bind(
+            event="opamp.throttled",
+            transport="ws",
+            client=websocket.client.host if websocket.client else "",
+            lag_seconds=round(throttle.last_lag_seconds(), 3),
+            retry_after_seconds=throttle.retry_after_seconds(),
+        ).warning(
+            "refusing OpAMP WebSocket upgrade: server overloaded, retry after "
+            f"{throttle.retry_after_seconds()}s"
+        )
+        await websocket.send_denial_response(
+            Response(status_code=503, headers=throttle.headers())
+        )
         return
 
     await websocket.accept()
@@ -3459,7 +3551,9 @@ def health_check():
     "spec_version": "0.20.0", "capabilities": int, "opa_enabled": bool,
     "opa_url": str|null, "alerts_enabled": true, "config_push": {"enabled",
     "insecure", "agent_auth", "audit", "tls", "config_at_rest"},
-    "desired_configs": n}`. `spec_version` and `capabilities` are #79's machine-readable
+    "desired_configs": n, "throttle": {"enabled", "max_lag_seconds",
+    "retry_after_seconds", "lag_seconds", "shedding"}}`. `spec_version` and
+    `capabilities` are #79's machine-readable
     answer to "will my agent interoperate?": the version is the spec release this build
     targets (README has the full matrix) and the bitmask is exactly what is advertised
     to agents (#74), so a client never has to guess.
@@ -3467,6 +3561,8 @@ def health_check():
     config push is on despite an unsafe posture and the UI shows a banner.
     `config_at_rest` is `encrypted`, `plaintext` (explicit development opt-out) or
     `unconfigured` (#98): a plaintext config store must never be invisible.
+    `throttle.shedding` is the live overload answer (#78) — when it is true, agent
+    requests are being refused with 503 and the stale-agent reaper is standing down.
     Prometheus metrics are served separately at `GET /metrics`.
     """
     from server.opa_client import OPAClient
@@ -3484,6 +3580,9 @@ def health_check():
         "alerts_enabled": True,
         "config_push": posture.posture(),
         "desired_configs": remote_config.REGISTRY.count(),
+        # #78: the live overload answer, next to the posture it belongs with — both
+        # are "what is this server doing right now", not secrets.
+        "throttle": throttle.status(),
     }
 
 

@@ -374,3 +374,10 @@ certificate or a routing table).
   `password_required: false`, privileged endpoints are unauthenticated — do not
   assume your write succeeded securely just because it returned 200.
 - **UI collectors tip**: when taking screenshots for UI work, start the collector first, wait 5s (ignore initial connection errors), then start the UI.
+- **503 from `/v1/opamp` is load shedding, not a bug** (#78):
+  `OPAMP_THROTTLE_ENABLED=true` makes the server refuse agent messages with
+  `Retry-After` when the event loop is behind (WebSocket: the upgrade is refused the
+  same way). Check `GET /health` → `throttle.shedding` and
+  `lag_seconds`; `/health`, `/metrics` and every admin/CLI call keep working, and the
+  stale-agent reaper stands down meanwhile. Retrying sooner than `Retry-After` is the
+  wrong move — agents already honour it.

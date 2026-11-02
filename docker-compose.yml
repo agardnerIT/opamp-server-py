@@ -93,6 +93,8 @@ services:
       - SERVER_HTTP_SCHEME=http
       - SERVER_ADDRESS=server
       - SERVER_PORT=4320
+      # #46: public release-email Worker. Empty hides the Admin page box.
+      - UPDATE_SUBSCRIBE_URL=${UPDATE_SUBSCRIBE_URL:-}
     volumes:
       # Read-only: the UI imports server-side helpers (reports, manifests, posture)
       # that resolve DATA_DIR. It never writes, and it does **not** read the admin

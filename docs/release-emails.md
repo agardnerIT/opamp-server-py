@@ -20,10 +20,16 @@ the project becomes the data controller for a list of email addresses.
   by default, so the box is hidden).
 - Privacy policy at `/privacy` and a two-step deletion flow at `/delete` are
   implemented; the policy is a draft in `src/privacy.ts`.
+- Resend is configured: verified sending domain, dedicated segment, and a
+  `full_access` key stored as a Worker secret. `/health` reports `resend: true`.
+- End-to-end test passed against a single test address: subscribe → confirmation
+  email → contact in the segment → deletion request → deletion email → segment
+  removal and orphan-contact deletion. The Resend broadcast path is unit-tested
+  but has not yet been fired by a real GitHub release.
 - 38 offline Worker tests pass; CI runs `npm test` and `npm run typecheck`.
-- Still needed: Resend domain/segment/from/key, GitHub webhook secret, a test
-  address, and confirmation of the privacy contact. Turnstile is optional but
-  recommended.
+- Still needed: Turnstile (or a rate-limit rule) before the form is linked from
+  the dashboard, the GitHub webhook secret, and `UPDATE_SUBSCRIBE_URL` in the UI
+  environment.
 
 ---
 

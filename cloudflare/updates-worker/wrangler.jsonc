@@ -14,9 +14,9 @@
   ],
   "vars": {
     "PUBLIC_BASE_URL": "https://opamp-updates.tame-lamp8409.workers.dev",
-    "RESEND_SEGMENT_ID": "",
-    "RESEND_FROM": "",
-    "RESEND_REPLY_TO": "",
+    "RESEND_SEGMENT_ID": "6d1a7513-297e-41e1-bb8c-846f6502ee2b",
+    "RESEND_FROM": "opamp-server-py <updates@opampserver.agardner.net>",
+    "RESEND_REPLY_TO": "privacy@agardner.net",
     "TURNSTILE_SITE_KEY": "",
     "PRIVACY_URL": "",
     "PRIVACY_CONTACT": "privacy@agardner.net",

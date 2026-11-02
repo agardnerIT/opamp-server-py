@@ -728,3 +728,63 @@ class TestConfigCommands:
         data = parse(run("--db", str(offline_db), "agents", "config", "get", "aaaa1111aaaa1111"))
         assert data["effective"]["redacted"] is True or data["effective"]["config"] is not None
         assert "never revealed" in data["note"]
+
+
+class TestRolloutCommands:
+    """#101/#103 layer parity: the rollout surface must be usable from `opampctl`."""
+
+    @pytest.fixture(autouse=True)
+    def push_env(self, monkeypatch):
+        """The full config-push posture: without it every route is a deliberate 404."""
+        from server import crypto
+
+        monkeypatch.setenv("OPAMP_CONFIG_PUSH_ENABLED", "true")
+        monkeypatch.setenv("OPAMP_AGENT_AUTH", "token")
+        monkeypatch.setenv("PUBLIC_URL", "https://opamp.example.com")
+        monkeypatch.setenv("CONFIG_AT_REST_KEY", crypto.generate_key())
+        crypto.reset_key_cache()
+        yield
+        crypto.reset_key_cache()
+
+    def _propose(self, live):
+        import cli.main as cli_main  # noqa: F401
+
+        with __import__("client.opamp_client", fromlist=["OpampClient"]).OpampClient(
+            base_url="http://testserver",
+            transport=InProcessASGITransport(server_app),
+            password=ADMIN_PW,
+        ) as oc:
+            return oc.propose_config(
+                {"": {"body": "extensions: {}\n", "content_type": "text/yaml"}},
+                {"agent_id": "ab" * 16},
+            )["proposal_id"]
+
+    def test_rollout_plan_create_show_and_abort(self, live):
+        proposal_id = self._propose(live)
+        auth = ("--password", ADMIN_PW)
+
+        planned = parse(run(*auth, "config", "rollout", "plan", proposal_id))
+        assert planned["dry_run"] is True
+        assert planned["batches"][0]["agent_ids"] == ["ab" * 16]
+
+        created = parse(run(*auth, "config", "rollout", "create", proposal_id,
+                            "--health-gate", "0"))
+        assert created["status"] == "running"
+        rollout_id = created["rollout_id"]
+
+        listing = parse(run(*auth, "config", "rollouts"))
+        assert listing["count"] == 1
+        shown = parse(run(*auth, "config", "rollout", "show", rollout_id))
+        assert shown["rollout_id"] == rollout_id
+
+        aborted = parse(run(*auth, "config", "rollout", "abort", rollout_id, "--reason", "stop"))
+        assert aborted["status"] == "aborted"
+
+    def test_revalidate_and_restart_commands_exist(self, live):
+        proposal_id = self._propose(live)
+        body = parse(run("--password", ADMIN_PW, "config", "revalidate", proposal_id))
+        assert body["proposal_id"] == proposal_id
+
+        # No such agent: the CLI maps the API's 404 to a structured error.
+        result = run("--password", ADMIN_PW, "agents", "config", "restart", "cd" * 16)
+        assert result.exit_code == 1

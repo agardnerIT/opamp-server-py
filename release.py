@@ -259,6 +259,20 @@ def main():
         print(f"Tag {new_version} already exists!")
         return 1
     
+    # #79: the OpAMP spec this build targets is a release input, not a detail. A new
+    # upstream release can add capability bits (which `tests/test_capabilities.py`
+    # refuses to leave unclassified) and spec-MUST behaviour, so check it every time.
+    print(
+        "\nRelease checklist — before tagging:\n"
+        "  [ ] Check opamp-spec CHANGELOG + releases for a newer version than "
+        "server/protocol.py:SPEC_VERSION\n"
+        "      https://github.com/open-telemetry/opamp-spec/releases\n"
+        "  [ ] If it moved: regenerate the stubs (scripts/generate_proto.sh), "
+        "classify any new capability bits,\n"
+        "      update SPEC_VERSION + the README capability matrix (#79)\n"
+        "  [ ] pytest is green on every supported Python version"
+    )
+
     # Show changelog
     print("\nChanges since last tag:")
     changelog = get_changelog_since_tag(latest_tag)

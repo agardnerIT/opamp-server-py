@@ -887,9 +887,8 @@ class TestEndToEnd:
     """The whole narrative, one test, no sleeps (#107 acceptance criterion).
 
     propose → approve → canary (single agent) → APPLIED → bad revision → FAILED →
-    poisoned → rollback → APPLIED. The rollout *engine* of #101 is not part of this
-    build (see `test_staged_rollout_is_not_part_of_this_build`); the rest of the
-    lifecycle is.
+    poisoned → rollback → APPLIED. The staged rollout engine (#101) is exercised in
+    its own suites; this narrative covers the lifecycle underneath it.
     """
 
     def test_the_safe_narrative(self, client):
@@ -949,13 +948,29 @@ class TestEndToEnd:
             assert expected in actions, (expected, actions)
         assert audit.STORE.verify()["ok"] is True
 
-    def test_staged_rollout_is_not_part_of_this_build(self, client):
-        """#101 (canary/batches/blast-radius caps) is a separate issue and not here.
+    def test_the_staged_rollout_engine_is_part_of_this_build(self, client):
+        """#101/#103 landed: this assertion flipped from absence to presence.
 
-        This test is deliberately an assertion about the *absence*: when #101 lands,
-        it fails, and the rollout-gating suite in this file can be written against
-        the real engine instead of pretending one exists. Canary semantics are
-        covered by single-agent approval until then.
+        It used to assert the rollout engine did *not* exist, precisely so that
+        landing it would break this test rather than leave a stale claim in the
+        security suite. Canary/gate coverage now lives in `tests/test_rollout.py` and
+        the HTTP surface in `tests/test_rollout_api.py`; what matters here is that the
+        engine is real, its routes are gated like every other privileged surface, and
+        an unknown proposal is a 404 rather than a shadow rollout.
         """
-        assert client.post("/config/rollouts", json={}).status_code in (404, 405)
-        assert not hasattr(config_control, "Rollout")
+        from server import rollout as rollout_engine
+
+        assert hasattr(rollout_engine, "create_rollout")
+        assert hasattr(rollout_engine, "batch_gate")
+        unknown = "prop-19700101T000000Z-deadbeef"
+        response = client.post(
+            "/config/rollouts",
+            params={"proposal_id": unknown},
+            json={},
+            headers=admin_headers(),
+        )
+        assert response.status_code == 404, response.text
+        # Gated like the rest of the control plane: no credential, no answer.
+        assert client.post(
+            "/config/rollouts", params={"proposal_id": unknown}, json={}
+        ).status_code in (401, 403)

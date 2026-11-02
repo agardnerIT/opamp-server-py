@@ -161,8 +161,10 @@ class OpampClient:
     def _get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Any:
         return self._request("GET", path, params=params)
 
-    def _post(self, path: str, json: Any = None) -> Any:
-        return self._request("POST", path, json=json)
+    def _post(
+        self, path: str, json: Any = None, params: Optional[Dict[str, Any]] = None
+    ) -> Any:
+        return self._request("POST", path, json=json, params=params)
 
     def _put(self, path: str, json: Any = None) -> Any:
         return self._request("PUT", path, json=json)
@@ -663,6 +665,163 @@ class OpampClient:
         error, so a rollout engine can call this in a loop.
         """
         return self._post(f"/agent/{agent_id}/config/deliver")
+
+    # ------------------------------------------------ staged rollouts (#101/#103)
+
+    def plan_config_rollout(
+        self,
+        proposal_id: str,
+        canary_percent: Optional[float] = None,
+        max_agents_per_batch: Optional[int] = None,
+        max_percent_per_batch: Optional[float] = None,
+        health_gate_seconds: Optional[int] = None,
+        ttl_minutes: Optional[int] = None,
+        restart_after_apply: bool = False,
+    ) -> Dict[str, Any]:
+        """``POST /config/rollouts?proposal_id=…`` with ``dry_run`` — plan, change nothing.
+
+        Returns the exact batches (agent ids included), the canary size and the caps in
+        force, plus the stored validation verdict. Nothing is approved, held or
+        delivered, so this is safe to call in a loop and from an AI agent's "what would
+        happen?" step.
+        """
+        return self.create_config_rollout(
+            proposal_id,
+            dry_run=True,
+            canary_percent=canary_percent,
+            max_agents_per_batch=max_agents_per_batch,
+            max_percent_per_batch=max_percent_per_batch,
+            health_gate_seconds=health_gate_seconds,
+            ttl_minutes=ttl_minutes,
+            restart_after_apply=restart_after_apply,
+        )
+
+    def create_config_rollout(
+        self,
+        proposal_id: str,
+        dry_run: bool = False,
+        note: Optional[str] = None,
+        canary_percent: Optional[float] = None,
+        max_agents_per_batch: Optional[int] = None,
+        max_percent_per_batch: Optional[float] = None,
+        health_gate_seconds: Optional[int] = None,
+        ttl_minutes: Optional[int] = None,
+        restart_after_apply: bool = False,
+        confirm_endpoint_change: bool = False,
+        confirm_scope_change: bool = False,
+        override_reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """``POST /config/rollouts`` — approve **and** stage a proposal (approver).
+
+        Creating a rollout *is* the approval: the proposal is approved, every revision
+        is assigned but held, and only the canary batch is released. The rest of the
+        fleet is promoted one batch per gate pass, so nothing arrives without evidence
+        that the canary came back healthy (#101).
+
+        ``restart_after_apply=True`` queues a restart command (#84) for each agent once
+        its batch passes the gate, which is how "this config needs a restart" stays one
+        action. ``dry_run=True`` is :meth:`plan_config_rollout`.
+        """
+        body: Dict[str, Any] = {"dry_run": bool(dry_run)}
+        if note:
+            body["note"] = note
+        for name, value in (
+            ("canary_percent", canary_percent),
+            ("max_agents_per_batch", max_agents_per_batch),
+            ("max_percent_per_batch", max_percent_per_batch),
+            ("health_gate_seconds", health_gate_seconds),
+            ("ttl_minutes", ttl_minutes),
+        ):
+            if value is not None:
+                body[name] = value
+        if restart_after_apply:
+            body["restart_after_apply"] = True
+        if confirm_endpoint_change:
+            body["confirm_endpoint_change"] = True
+        if confirm_scope_change:
+            body["confirm_scope_change"] = True
+        if override_reason:
+            body["override_reason"] = override_reason
+        return self._post("/config/rollouts", params={"proposal_id": proposal_id}, json=body)
+
+    def revalidate_config(self, proposal_id: str) -> Dict[str, Any]:
+        """``POST /config/revisions/{id}/validate`` — re-run the pipeline, change nothing.
+
+        Read-only: nothing is stored, no pointer moves and no poison is cleared. The
+        pipeline runs against each resolved agent, so the inventory warnings are about
+        the machines an approval would actually reach.
+        """
+        return self._post(f"/config/revisions/{proposal_id}/validate")
+
+    def list_config_rollouts(
+        self, status: Optional[str] = None, limit: int = 100
+    ) -> Dict[str, Any]:
+        """``GET /config/rollouts`` — rollouts newest first, with per-state counts.
+
+        ``status`` is ``pending|running|paused|completed|aborted|cancelled``. Metadata
+        only; never a config body.
+        """
+        params: Dict[str, Any] = {"limit": limit}
+        if status:
+            params["status"] = status
+        return self._get("/config/rollouts", params=params)
+
+    def get_config_rollout(self, rollout_id: str) -> Dict[str, Any]:
+        """``GET /config/rollouts/{id}`` — batch progress, per-agent states, pause reason.
+
+        The per-agent ``state`` is ``pending|delivered|applying|applied|failed|
+        reverted|paused``. A paused rollout carries exactly one ``paused_reason``
+        (``failed``, ``auto_reverted``, ``agent_went_silent``, ``unhealthy``,
+        ``delivery_unconfirmed``, ``superseded``) — and nothing is ever retried
+        automatically.
+        """
+        return self._get(f"/config/rollouts/{rollout_id}")
+
+    def abort_config_rollout(
+        self, rollout_id: str, reason: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """``POST /config/rollouts/{id}/abort`` — stop promoting (operator).
+
+        Does **not** recall configs that were already delivered, because it cannot. It
+        stops the next batch immediately and leaves un-promoted agents held, so an
+        aborted rollout can never widen. Takes effect within one engine tick.
+        """
+        body: Dict[str, Any] = {}
+        if reason:
+            body["reason"] = reason
+        return self._post(f"/config/rollouts/{rollout_id}/abort", json=body)
+
+    def rollback_config_rollout(
+        self,
+        rollout_id: str,
+        note: Optional[str] = None,
+        health_gate_seconds: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """``POST /config/rollouts/{id}/rollback`` — undo this rollout, staged (approver).
+
+        Creates a new revision per agent from the previous one (naming its parent) and
+        runs it as **its own** rollout, canary first and gated. Rolling three hundred
+        agents back at once is a second outage, so this is never automatic.
+        """
+        body: Dict[str, Any] = {}
+        if note:
+            body["note"] = note
+        if health_gate_seconds is not None:
+            body["health_gate_seconds"] = health_gate_seconds
+        return self._post(f"/config/rollouts/{rollout_id}/rollback", json=body)
+
+    def restart_agent(self, agent_id: str, reason: Optional[str] = None) -> Dict[str, Any]:
+        """``POST /agent/{id}/restart`` — queue a restart for the agent's next poll.
+
+        Delivered **exactly once**, and a reply carrying a command carries nothing else
+        (spec rule). Refused with **409** when the agent does not advertise
+        ``AcceptsRestartCommand`` — upstream defaults that to ``false``, so the
+        response's ``detail.hint`` names the flag to enable.
+        """
+        body: Dict[str, Any] = {}
+        if reason:
+            body["reason"] = reason
+        return self._post(f"/agent/{agent_id}/restart", json=body)
 
     def rollback_agent_config(
         self, agent_id: str, note: Optional[str] = None

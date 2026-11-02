@@ -11,7 +11,7 @@ from fastapi import FastAPI, Request, HTTPException, Query, WebSocket, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, JSONResponse
 from starlette.middleware.gzip import GZipMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 from google.protobuf.json_format import MessageToDict
 from loguru import logger
 from typing import Optional, Dict, Any, List, Literal, Tuple
@@ -65,6 +65,7 @@ from server import (
     agent_auth,
     audit,
     auth,
+    commands,
     config_control,
     config_validation,
     crypto,
@@ -1306,6 +1307,26 @@ def _apply_agent_message(
                 PROM_CONFIG_OFFERS.inc()
                 offered = True
 
+        # #84: a queued command replaces the reply for exactly one poll. The spec is
+        # explicit (specification.md:1094): when `command` is set the server sets no
+        # other field besides instance_uid/capabilities, so the config offer above is
+        # dropped for this message and re-offered on the next one — never both.
+        if not disconnected:
+            command = commands.take(agent_id)
+            if command is not None:
+                command_response = ServerToAgent()
+                command_response.instance_uid = response.instance_uid
+                command_response.capabilities = response.capabilities
+                command_response.command.CopyFrom(command)
+                tracing.set_span_attributes(
+                    sp, **{"reply.command": command.type, "reply.remote_config_offered": False}
+                )
+                return ProcessedMessage(
+                    command_response.SerializeToString(),
+                    instance_uid=effective_uid,
+                    disconnected=False,
+                )
+
         # Last line of defence for #81/#102: nothing may put remote_config on the
         # wire while the posture says config push is not allowed.
         posture.scrub_remote_config(response)
@@ -2208,6 +2229,56 @@ class RollbackRequest(BaseModel):
     note: Optional[str] = None
 
 
+class RestartRequest(BaseModel):
+    """Body for `POST /agent/{id}/restart` (#84)."""
+
+    reason: Optional[str] = None
+
+
+class RolloutRequest(BaseModel):
+    """Body for `POST /config/rollouts` and `/config/revisions/{id}/apply` (#103).
+
+    `extra="forbid"` on purpose: this repo is driven by AI agents and a mistyped
+    `max_batch` that silently does nothing is a blast-radius bug, not a typo.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # `dry_run` is the default posture of every other control-plane surface: plan and
+    # validate, change nothing. Creating a rollout is what an approver does after
+    # reading the plan.
+    dry_run: bool = False
+    note: Optional[str] = None
+    canary_percent: Optional[float] = Field(None, ge=0, le=100)
+    max_agents_per_batch: Optional[int] = Field(None, ge=1)
+    max_percent_per_batch: Optional[float] = Field(None, ge=0, le=100)
+    health_gate_seconds: Optional[int] = Field(None, ge=0)
+    ttl_minutes: Optional[int] = Field(None, ge=0)
+    # #84: queue a restart for each agent once its batch passes the gate, so "push a
+    # config that needs a restart" is one action instead of two steps in the right order.
+    restart_after_apply: bool = False
+    confirm_endpoint_change: bool = False
+    confirm_scope_change: bool = False
+    override_reason: Optional[str] = None
+
+
+class RolloutAbortRequest(BaseModel):
+    """Body for `POST /config/rollouts/{id}/abort`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: Optional[str] = None
+
+
+class RolloutRollbackRequest(BaseModel):
+    """Body for `POST /config/rollouts/{id}/rollback`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    note: Optional[str] = None
+    health_gate_seconds: Optional[int] = Field(None, ge=0)
+
+
 def _desired_view(agent_id: str, reveal: bool = False) -> Optional[Dict[str, Any]]:
     """API-shaped view of an agent's desired config (#81), redacted unless revealed (#98)."""
     record = remote_config.REGISTRY.get(agent_id)
@@ -2242,6 +2313,10 @@ def _desired_view(agent_id: str, reveal: bool = False) -> Optional[Dict[str, Any
         "failure_detail": record.get("failure_detail"),
         # #99 lifecycle: only an `active`, unpoisoned revision is deliverable.
         "status": record.get("status"),
+        # #101: assigned by an approval, still held by a staged rollout. `assignment`
+        # (below) reports the derived delivery state; this is the one fact that
+        # explains "why has my agent not received an approved config?".
+        "held": bool(record.get("held")),
         "proposal_id": record.get("proposal_id"),
         "approved_by": record.get("approved_by"),
         "approved_at": record.get("approved_at"),
@@ -3179,9 +3254,13 @@ def health_check():
     """Liveness/readiness probe: server status, agent count, OPA availability, posture.
 
     Unauthenticated. Returns `{"status": "healthy", "agents_connected": n,
-    "opa_enabled": bool, "opa_url": str|null, "alerts_enabled": true,
-    "config_push": {"enabled", "insecure", "agent_auth", "audit", "tls",
-    "config_at_rest"}, "desired_configs": n}`.
+    "spec_version": "0.20.0", "capabilities": int, "opa_enabled": bool,
+    "opa_url": str|null, "alerts_enabled": true, "config_push": {"enabled",
+    "insecure", "agent_auth", "audit", "tls", "config_at_rest"},
+    "desired_configs": n}`. `spec_version` and `capabilities` are #79's machine-readable
+    answer to "will my agent interoperate?": the version is the spec release this build
+    targets (README has the full matrix) and the bitmask is exactly what is advertised
+    to agents (#74), so a client never has to guess.
     The `config_push` block is the public posture summary — `insecure: true` means
     config push is on despite an unsafe posture and the UI shows a banner.
     `config_at_rest` is `encrypted`, `plaintext` (explicit development opt-out) or
@@ -3193,12 +3272,389 @@ def health_check():
     opa_available = OPA_ENABLED and opa_client.is_available()
     return {
         "status": "healthy",
+        # #79: machine-readable, next to the other capability flags, so `opampctl`,
+        # the MCP server and the UI can display it without hardcoding a version.
+        "spec_version": protocol.SPEC_VERSION,
+        "capabilities": remote_config.server_capabilities(),
         "agents_connected": AGENT_REGISTRY.count,
         "opa_enabled": opa_available,
         "opa_url": OPA_URL if OPA_ENABLED else None,
         "alerts_enabled": True,
         "config_push": posture.posture(),
         "desired_configs": remote_config.REGISTRY.count(),
+    }
+
+
+@app.post(
+    "/agent/{agent_id}/restart",
+    tags=["agents"],
+    summary="Ask an agent to restart on its next poll (operator)",
+)
+def restart_agent(
+    agent_id: str,
+    body: RestartRequest,
+    request: Request,
+    _audit=Depends(require_audit("agent.restart")),
+):
+    """Queue a `ServerToAgentCommand{Restart}` for the agent's next message. Requires `operator`.
+
+    Not gated by the config-push posture: a restart is not a config change, and the
+    operator who is allowed to deliver a config must be able to make it take effect
+    (#84).
+
+    **HTTP has no server push**, so the command rides the agent's next poll and is
+    delivered **exactly once** — the queue entry is cleared before the reply is built,
+    because a restart command re-delivered on every poll is a crash loop. A reply that
+    carries a command carries nothing else (the spec's own rule), so a config offer due
+    in the same reply waits for the next poll.
+
+    Refused with **409** when the agent does not advertise
+    `AcceptsRestartCommand` (upstream defaults `accepts_restart_command` to `false`, so
+    this is the common case) — a silent no-op would look like "the button is broken".
+    `404` when the agent is unknown or `OPAMP_RESTART_COMMAND_ENABLED=false`.
+
+    Audited as `agent.restart` **before** the command is queued (pre-write, #97); the
+    agent view then reports `pending_command` and `command_delivered_at`.
+    """
+    principal = require_roles(request, ROLE_OPERATOR)
+    try:
+        agent_id = remote_config.normalize_agent_id(agent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    try:
+        record = commands.request_restart(
+            agent_id, principal=principal, reason=body.reason
+        )
+    except commands.CommandError as exc:
+        audit_action(
+            principal,
+            "agent.restart",
+            target_kind="agent",
+            target_id=agent_id,
+            reason=body.reason,
+            error=str(exc.detail),
+            result="error",
+        )
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+    audit_action(
+        principal,
+        "agent.restart",
+        target_kind="agent",
+        target_id=agent_id,
+        reason=body.reason,
+    )
+    state = AGENT_REGISTRY.get(agent_id)
+    return {
+        "agent_id": agent_id,
+        "queued": True,
+        "command": record,
+        "capabilities": int(getattr(state, "capabilities", 0) or 0),
+        "delivery": {
+            "state": "queued",
+            "channel": "reply",
+            "detail": (
+                "delivered on the agent's next message; a reply carrying a command "
+                "carries nothing else"
+            ),
+        },
+    }
+
+
+@app.post(
+    "/config/rollouts",
+    tags=["config"],
+    summary="Create (approve + stage) or dry-run a rollout (approver)",
+)
+def create_config_rollout(
+    body: RolloutRequest,
+    proposal_id: str = Query(..., description="The proposal to roll out"),
+    request: Request = None,
+    _gate=Depends(posture.config_push_gate),
+    _audit=Depends(require_audit("config.rollout.create")),
+):
+    """Approve a proposal and promote it in gated batches. Requires `approver`.
+
+    **Creating a rollout is the approval.** The proposal is approved, every revision is
+    assigned but *held*, and only the canary batch is released — so nothing is
+    delivered to the rest of the fleet until the gate has cleared, which is the point
+    of #101. `health_gate_seconds`, `canary_percent`, `max_agents_per_batch`,
+    `max_percent_per_batch` and `ttl_minutes` default to the `CONFIG_PUSH_*` settings
+    and are recorded on the rollout so the plan is explainable afterwards.
+
+    `restart_after_apply: true` queues a `ServerToAgentCommand{Restart}` for each agent
+    once its batch passes the gate (#84), for a config that only takes effect on a
+    restart.
+
+    **`dry_run: true`** returns the exact batch plan, the caps in force and the stored
+    validation verdict, and changes nothing: it does not approve, hold or deliver. It
+    is a **200**, not a preview of future state, so a UI can show it before the approver
+    clicks.
+
+    Errors: **404** config push is disabled (#96) or the proposal is unknown; **409** the
+    proposal was already decided, or re-validation at approval failed (`detail` carries
+    the findings); **422** a bad parameter (extra fields are rejected, `extra="forbid"`).
+    """
+    principal = require_roles(request, ROLE_APPROVER)
+    try:
+        info = config_control.summary(proposal_id)
+    except config_control.ConfigControlError as exc:
+        raise _control_error(exc)
+
+    if body.dry_run:
+        try:
+            return rollout.preview_rollout(
+                proposal_id,
+                canary_percent_value=body.canary_percent,
+                max_agents_per_batch_value=body.max_agents_per_batch,
+                max_percent_per_batch_value=body.max_percent_per_batch,
+                gate_seconds=body.health_gate_seconds,
+                ttl_minutes_value=body.ttl_minutes,
+                restart_after_apply=body.restart_after_apply,
+            )
+        except rollout.RolloutError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+    audit_action(
+        principal,
+        "config.rollout.create",
+        target_kind="proposal",
+        target_id=proposal_id,
+        config_hash=info["config_hash"],
+        agent_count=len(info["agents"]),
+        canary_percent=body.canary_percent,
+        max_agents_per_batch=body.max_agents_per_batch,
+        restart_after_apply=body.restart_after_apply,
+        confirm_endpoint_change=body.confirm_endpoint_change,
+        confirm_scope_change=body.confirm_scope_change,
+        override_reason=body.override_reason,
+        note=body.note,
+    )
+    try:
+        return rollout.create_rollout(
+            proposal_id,
+            approver=principal.name,
+            agents=AGENT_REGISTRY.list_all(),
+            note=body.note,
+            canary_percent_value=body.canary_percent,
+            max_agents_per_batch_value=body.max_agents_per_batch,
+            max_percent_per_batch_value=body.max_percent_per_batch,
+            gate_seconds=body.health_gate_seconds,
+            ttl_minutes_value=body.ttl_minutes,
+            allow_endpoint_change_confirmed=body.confirm_endpoint_change,
+            confirm_scope_change=body.confirm_scope_change,
+            override_reason=body.override_reason,
+            restart_after_apply=body.restart_after_apply,
+        )
+    except (rollout.RolloutError, config_control.ConfigControlError) as exc:
+        audit_action(
+            principal,
+            "config.rollout.create",
+            target_kind="proposal",
+            target_id=proposal_id,
+            config_hash=info["config_hash"],
+            result="error",
+            error=str(getattr(exc, "detail", exc))[:500],
+        )
+        raise HTTPException(
+            status_code=getattr(exc, "status_code", 409),
+            detail=getattr(exc, "detail", str(exc)),
+        )
+
+
+@app.post(
+    "/config/revisions/{proposal_id}/apply",
+    tags=["config"],
+    summary="Apply an approved proposal as a staged rollout (approver)",
+)
+def apply_config_revision(
+    proposal_id: str,
+    body: RolloutRequest,
+    request: Request,
+    _gate=Depends(posture.config_push_gate),
+    _audit=Depends(require_audit("config.rollout.create")),
+):
+    """Start a rollout for a proposal. Requires `approver`. Same contract as `POST /config/rollouts`.
+
+    Kept as its own path because "apply" is the verb in the issue's flow
+    (propose → approve → apply) and because it reads correctly from a CLI
+    (`opampctl config apply prop-…`). It creates the rollout, which *is* the approval;
+    `dry_run: true` plans without approving.
+    """
+    return create_config_rollout(body, proposal_id, request, _gate, _audit)
+
+
+@app.get(
+    "/config/rollouts",
+    tags=["config"],
+    summary="List staged rollouts (viewer)",
+)
+def list_config_rollouts(
+    request: Request,
+    status: Optional[str] = Query(
+        None, description="pending|running|paused|completed|aborted|cancelled"
+    ),
+    limit: int = Query(100, ge=1, le=1000),
+):
+    """Rollout listings, newest first, with per-state agent counts. Requires `viewer`.
+
+    Metadata only — no config bodies (D8). `states` is the rollup an operator reads:
+    how many agents are pending, delivered, applied, failed, reverted or paused.
+    """
+    require_roles(request, ROLE_VIEWER)
+    try:
+        return rollout.list_rollouts(status=status, limit=limit)
+    except rollout.RolloutError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+@app.get(
+    "/config/rollouts/{rollout_id}",
+    tags=["config"],
+    summary="One rollout: batch progress, per-agent state, pause reason (viewer)",
+)
+def get_config_rollout(rollout_id: str, request: Request):
+    """Batch-by-batch rollout detail, including **why** it paused. Requires `viewer`.
+
+    The three questions this answers: which batch is in flight, what state every agent
+    is in (`pending|delivered|applying|applied|failed|reverted|paused`), and — when it
+    is paused — the single reason (`failed`, `auto_reverted`, `agent_went_silent`,
+    `unhealthy`, `delivery_unconfirmed`, `superseded`) plus the operator-facing summary
+    "N applied, K failed, paused at batch 2". Bodies are never included.
+    """
+    require_roles(request, ROLE_VIEWER)
+    try:
+        return rollout.view(rollout_id)
+    except rollout.RolloutError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+@app.post(
+    "/config/rollouts/{rollout_id}/abort",
+    tags=["config"],
+    summary="Stop promoting a rollout (operator)",
+)
+def abort_config_rollout(
+    rollout_id: str,
+    body: RolloutAbortRequest,
+    request: Request,
+    _audit=Depends(require_audit("config.rollout.abort")),
+):
+    """Stop promotion immediately. Requires `operator` — stopping is never privileged.
+
+    **It does not recall already-delivered configs** and it cannot: the config is on the
+    agent and the agent is running it. What it guarantees is that no further batch is
+    released, and that every un-promoted agent stays **held**, so an aborted rollout can
+    never widen. Applied agents are left untouched; rolling them back is
+    `POST /config/rollouts/{id}/rollback`, a separate gated decision.
+
+    Takes effect within one engine tick (`CONFIG_PUSH_TICK_SECONDS`, default 5). The
+    transition is audited by the engine itself; this route only preflights the log
+    (`require_audit` writes nothing), so there is exactly one row per abort.
+    """
+    principal = require_roles(request, ROLE_OPERATOR)
+    try:
+        return rollout.abort(rollout_id, principal=principal, reason=body.reason)
+    except rollout.RolloutError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+@app.post(
+    "/config/rollouts/{rollout_id}/rollback",
+    tags=["config"],
+    summary="Roll back the agents a rollout applied, as its own gated rollout (approver)",
+)
+def rollback_config_rollout(
+    rollout_id: str,
+    body: RolloutRollbackRequest,
+    request: Request,
+    _gate=Depends(posture.config_push_gate),
+    _audit=Depends(require_audit("config.rollout.rollback")),
+):
+    """Roll back everything this rollout applied, canary first and gated. Requires `approver`.
+
+    A **new** revision per agent whose body is the previous one and which names its
+    parent (D4), then the same staged treatment as any rollout — because rolling back
+    three hundred agents at once is a second outage. This is deliberately *not* an
+    automatic reaction to a failure: a pause leaves the decision to a human.
+
+    **409** when nothing in the rollout was applied (nothing to roll back), when it is
+    already a rollback (roll forward with a new proposal), or when the previous revisions
+    no longer validate; **409** as well when a target has no previous revision.
+    """
+    principal = require_roles(request, ROLE_APPROVER)
+    try:
+        info = rollout.summary(rollout_id)
+    except rollout.RolloutError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    audit_action(
+        principal,
+        "config.rollout.rollback",
+        target_kind="rollout",
+        target_id=rollout_id,
+        config_hash=info.get("config_hash"),
+        proposal_id=info.get("proposal_id"),
+        note=body.note,
+    )
+    try:
+        return rollout.create_rollback_rollout(
+            rollout_id,
+            approver=principal.name,
+            agents=AGENT_REGISTRY.list_all(),
+            note=body.note,
+            gate_seconds=body.health_gate_seconds,
+        )
+    except rollout.RolloutError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+@app.post(
+    "/config/revisions/{proposal_id}/validate",
+    tags=["config"],
+    summary="Re-run validation for a proposal without changing it (operator)",
+)
+def revalidate_config_revision(proposal_id: str, request: Request):
+    """Re-run the validation pipeline for a proposal's targets. Requires `operator`.
+
+    Read-only — it stores nothing, moves no pointer and clears no poison — because the
+    question "does this still pass?" must be free to ask before committing to an
+    approval. The pipeline is re-run against **each resolved agent**, so the inventory
+    warnings are about the machines this would actually reach (#100). A policy
+    violation is reported, not raised: an approver decides, and the override is
+    recorded at approval time.
+    """
+    require_roles(request, ROLE_OPERATOR)
+    try:
+        proposal = config_control.proposal_view(proposal_id)
+    except config_control.ConfigControlError as exc:
+        raise _control_error(exc)
+    agent_ids = sorted({row["agent_id"] for row in proposal["revisions"]})
+    by_id = {agent.agent_id: agent for agent in AGENT_REGISTRY.list_all()}
+    config_map = None
+    for row in proposal["revisions"]:
+        config_map = remote_config.REGISTRY.decode_revision(row["revision_id"])
+        if config_map is not None:
+            break
+    if config_map is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": f"proposal {proposal_id} has no readable revision body",
+                "hint": "retention may have pruned it, or CONFIG_AT_REST_KEY changed",
+            },
+        )
+    verdict = config_control.validate_for_targets(
+        config_map, agents=[by_id[agent_id] for agent_id in agent_ids if agent_id in by_id]
+    )
+    return {
+        "proposal_id": proposal_id,
+        "config_hash": proposal.get("config_hash"),
+        "agents": len(agent_ids),
+        "ok": verdict.ok,
+        "verdict": verdict.to_dict(),
+        "fingerprint": verdict.fingerprint(),
+        "stored": (proposal["revisions"][0] or {}).get("verdict") or None,
     }
 
 

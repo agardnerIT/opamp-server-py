@@ -77,7 +77,9 @@ class SQLiteAgentStore:
                     updated_at TEXT,
                     last_remote_config_hash TEXT,
                     remote_config_error TEXT,
-                    last_sequence_num INTEGER
+                    last_sequence_num INTEGER,
+                    pending_command TEXT,
+                    command_delivered_at TEXT
                 )
             """)
 
@@ -96,6 +98,12 @@ class SQLiteAgentStore:
             # sequence_num, so it has to survive a restart. NULL = no baseline yet.
             if "last_sequence_num" not in columns:
                 conn.execute("ALTER TABLE agents ADD COLUMN last_sequence_num INTEGER")
+            # #84: a queued server->agent command must survive a restart, because HTTP
+            # has no server push — the command is delivered on the agent's next poll.
+            if "pending_command" not in columns:
+                conn.execute("ALTER TABLE agents ADD COLUMN pending_command TEXT")
+            if "command_delivered_at" not in columns:
+                conn.execute("ALTER TABLE agents ADD COLUMN command_delivered_at TEXT")
 
     def load_all(self) -> Dict[str, "AgentState"]:
         agents = {}
@@ -112,8 +120,9 @@ class SQLiteAgentStore:
                                    healthy, capabilities, description, effective_config,
                                    remote_config_status, package_statuses, available_components,
                                    health, compliance, updated_at, last_remote_config_hash,
-                                   remote_config_error, last_sequence_num)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                   remote_config_error, last_sequence_num, pending_command,
+                                   command_delivered_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(agent_id) DO UPDATE SET
                     last_heartbeat=excluded.last_heartbeat,
                     healthy=excluded.healthy,
@@ -128,7 +137,9 @@ class SQLiteAgentStore:
                     updated_at=excluded.updated_at,
                     last_remote_config_hash=excluded.last_remote_config_hash,
                     remote_config_error=excluded.remote_config_error,
-                    last_sequence_num=excluded.last_sequence_num
+                    last_sequence_num=excluded.last_sequence_num,
+                    pending_command=excluded.pending_command,
+                    command_delivered_at=excluded.command_delivered_at
                 WHERE excluded.updated_at > agents.updated_at
             """, self._state_to_row(state))
 
@@ -155,6 +166,8 @@ class SQLiteAgentStore:
             state.last_remote_config_hash,
             state.remote_config_error,
             state.last_sequence_num,
+            json.dumps(state.pending_command) if state.pending_command else None,
+            state.command_delivered_at,
         )
 
     @staticmethod
@@ -200,6 +213,10 @@ class SQLiteAgentStore:
             last_remote_config_hash=_optional_column(row, "last_remote_config_hash"),
             remote_config_error=_optional_column(row, "remote_config_error"),
             last_sequence_num=_optional_column(row, "last_sequence_num"),
+            pending_command=(
+                json.loads(_optional_column(row, "pending_command") or "null")
+            ),
+            command_delivered_at=_optional_column(row, "command_delivered_at"),
             sealed_effective_config=sealed if config_error else None,
             config_error=config_error,
         )
@@ -1280,6 +1297,13 @@ class SQLiteRolloutStore:
         "paused",
     )
 
+    # Columns added after the first release (ALTER TABLE is the migration).
+    _ROLLOUT_COLUMNS = {
+        # #84: "push a config then restart it" is one operator action, so a rollout
+        # can queue a restart command for each batch once its gate opens.
+        "restart_after_apply": "INTEGER NOT NULL DEFAULT 0",
+    }
+
     # Editable rollout columns. Fixed set: a caller cannot rewrite `created_at` or the
     # recorded batch plan, which is what makes a rollout reproducible in tests.
     _ROLLOUT_FIELDS = {
@@ -1329,7 +1353,8 @@ class SQLiteRolloutStore:
                     paused_at TEXT,
                     completed_at TEXT,
                     cancelled_at TEXT,
-                    detail_json TEXT
+                    detail_json TEXT,
+                    restart_after_apply INTEGER NOT NULL DEFAULT 0
                 )
             """)
             conn.execute("""
@@ -1348,6 +1373,18 @@ class SQLiteRolloutStore:
                     PRIMARY KEY (rollout_id, agent_id)
                 )
             """)
+            # Columns added after #101's first release (the rollout table is the
+            # youngest one in the schema, so it gets the same in-place migration the
+            # older tables use rather than a version table).
+            existing = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(config_rollouts)").fetchall()
+            }
+            for name, declaration in self._ROLLOUT_COLUMNS.items():
+                if name not in existing:
+                    conn.execute(
+                        f"ALTER TABLE config_rollouts ADD COLUMN {name} {declaration}"
+                    )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS config_rollouts_status_idx "
                 "ON config_rollouts(status, created_at)"
@@ -2005,6 +2042,12 @@ class AgentState:
     # #70: the last `AgentToServer.sequence_num` we accepted, so the next one can be
     # checked for "exactly one greater". None = no baseline yet (see sequence.is_gap).
     last_sequence_num: Optional[int] = None
+    # #84: a server->agent command waiting to ride the agent's next poll. Persisted,
+    # because HTTP has no push and a restart command lost on reboot is a silent no-op.
+    # Cleared the moment it is delivered: re-delivering a restart every poll is a
+    # crash loop.
+    pending_command: Optional[Dict[str, Any]] = None
+    command_delivered_at: Optional[str] = None
     # #98: the sealed body this row was loaded from, kept only when it could not be
     # opened with the keys this process has (see SQLiteAgentStore._sealed_...).
     sealed_effective_config: Optional[str] = field(default=None, repr=False)
@@ -2282,6 +2325,11 @@ class AgentState:
             # #70: exposed so "why did the server ask for full state?" is answerable
             # from the API instead of only from a log line.
             "last_sequence_num": self.last_sequence_num,
+            # #84: "restart pending / delivered" is an operator question, so it is
+            # answered by the agent view rather than only by a log line. `None` in both
+            # fields means no command was ever queued.
+            "pending_command": self.pending_command,
+            "command_delivered_at": self.command_delivered_at,
             "package_statuses": self.package_statuses,
             "available_components": self.available_components,
             "components": self.components,

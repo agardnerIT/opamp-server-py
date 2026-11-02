@@ -10,6 +10,7 @@ from proto import opamp_pb2
 from server.framing import decode_message, encode_message
 from server.main import app
 from server.state import AGENT_REGISTRY
+from tests.uids import uid
 from server.ws import (
     CLOSE_MESSAGE_TOO_BIG,
     CLOSE_POLICY_VIOLATION,
@@ -137,8 +138,8 @@ class TestOriginCheck:
     def test_restrictive_cors_still_allows_agent_without_origin(self, client, ws_on, monkeypatch):
         monkeypatch.setattr("server.main.CORS_ORIGINS", ["https://ui.example"])
         with client.websocket_connect("/v1/opamp") as ws:
-            ws.send_bytes(frame(agent_message(b"ws-noorigin-001")))
-            assert recv(ws).instance_uid == b"ws-noorigin-001"
+            ws.send_bytes(frame(agent_message(uid("ws-no-origin"))))
+            assert recv(ws).instance_uid == uid("ws-no-origin")
 
 
 class TestOutboundQueue:
@@ -164,17 +165,17 @@ class TestHandshake:
 
     def test_enabled_accepts(self, client, ws_on):
         with client.websocket_connect("/v1/opamp") as ws:
-            ws.send_bytes(frame(agent_message(b"ws-accept-0001")))
-            assert recv(ws).instance_uid == b"ws-accept-0001"
+            ws.send_bytes(frame(agent_message(uid("ws-accept"))))
+            assert recv(ws).instance_uid == uid("ws-accept")
 
 
 class TestStatusReporting:
     def test_first_message_registers_and_requests_full_state(self, client, ws_on):
         with client.websocket_connect("/v1/opamp") as ws:
-            ws.send_bytes(frame(agent_message(b"ws-first-000001")))
+            ws.send_bytes(frame(agent_message(uid("ws-first"))))
             response = recv(ws)
 
-        assert response.instance_uid == b"ws-first-000001"
+        assert response.instance_uid == uid("ws-first")
         assert response.flags & opamp_pb2.ServerToAgentFlags.ServerToAgentFlags_ReportFullState
         agents = client.get("/agents").json()
         assert agents["count"] == 1
@@ -182,27 +183,27 @@ class TestStatusReporting:
 
     def test_multiplexes_two_agents_on_one_socket(self, client, ws_on):
         with client.websocket_connect("/v1/opamp") as ws:
-            ws.send_bytes(frame(agent_message(b"ws-mux-00000001")))
+            ws.send_bytes(frame(agent_message(uid("ws-mux-a"))))
             first = recv(ws)
-            ws.send_bytes(frame(agent_message(b"ws-mux-00000002", healthy=False)))
+            ws.send_bytes(frame(agent_message(uid("ws-mux-b"), healthy=False)))
             second = recv(ws)
 
-        assert first.instance_uid == b"ws-mux-00000001"
-        assert second.instance_uid == b"ws-mux-00000002"
-        assert REGISTRY.connection_for(b"ws-mux-00000001") == REGISTRY.connection_for(
-            b"ws-mux-00000002"
+        assert first.instance_uid == uid("ws-mux-a")
+        assert second.instance_uid == uid("ws-mux-b")
+        assert REGISTRY.connection_for(uid("ws-mux-a")) == REGISTRY.connection_for(
+            uid("ws-mux-b")
         )
         assert client.get("/agents").json()["count"] == 2
 
     def test_agent_disconnect_removes_and_unbinds(self, client, ws_on):
         with client.websocket_connect("/v1/opamp") as ws:
-            ws.send_bytes(frame(agent_message(b"ws-disc-0000001")))
+            ws.send_bytes(frame(agent_message(uid("ws-disconnect"))))
             recv(ws)
-            ws.send_bytes(frame(agent_message(b"ws-disc-0000001", disconnect=True)))
+            ws.send_bytes(frame(agent_message(uid("ws-disconnect"), disconnect=True)))
             recv(ws)
 
         assert client.get("/agents").json()["count"] == 0
-        assert REGISTRY.connection_for(b"ws-disc-0000001") is None
+        assert REGISTRY.connection_for(uid("ws-disconnect")) is None
 
 
 class TestMalformedFrames:
@@ -228,7 +229,7 @@ class TestMalformedFrames:
         assert exc.value.code == CLOSE_PROTOCOL_ERROR
 
     def test_oversize_closes_1009(self, client, ws_on, monkeypatch):
-        oversized = frame(agent_message(b"ws-big-000000001"))
+        oversized = frame(agent_message(uid("ws-big")))
         monkeypatch.setenv("OPAMP_MAX_MESSAGE_BYTES", "16")
         with client.websocket_connect("/v1/opamp") as ws:
             ws.send_bytes(oversized)
@@ -242,8 +243,8 @@ class TestTransportParity:
 
     @pytest.mark.parametrize("transport", ["http", "ws"])
     def test_first_report_status_is_applied(self, client, ws_on, transport):
-        uid = f"parity-{transport}-01".encode()
-        payload = agent_message(uid, healthy=True).SerializeToString()
+        agent_uid = uid(f"ws-parity-{transport}")
+        payload = agent_message(agent_uid, healthy=True).SerializeToString()
 
         if transport == "http":
             response = client.post(
@@ -257,23 +258,23 @@ class TestTransportParity:
                 ws.send_bytes(encode_message(payload))
                 recv(ws)
 
-        agent = client.get(f"/agent/{uid.hex()}").json()
+        agent = client.get(f"/agent/{agent_uid.hex()}").json()
         assert agent["healthy"] is True
 
     @pytest.mark.parametrize("transport", ["http", "ws"])
     def test_disconnect_removes_agent(self, client, ws_on, transport):
-        uid = f"parity-disc-{transport}".encode()
+        agent_uid = uid(f"ws-parity-disconnect-{transport}")
         if transport == "http":
-            client.post("/v1/opamp", content=agent_message(uid).SerializeToString())
+            client.post("/v1/opamp", content=agent_message(agent_uid).SerializeToString())
             client.post(
                 "/v1/opamp",
-                content=agent_message(uid, disconnect=True).SerializeToString(),
+                content=agent_message(agent_uid, disconnect=True).SerializeToString(),
             )
         else:
             with client.websocket_connect("/v1/opamp") as ws:
-                ws.send_bytes(frame(agent_message(uid)))
+                ws.send_bytes(frame(agent_message(agent_uid)))
                 recv(ws)
-                ws.send_bytes(frame(agent_message(uid, disconnect=True)))
+                ws.send_bytes(frame(agent_message(agent_uid, disconnect=True)))
                 recv(ws)
 
         assert client.get("/agents").json()["count"] == 0

@@ -18,6 +18,7 @@ from unittest.mock import Mock
 from proto import opamp_pb2
 from server import main
 from server.state import AgentRegistry, SQLiteAgentStore
+from tests.uids import uid
 
 
 class CountingStore:
@@ -63,7 +64,7 @@ def full_report(healthy=True, version="1.0.0"):
             "packageStatuses": {"packages": {"collector": {"name": "collector", "agentHasVersion": version}}},
             "remoteConfigStatus": {"status": "RemoteConfigStatuses_APPLIED"},
         },
-        opamp_pb2.AgentToServer(instance_uid=b"write-batching-0001"),
+        opamp_pb2.AgentToServer(instance_uid=uid("write-batching")),
     )
 
 

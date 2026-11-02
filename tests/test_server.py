@@ -2,6 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 from server.main import app
 from server.state import AGENT_REGISTRY
+from tests.uids import uid
 
 
 @pytest.fixture
@@ -64,7 +65,7 @@ class TestOpAMPEndpoint:
         from proto import opamp_pb2
         
         msg = opamp_pb2.AgentToServer()
-        msg.instance_uid = b"test_opamp_00123456"
+        msg.instance_uid = uid("valid-agent")
         msg.capabilities = opamp_pb2.AgentCapabilities.AgentCapabilities_ReportsStatus
         
         response = client.post(
@@ -78,14 +79,14 @@ class TestOpAMPEndpoint:
         
         server_msg = opamp_pb2.ServerToAgent()
         server_msg.ParseFromString(response.content)
-        assert server_msg.instance_uid == b"test_opamp_00123456"
+        assert server_msg.instance_uid == uid("valid-agent")
         assert server_msg.capabilities > 0
 
     def test_agent_heartbeat(self, client):
         from proto import opamp_pb2
         
         msg = opamp_pb2.AgentToServer()
-        msg.instance_uid = b"test_heartbeat_12345678"
+        msg.instance_uid = uid("heartbeat")
         msg.capabilities = opamp_pb2.AgentCapabilities.AgentCapabilities_ReportsStatus
         msg.health.healthy = True
         
@@ -104,7 +105,7 @@ class TestOpAMPEndpoint:
         from proto import opamp_pb2
         
         msg = opamp_pb2.AgentToServer()
-        msg.instance_uid = b"test_caps_tags_12345678"
+        msg.instance_uid = uid("caps-tags")
         msg.capabilities = opamp_pb2.AgentCapabilities.AgentCapabilities_ReportsStatus
         
         response = client.post(
@@ -123,7 +124,7 @@ class TestOpAMPEndpoint:
         from proto import opamp_pb2
         
         msg = opamp_pb2.AgentToServer()
-        msg.instance_uid = b"test_detail_caps_87654321"
+        msg.instance_uid = uid("detail-caps")
         msg.capabilities = opamp_pb2.AgentCapabilities.AgentCapabilities_ReportsStatus
         
         response = client.post(
@@ -144,7 +145,7 @@ class TestOpAMPEndpoint:
         from proto import opamp_pb2
         
         msg = opamp_pb2.AgentToServer()
-        msg.instance_uid = b"test_comps_11111111"
+        msg.instance_uid = uid("components-a")
         msg.capabilities = opamp_pb2.AgentCapabilities.AgentCapabilities_ReportsAvailableComponents
         
         response = client.post(
@@ -162,7 +163,7 @@ class TestOpAMPEndpoint:
         from proto import opamp_pb2
         
         msg = opamp_pb2.AgentToServer()
-        msg.instance_uid = b"test_comps_22222222"
+        msg.instance_uid = uid("components-b")
         msg.capabilities = opamp_pb2.AgentCapabilities.AgentCapabilities_ReportsAvailableComponents
         
         response = client.post(

@@ -36,6 +36,8 @@ SERVER_HTTP_SCHEME = os.environ.get("SERVER_HTTP_SCHEME", "http")
 SERVER_ADDRESS = os.environ.get("SERVER_ADDRESS", "localhost")
 SERVER_PORT = os.environ.get("SERVER_PORT", "4320")
 SERVER_URL = f"{SERVER_HTTP_SCHEME}://{SERVER_ADDRESS}:{SERVER_PORT}"
+# #46: public URL of the release-email Worker. Empty hides the signup box.
+UPDATE_SUBSCRIBE_URL = (os.environ.get("UPDATE_SUBSCRIBE_URL") or "").strip()
 
 
 def get_server_url():

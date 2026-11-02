@@ -1,0 +1,14 @@
+# Local development. Copy to `.dev.vars`; never commit `.dev.vars`.
+#
+# Set only what you are testing. With no Resend values the form still renders
+# and `/health` reports `configured.resend: false`; `/subscribe` returns 503.
+RESEND_API_KEY=
+RESEND_SEGMENT_ID=
+RESEND_FROM="opamp-server-py <updates@example.com>"
+RESEND_REPLY_TO=
+GITHUB_WEBHOOK_SECRET=
+TURNSTILE_SITE_KEY=
+TURNSTILE_SECRET=
+PUBLIC_BASE_URL=http://localhost:8787
+PRIVACY_URL=
+DASHBOARD_URL=http://localhost:8501

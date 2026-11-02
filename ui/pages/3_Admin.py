@@ -2,6 +2,7 @@ import os
 import sys
 import json as json_module
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -10,6 +11,7 @@ from ui.shared import (
     ROLE_OPERATOR,
     SERVER_URL,
     REAUTH_KEY,
+    UPDATE_SUBSCRIBE_URL,
     admin_request,
     get_agents,
     logout,
@@ -61,6 +63,7 @@ st.divider()
 tab_names = ["Alerts", "Compliance"]
 if session.can(ROLE_ADMIN):
     tab_names.append("Sessions")
+tab_names.append("Release emails")
 admin_tabs = st.tabs(tab_names)
 
 with admin_tabs[0]:
@@ -279,3 +282,22 @@ if session.can(ROLE_ADMIN):
                             st.rerun()
                         elif revoke is not None and revoke.status_code == 404:
                             st.error("No session with that id.")
+
+
+with admin_tabs[tab_names.index("Release emails")]:
+    # #46: the address is submitted to the project's Cloudflare Worker and stored
+    # in the project's Resend account. This server never sees or stores it, which
+    # is why the form is an iframe rather than a server-side POST.
+    st.markdown("**Release emails**")
+    st.caption(
+        "Get one email when a new opamp-server-py release is published. The "
+        "address is stored by the project's Resend account, not by this server."
+    )
+    if not UPDATE_SUBSCRIBE_URL:
+        st.info(
+            "Release email subscriptions are not configured for this deployment. "
+            "Set `UPDATE_SUBSCRIBE_URL` to the public update Worker URL to show "
+            "the signup form."
+        )
+    else:
+        components.iframe(UPDATE_SUBSCRIBE_URL, height=620, scrolling=True)

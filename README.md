@@ -472,6 +472,26 @@ an in-band "here is your token" reply is ignored. The supervisor can consume
 connection settings; the collector extension cannot. Registration-on-first-use
 and CSR/TOFU stay in #83.
 
+## Release emails (optional)
+
+The Admin page can show a signup box for project release announcements. It is an
+iframe to a Cloudflare Worker; the address goes browser → Worker → the project's
+Resend segment. This server never receives or stores it, and the Worker has no
+endpoint to list subscribers.
+
+Set `UPDATE_SUBSCRIBE_URL` to the Worker's public URL:
+
+```bash
+UPDATE_SUBSCRIBE_URL=https://opamp-updates.tame-lamp8409.workers.dev
+```
+
+Double opt-in is mandatory: nothing is added to Resend until the recipient clicks
+the confirmation link. Every broadcast carries Resend's unsubscribe link. The
+Worker's setup, data retention and tests are in
+[`cloudflare/updates-worker/README.md`](cloudflare/updates-worker/README.md).
+
+If the variable is empty the box is hidden.
+
 ## Before you expose this server
 
 This server ships **read-only by default** and is meant to be reachable by
@@ -1123,6 +1143,7 @@ this project's own fixtures name their agents.
 | `ADMIN_LOGIN_BACKOFF_SECONDS` | `30` | First lockout wait; doubles per further failure |
 | `ADMIN_LOGIN_MAX_BACKOFF_SECONDS` | `900` | Cap on the exponential lockout backoff |
 | `TRUST_PROXY_HEADERS` | `false` | Believe `X-Forwarded-For` for the lockout key and audit client. Only behind a proxy you control — otherwise it is forgeable |
+| `UPDATE_SUBSCRIBE_URL` | *(empty)* | Public URL of the release-email Worker. When set, the Admin page shows a signup box; the server stores no address. Empty hides it (#46) |
 | `CORS_ORIGINS` | `*` | Comma-separated list of allowed CORS origins (browser clients) |
 | `OPAMP_WS_ENABLED` | `false` | Enable the WebSocket transport on `/v1/opamp` (see [Transports](#transports)) |
 | `OPAMP_MAX_MESSAGE_BYTES` | `67108864` | Max OpAMP message size (64 MiB) on both transports; varint header included. HTTP request bodies are capped after gzip decompression. `/v1/metrics` (OTLP) is not affected |

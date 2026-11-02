@@ -195,6 +195,14 @@ def test_admin_only_actions_are_hidden_from_lower_roles():
     assert 'required_role=ROLE_OPERATOR' in text
 
 
+def test_release_email_box_is_config_gated():
+    """#46: the Worker URL is opt-in, and the box is an iframe, not a server POST."""
+    text = source(ADMIN_PAGE)
+    assert 'tab_names.append("Release emails")' in text
+    assert "if not UPDATE_SUBSCRIBE_URL:" in text
+    assert "components.iframe(UPDATE_SUBSCRIBE_URL" in text
+
+
 def test_sidebar_shows_the_current_role():
     text = source(SHARED)
     assert "session.role" in text

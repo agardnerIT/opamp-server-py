@@ -198,3 +198,9 @@ skills-lock.json
 # SQLite WAL sidecars — created at runtime, never committed
 data/opamp.db-wal
 data/opamp.db-shm
+
+# Cloudflare Worker (release emails)
+cloudflare/**/node_modules/
+cloudflare/**/.wrangler/
+cloudflare/**/dist/
+cloudflare/**/.dev.vars

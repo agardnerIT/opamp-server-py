@@ -1,0 +1,25 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "opamp-updates",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  "observability": {
+    "enabled": true
+  },
+  "kv_namespaces": [
+    {
+      "binding": "UPDATES_KV",
+      "id": "4566023a0369459bb3b36ad64d19c154"
+    }
+  ],
+  "vars": {
+    "PUBLIC_BASE_URL": "https://opamp-updates.tame-lamp8409.workers.dev",
+    "RESEND_SEGMENT_ID": "",
+    "RESEND_FROM": "",
+    "RESEND_REPLY_TO": "",
+    "TURNSTILE_SITE_KEY": "",
+    "PRIVACY_URL": "",
+    "DASHBOARD_URL": "",
+    "REPO_URL": "https://github.com/agardnerIT/opamp-server-py"
+  }
+}

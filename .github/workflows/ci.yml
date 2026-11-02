@@ -59,6 +59,27 @@ jobs:
         # flake in CI.
         run: python -m pytest -q --durations=10
 
+  worker:
+    # #46: the release-email Worker is TypeScript, so it needs its own job. It is
+    # offline (fake KV + mocked fetch), which is why it can run in the same gate.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: cloudflare/updates-worker/package-lock.json
+      - name: Install Worker dependencies
+        working-directory: cloudflare/updates-worker
+        run: npm ci
+      - name: Worker tests
+        working-directory: cloudflare/updates-worker
+        run: npm test
+      - name: Worker typecheck
+        working-directory: cloudflare/updates-worker
+        run: npm run typecheck
+
   workflows:
     runs-on: ubuntu-latest
     steps:

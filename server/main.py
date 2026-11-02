@@ -14,7 +14,7 @@ from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 from google.protobuf.json_format import MessageToDict
 from loguru import logger
-from typing import Optional, Dict, Any, List, Literal, Tuple
+from typing import Optional, Dict, Any, List, Literal, NamedTuple, Tuple
 from functools import wraps
 
 from dotenv import load_dotenv
@@ -41,6 +41,7 @@ from server.state import (
     AgentRegistry,
     AgentState,
     AGENT_REGISTRY,
+    COMPONENTS_IGNORED_LOG_AT,
     SQLiteMetricsStore,
     _normalise_audit_ts,
     utcnow,
@@ -289,6 +290,22 @@ PROM_FULL_STATE_REQUESTS = prom_client.Counter(
     "opamp_full_state_requested_total",
     "ServerToAgent ReportFullState requests sent to agents, by reason",
     ["reason"],
+)
+
+# #77: hash-only component lists. `hash_only` is the first ask for a hash, `hash_changed`
+# a re-ask after the agent's component list moved (an upgrade, a pipeline edit).
+PROM_COMPONENTS_REQUESTS = prom_client.Counter(
+    "opamp_available_components_requested_total",
+    "ServerToAgent ReportAvailableComponents requests sent to agents, by reason",
+    ["reason"],
+)
+
+# #77: agents that kept sending a hash-only list after being asked for the details.
+# This is the signal that an agent implementation ignores the flag, which is otherwise
+# invisible: the ask succeeds, the reply is spec-shaped, and nothing changes.
+PROM_COMPONENTS_IGNORED = prom_client.Counter(
+    "opamp_available_components_ignored_total",
+    "Agents counted as ignoring a ReportAvailableComponents request",
 )
 
 # #75: one uid, two agents. `action` is `reissued` when the agent was given a new
@@ -1089,26 +1106,103 @@ def check_uid_header(raw: str, instance_uid: bytes, transport: str) -> None:
         )
 
 
+def _components_hash(report: Dict[str, Any]) -> Optional[str]:
+    """The `AvailableComponents.hash` as hex (our storage form), or None (#77).
+
+    `MessageToDict` renders the proto `bytes` as base64, so it is decoded exactly like
+    a remote-config hash. A value that is not valid base64 is kept verbatim: the hash is
+    only ever an identity token for "did this change since we asked?", never compared
+    against one we compute, so the cheapest safe thing is to trust what the agent sent.
+    """
+    raw = (report or {}).get("hash")
+    if not raw:
+        return None
+    if isinstance(raw, (bytes, bytearray)):
+        return binascii.hexlify(bytes(raw)).decode()
+    return remote_config.hash_from_wire(raw) or str(raw)
+
+
+def _note_available_components(
+    agent: Optional[AgentState],
+    report: Dict[str, Any],
+    updates: Dict[str, Any],
+) -> Tuple[Optional[str], Optional[int]]:
+    """Decide whether a hash-only `available_components` report needs the details (#77).
+
+    The spec lets an agent send only the `hash` unless the server set
+    `ReportAvailableComponents`, so without this the OCB manifest feature is
+    permanently stuck at 409 for such an agent. The bookkeeping is written into
+    `updates` so it rides the message's one row write (#109). Returns:
+
+    * `reason` — `hash_only` / `hash_changed` when this reply must set the flag;
+    * `ignored` — the report count when it first reaches `COMPONENTS_IGNORED_LOG_AT`,
+      so the caller warns exactly once and a silently non-compliant agent is visible.
+
+    One-shot per hash: the hash we asked about is the marker, so an agent that keeps
+    sending it is not asked again, and one that changes it (upgrade, pipeline edit) is
+    asked once more.
+    """
+    components = (report or {}).get("components") or {}
+    if components:
+        # The full list arrived, so whatever we asked for has been answered. The hash
+        # stays as the marker: it is still the list we last asked about.
+        updates["components_request_ignored"] = 0
+        return None, None
+
+    reported = _components_hash(report)
+    if reported is None:
+        # No hash and no components: there is nothing to key a one-shot ask on, so
+        # asking would be a request on every message — exactly the loop to avoid.
+        return None, None
+
+    if agent is not None and agent.last_requested_components_hash == reported:
+        previous = agent.components_request_ignored or 0
+        ignored = min(previous + 1, COMPONENTS_IGNORED_LOG_AT)
+        updates["components_request_ignored"] = ignored
+        report_ignored = previous < COMPONENTS_IGNORED_LOG_AT <= ignored
+        return None, ignored if report_ignored else None
+
+    updates["last_requested_components_hash"] = reported
+    updates["components_request_ignored"] = 0
+    first_ask = agent is None or agent.last_requested_components_hash is None
+    return ("hash_only" if first_ask else "hash_changed"), None
+
+
+class StatusReport(NamedTuple):
+    """What `_apply_status_report` decided about one message."""
+
+    changed: bool
+    full_state_reason: Optional[str] = None
+    components_reason: Optional[str] = None  # #77
+    components_ignored: Optional[int] = None  # #77: count when it reached the threshold
+
+
 def _apply_status_report(
     agent_id: str,
     agent_dict: Dict[str, Any],
     persist: bool = True,
     sequence_num: Optional[int] = None,
-) -> Tuple[bool, Optional[str]]:
+) -> StatusReport:
     """Apply the status fields present in any valid agent message.
 
     Fields are collected and applied to the in-memory state in one pass, then
     persisted at most once: a message that changes nothing performs no write at
     all, and one that changes N field groups performs exactly one (#109).
 
-    Returns `(changed, full_state_reason)`. `full_state_reason` is `None` unless the
-    message is *known* to be an incomplete picture of the agent (#70), in which case
-    the caller sets `ReportFullState` on the reply — subject to its own rate limit,
-    which this function deliberately does not apply so the decision stays testable
-    and the policy stays in one place (`AgentRegistry.claim_full_state_request`).
+    Returns a `StatusReport`. `full_state_reason` is `None` unless the message is
+    *known* to be an incomplete picture of the agent (#70), in which case the caller
+    sets `ReportFullState` on the reply — subject to its own rate limit, which this
+    function deliberately does not apply so the decision stays testable and the policy
+    stays in one place (`AgentRegistry.claim_full_state_request`).
+
+    `components_reason` is the mirror image for #77: the agent sent only a hash of its
+    component list, so the caller sets `ReportAvailableComponents` — once per hash.
+    The two asks are independent and may both appear on one reply.
     """
     updates: Dict[str, Any] = {}
     full_state_reason: Optional[str] = None
+    components_reason: Optional[str] = None
+    components_ignored: Optional[int] = None
 
     # #70: read the previous counter *before* recording this one, or every message
     # is compared against itself and no gap is ever seen.
@@ -1135,7 +1229,11 @@ def _apply_status_report(
         updates['health'] = agent_dict['health']
 
     if 'availableComponents' in agent_dict:
-        updates['available_components'] = agent_dict['availableComponents']
+        report = agent_dict['availableComponents'] or {}
+        updates['available_components'] = report
+        components_reason, components_ignored = _note_available_components(
+            AGENT_REGISTRY.get(agent_id), report, updates
+        )
         PROM_MESSAGES_RECEIVED.labels(message_type="available_components").inc()
 
     if 'packageStatuses' in agent_dict:
@@ -1161,14 +1259,14 @@ def _apply_status_report(
     # only: the row is written once below, by `persist()`.
     AGENT_REGISTRY.record_report(agent_id)
     if not persist:
-        return changed, full_state_reason
+        return StatusReport(changed, full_state_reason, components_reason, components_ignored)
 
     # Steady state: nothing changed, so skip the write unless the stored
     # heartbeat is old enough that a restart would look like a stale fleet.
     if changed or AGENT_REGISTRY.heartbeat_persist_due(agent_id, HEARTBEAT_PERSIST_SECONDS):
         AGENT_REGISTRY.persist(agent_id)
-        return True, full_state_reason
-    return False, full_state_reason
+        return StatusReport(True, full_state_reason, components_reason, components_ignored)
+    return StatusReport(False, full_state_reason, components_reason, components_ignored)
 
 
 MESSAGE_KINDS = (
@@ -1458,9 +1556,10 @@ def _apply_agent_message(
 
         # One write for the whole message (#109): `_apply_status_report` batches the
         # field groups and flushes the row at most once, including for a new agent.
-        _, full_state_reason = _apply_status_report(
+        status = _apply_status_report(
             agent_id, agent_dict, sequence_num=agent_msg.sequence_num
         )
+        full_state_reason = status.full_state_reason
 
         # #70: the agent told us — by its sequence number — that it omitted status we
         # never received, so ask for the whole picture. Never guess the missing
@@ -1483,6 +1582,44 @@ def _apply_agent_message(
                     f"Status report from {agent_id} is incomplete "
                     f"(sequence_num={agent_msg.sequence_num}); requesting full state"
                 )
+
+        # #77: the agent sent only the `hash` of its component list, so we cannot build
+        # an OCB manifest (or a component report) from it. Ask for the details — once
+        # per hash, because asking on every poll is a request loop the agent has no way
+        # to leave. Independent of the #70 ask above: a message can need both.
+        if status.components_reason and 'agentDisconnect' not in agent_dict:
+            response.flags |= (
+                ServerToAgentFlags.ServerToAgentFlags_ReportAvailableComponents
+            )
+            PROM_COMPONENTS_REQUESTS.labels(reason=status.components_reason).inc()
+            requested = AGENT_REGISTRY.get(agent_id)
+            logger.bind(
+                event="opamp.components.requested",
+                reason=status.components_reason,
+                agent_id=agent_id,
+                transport=transport,
+                components_hash=(
+                    requested.last_requested_components_hash if requested else None
+                ),
+            ).info(
+                f"Agent {agent_id} reported only a component hash "
+                f"({status.components_reason}); requesting full available_components"
+            )
+
+        # #77: it ignored the ask. Not an error the agent can see, so it has to be a
+        # number and a log line or nobody ever finds out the agent's SDK is incomplete.
+        if status.components_ignored and 'agentDisconnect' not in agent_dict:
+            PROM_COMPONENTS_IGNORED.inc()
+            logger.bind(
+                event="opamp.components.ignored",
+                agent_id=agent_id,
+                transport=transport,
+                reports=status.components_ignored,
+            ).warning(
+                f"Agent {agent_id} has ignored {status.components_ignored} "
+                f"ReportAvailableComponents requests (still sending hash only); its "
+                f"components stay unknown, so manifests and component reports are empty"
+            )
 
         # #81: react to a FAILED report before deciding what to offer — a poisoned
         # revision must not be re-sent in the same reply that learned it failed (D6).
@@ -1641,6 +1778,11 @@ async def opamp_endpoint(request: Request) -> Response:
     `sequence_num` that is not exactly one greater than the previous one means the
     server is missing status. The reply then sets `ReportFullState` (at most once per
     `REPORT_FULL_STATE_MIN_INTERVAL_SECONDS` per agent).
+
+    **Hash-only components** (#77): an agent may report only the `hash` of its
+    `AvailableComponents`. The reply then sets `ReportAvailableComponents` — once per
+    hash, because the agent has no other way to leave a request loop. `GET /agent/{id}`
+    shows `last_requested_components_hash` and `components_request_ignored`.
 
     **Duplicate `instance_uid`** (#75): two agents presenting one uid (a cloned VM, a
     restored backup, a broken id generator) are detected from interleaved host

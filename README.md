@@ -204,6 +204,31 @@ details are worth knowing:
   `opamp_full_state_requested_total{reason}` — `new_agent` for the registration
   baseline, `sequence_gap` for a repair.
 
+#### Hash-only component lists
+
+The spec also lets an agent send only the `hash` of its `AvailableComponents` unless
+the server asked for the details with `ReportAvailableComponents`. An agent that does
+this is compliant but useless for the manifest feature: `POST /agent/{id}/manifest`,
+the component report and the heavy/outdated collector reports all have nothing to work
+with. So the server asks — carefully (#77):
+
+- the ask is **one-shot per hash**: a hash-only report makes the next reply set
+  `ReportAvailableComponents`, and the same hash is never asked about again. An agent
+  that keeps sending it is not in a request loop it cannot leave;
+- a **changed hash** (agent upgraded, pipeline edited) earns exactly one new ask;
+- the hash we asked about is persisted (`GET /agent/{id}` →
+  `last_requested_components_hash`), so a restart does not repeat the ask;
+- an agent that ignores the ask is counted (once, at the third hash-only report for
+  that hash, then the counter saturates so the steady state stays write-free) and
+  logged at `WARNING` — otherwise "this SDK never implements the flag" is invisible.
+  `GET /agent/{id}` exposes it as `components_request_ignored`;
+- the #70 and #77 asks are independent: one reply may carry `ReportFullState` **and**
+  `ReportAvailableComponents`.
+
+Counted in `opamp_available_components_requested_total{reason}` (`hash_only` for the
+first ask, `hash_changed` after the list moved) and
+`opamp_available_components_ignored_total`.
+
 ### The Remote Config page (UI)
 
 Streamlit page **Remote Config** (`ui/pages/5_Remote_Config.py`) implements the whole
@@ -1069,6 +1094,14 @@ always published, because "were we behind?" is the first question after a slow d
 | `opamp_event_loop_lag_seconds` | gauge | The signal itself: how late the loop woke from a 100 ms sleep |
 | `opamp_throttled_requests_total{transport="http\|ws"}` | counter | How many agent messages were refused, by transport |
 | `opamp_stale_reaper_deferrals_total` | counter | Cleanup ticks that stood down because the server was shedding load |
+
+**Component inventory (#77) metrics.** A hash-only agent is a silent feature failure —
+the manifest endpoint simply answers 409 — so the asks are numbers:
+
+| Metric | Type | Why |
+|---|---|---|
+| `opamp_available_components_requested_total{reason="hash_only\|hash_changed"}` | counter | `ReportAvailableComponents` asks sent, by why |
+| `opamp_available_components_ignored_total` | counter | Agents that kept sending a hash after the ask (an incomplete SDK) |
 
 **Traces (opt-in).** `pip install -e ".[observability]"` then
 `OPAMP_TRACING_ENABLED=true` and point `OTEL_EXPORTER_OTLP_ENDPOINT` at your

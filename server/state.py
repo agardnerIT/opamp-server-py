@@ -79,7 +79,9 @@ class SQLiteAgentStore:
                     remote_config_error TEXT,
                     last_sequence_num INTEGER,
                     pending_command TEXT,
-                    command_delivered_at TEXT
+                    command_delivered_at TEXT,
+                    last_requested_components_hash TEXT,
+                    components_request_ignored INTEGER DEFAULT 0
                 )
             """)
 
@@ -110,6 +112,19 @@ class SQLiteAgentStore:
                 conn.execute("ALTER TABLE agents ADD COLUMN uid_reissued_from TEXT")
             if "uid_reissue_reason" not in columns:
                 conn.execute("ALTER TABLE agents ADD COLUMN uid_reissue_reason TEXT")
+            # #77: the `AvailableComponents.hash` we last asked the agent to expand,
+            # so the `ReportAvailableComponents` ask is one-shot per hash instead of a
+            # request on every poll. Persisted because a restart must not re-ask a
+            # hash the agent already answered (or already ignored).
+            if "last_requested_components_hash" not in columns:
+                conn.execute(
+                    "ALTER TABLE agents ADD COLUMN last_requested_components_hash TEXT"
+                )
+            if "components_request_ignored" not in columns:
+                conn.execute(
+                    "ALTER TABLE agents ADD COLUMN components_request_ignored INTEGER"
+                    " DEFAULT 0"
+                )
 
     def load_all(self) -> Dict[str, "AgentState"]:
         agents = {}
@@ -128,8 +143,9 @@ class SQLiteAgentStore:
                                    health, compliance, updated_at, last_remote_config_hash,
                                    remote_config_error, last_sequence_num, pending_command,
                                    command_delivered_at, uid_reissued_from,
-                                   uid_reissue_reason)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                   uid_reissue_reason, last_requested_components_hash,
+                                   components_request_ignored)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(agent_id) DO UPDATE SET
                     last_heartbeat=excluded.last_heartbeat,
                     healthy=excluded.healthy,
@@ -148,7 +164,9 @@ class SQLiteAgentStore:
                     pending_command=excluded.pending_command,
                     command_delivered_at=excluded.command_delivered_at,
                     uid_reissued_from=excluded.uid_reissued_from,
-                    uid_reissue_reason=excluded.uid_reissue_reason
+                    uid_reissue_reason=excluded.uid_reissue_reason,
+                    last_requested_components_hash=excluded.last_requested_components_hash,
+                    components_request_ignored=excluded.components_request_ignored
                 WHERE excluded.updated_at > agents.updated_at
             """, self._state_to_row(state))
 
@@ -179,6 +197,8 @@ class SQLiteAgentStore:
             state.command_delivered_at,
             state.uid_reissued_from,
             state.uid_reissue_reason,
+            state.last_requested_components_hash,
+            state.components_request_ignored,
         )
 
     @staticmethod
@@ -230,6 +250,12 @@ class SQLiteAgentStore:
             command_delivered_at=_optional_column(row, "command_delivered_at"),
             uid_reissued_from=_optional_column(row, "uid_reissued_from"),
             uid_reissue_reason=_optional_column(row, "uid_reissue_reason"),
+            last_requested_components_hash=_optional_column(
+                row, "last_requested_components_hash"
+            ),
+            components_request_ignored=(
+                _optional_column(row, "components_request_ignored") or 0
+            ),
             sealed_effective_config=sealed if config_error else None,
             config_error=config_error,
         )
@@ -2026,6 +2052,13 @@ MIN_REPORT_GAP_SECONDS = 1.0
 REPORT_INTERVAL_ALPHA = 0.3  # EWMA weight for the newest gap
 TRUSTED_REPORT_SAMPLES = 2
 
+# #77: how many hash-only component reports for one hash may follow a
+# `ReportAvailableComponents` ask before the agent is counted as non-compliant. Three
+# leaves room for a report that was already in flight when the ask was delivered. The
+# counter saturates here so an agent that ignores the flag forever stops changing
+# state (and therefore stops causing a row write on every poll).
+COMPONENTS_IGNORED_LOG_AT = 3
+
 
 @dataclass
 class AgentState:
@@ -2060,6 +2093,15 @@ class AgentState:
     # explain an id change instead of showing a row that silently appeared.
     uid_reissued_from: Optional[str] = None
     uid_reissue_reason: Optional[str] = None
+    # #77: the `AvailableComponents.hash` (hex) we last set `ReportAvailableComponents`
+    # for. One-shot per hash: an agent that keeps reporting a hash we already asked
+    # about is not asked again, and an agent that upgrades (new hash) is asked once
+    # more. Persisted so a restart does not repeat the ask.
+    last_requested_components_hash: Optional[str] = None
+    # #77: hash-only reports received *for that hash* after we asked. Saturates at
+    # COMPONENTS_IGNORED_LOG_AT so it stops being a write on every poll; a non-zero
+    # value at the threshold is an agent whose implementation ignores the flag.
+    components_request_ignored: int = 0
     # #84: a server->agent command waiting to ride the agent's next poll. Persisted,
     # because HTTP has no push and a restart command lost on reboot is a silent no-op.
     # Cleared the moment it is delivered: re-delivering a restart every poll is a
@@ -2352,6 +2394,11 @@ class AgentState:
             # uid the agent presented and the signal that convicted it.
             "uid_reissued_from": self.uid_reissued_from,
             "uid_reissue_reason": self.uid_reissue_reason,
+            # #77: `last_requested_components_hash` explains why the server asked for
+            # full components; a non-zero `components_request_ignored` is an agent that
+            # has not answered an ask it was given.
+            "last_requested_components_hash": self.last_requested_components_hash,
+            "components_request_ignored": self.components_request_ignored,
             "package_statuses": self.package_statuses,
             "available_components": self.available_components,
             "components": self.components,

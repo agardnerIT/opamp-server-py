@@ -204,6 +204,22 @@ details are worth knowing:
   `opamp_full_state_requested_total{reason}` — `new_agent` for the registration
   baseline, `sequence_gap` for a repair.
 
+### The Remote Config page (UI)
+
+Streamlit page **Remote Config** (`ui/pages/5_Remote_Config.py`) implements the whole
+flow, in the epic's order and with review between every step: **Target** (filters, live
+count, blast-radius breakdown) → **Edit** (with prefill from an agent's effective config,
+and a hard refusal of redacted bodies) → **Validate** (YAML paths, warnings, policy gate)
+→ **Propose** (a draft that delivers nothing) → **Plan** (the rollout's real batches and
+caps, from the dry run) → **Approve & roll out** (approver: canary released, the rest
+held) → **live progress** (per-batch and per-agent state, pause reason, gate countdown)
+→ **Stop** (abort vs rollback, visibly different) → **History** (rollouts and revisions,
+with who approved what).
+
+It is a session-token client (#105): buttons are role-gated in the page *and* the server
+re-authorises every call, so the UI is ergonomics and never the boundary. Config bodies
+are never listed; the per-agent reveal stays on the Agents page where it is audited.
+
 ### OpAMP specification and capability matrix
 
 This server targets **OpAMP [v0.20.0](https://github.com/open-telemetry/opamp-spec/releases/tag/v0.20.0)**

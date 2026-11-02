@@ -24,12 +24,17 @@ the project becomes the data controller for a list of email addresses.
   `full_access` key stored as a Worker secret. `/health` reports `resend: true`.
 - End-to-end test passed against a single test address: subscribe → confirmation
   email → contact in the segment → deletion request → deletion email → segment
-  removal and orphan-contact deletion. The Resend broadcast path is unit-tested
-  but has not yet been fired by a real GitHub release.
+  removal and orphan-contact deletion.
+- Turnstile is enabled (managed widget) for the Worker hostname and localhost.
+  A submit with no token is refused; `/health` reports `turnstile: true`.
+- The GitHub release webhook is created and a ping returns `204`. A signed test
+  `release` event produced a real Resend Broadcast to the test address, so the
+  broadcast path is verified end-to-end, not just in unit tests.
+- `.env` (gitignored) sets `UPDATE_SUBSCRIBE_URL` for the dashboard.
 - 38 offline Worker tests pass; CI runs `npm test` and `npm run typecheck`.
-- Still needed: Turnstile (or a rate-limit rule) before the form is linked from
-  the dashboard, the GitHub webhook secret, and `UPDATE_SUBSCRIBE_URL` in the UI
-  environment.
+- Still needed: a physical postal address for the CAN-SPAM footer, a rebuild of
+  the UI image (the published `0.0.5-test` predates the box), and a decision on
+  whether to move `agardner.net` to Cloudflare for a branded Worker hostname.
 
 ---
 
@@ -435,13 +440,13 @@ Collecting addresses makes the project the data controller. Minimum:
 
 ## 15. Open decisions
 
-1. Double opt-in: **yes** (recommended; without it the endpoint is an
-   email-bombing tool and the list is unconsented).
-2. Turnstile: **yes** (recommended with double opt-in, not instead of it).
-3. Worker hostname: `updates.<domain>` vs `workers.dev`.
-4. Iframe vs server-side POST.
-5. Release notes in the email: link only (recommended) vs plain-text excerpt.
-6. Prereleases: skip (recommended) vs separate segment.
-7. Tracking: off (recommended) vs on.
-8. Retention for unsubscribed contacts: delete after 30/90 days vs keep for
-   suppression.
+1. Double opt-in: **yes**, implemented.
+2. Turnstile: **yes**, implemented.
+3. Worker hostname: `workers.dev` for now; a branded custom domain needs the
+   `agardner.net` zone on Cloudflare.
+4. Iframe vs server-side POST: iframe, implemented.
+5. Release notes in the email: fixed template + link, implemented.
+6. Prereleases: skipped, implemented.
+7. Tracking: off by policy; confirm the Resend domain setting is off too.
+8. Retention for unsubscribed contacts: still open (delete after N days vs keep
+   for suppression).

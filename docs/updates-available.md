@@ -43,7 +43,41 @@ The project already has a no-telemetry stance (`.streamlit/config.toml` sets
 `gatherUsageStats = false`). #46 must not accidentally introduce the first
 phone-home.
 
-## 3. Design principles
+## 3. Where the version comes from (there is no free lunch)
+
+An update notifier cannot learn about a release unless **some** process fetches
+**some** source. This plan does not pretend otherwise. It decides *which* process
+does the fetching and *what* that fetch reveals.
+
+| Topology | Who contacts the source | Server egress | What the source learns |
+|---|---|---|---|
+| `manual` / `auto` | the server | one anonymous `GET` | an IP and a time; no identity, version, or fleet data |
+| `file://` | your existing pipeline / mirror | none | whatever that pipeline already reveals when it pulls the image |
+| `off` | nobody | none | nothing until a human reads the release notes |
+
+- **`file://` is a mailbox, not a source.** Nothing about a local file creates
+  knowledge. Something you already run — a cron job, a CI step, Argo CD, an
+  internal mirror — has to write `update.json` into the server's volume. That
+  thing still contacts GitHub. The gain is that it is *your* process, on *your*
+  schedule, on a host you already trust with that relationship, and the server
+  makes no egress at all. A file baked into the image is useless: it can only
+  describe the version you already have.
+- **The server asking is not a new third party.** If you deploy from
+  `ghcr.io/agardnerit/...`, GitHub already sees your egress IP when you pull the
+  image. An update check does not reveal that a deployment exists; it reveals
+  that the deployment is *still alive between deploys*. That is the extra signal,
+  and it is what the lazy trigger, jitter, and identity-free request minimise.
+- **`manual` and `auto` send the same bytes.** The only difference is whether a
+  human had to click. `manual` guarantees no unrequested request; `auto` removes
+  the click but still fires only while an authenticated human is using the
+  product.
+
+So the honest answer to "unless we check GitHub, how do we know?" is: **you
+don't.** Either the server asks, or something in your environment that already
+talks to GitHub tells the server, or a human reads the release notes. The plan
+makes that choice explicit instead of hiding a background poll.
+
+## 4. Design principles
 
 1. **No egress unless a human asked.** No background timer. No check while the
    product is idle. "The server was running" must not be observable remotely.
@@ -62,19 +96,22 @@ phone-home.
 7. **Local mirror is a first-class option.** Air-gapped and GitOps deployments
    read a file; zero third-party contact.
 
-## 4. Modes (recommended default: `manual`)
+## 5. Modes (recommended default: `auto`, lazy)
 
 `UPDATE_CHECK` takes one of:
 
 | Mode | Automatic egress | UI | Use case |
 |---|---|---|---|
 | `off` | Never | Shows current version; explains checks are disabled | Air-gapped, policy-bound |
-| `manual` **(default)** | Never | "Check now" button, labelled with the host it will contact | Normal self-hosted install |
-| `auto` | Only when an authenticated human is using the product, at most once per interval | Same as manual, plus automatic refresh | Operators who want the banner without clicking |
+| `manual` | Never | "Check now" button, labelled with the host it will contact | Normal self-hosted install |
+| `auto` **(recommended, default)** | Only when an authenticated human is using the product, at most once per interval | Same as manual, plus automatic refresh | Operators who want the banner without clicking |
 
-`manual` is the privacy-preserving default: zero unrequested requests, feature
-still usable. `off` is for deployments where even a button is inappropriate.
-`auto` is opt-in and deliberately **not** a background scheduler.
+`manual` guarantees zero unrequested requests. `off` is for deployments where
+even a button is inappropriate. `auto` is deliberately **not** a background
+scheduler, and it sends exactly the same bytes as `manual` — the only difference
+is whether a human had to click. That is why `auto` can be the default without
+weakening the request design: the privacy work is in *what* is sent and *when it
+is allowed to fire*, not in forcing a click.
 
 ### Why `auto` is lazy
 
@@ -98,7 +135,7 @@ the operator's existing tooling (Ansible, Argo CD, a cron `curl`, an internal
 mirror). The server never contacts a third party. The same signature/validation
 rules apply.
 
-## 5. Exactly what goes on the wire
+## 6. Exactly what goes on the wire
 
 Recommended feed: a small static asset attached to the GitHub release.
 
@@ -124,7 +161,7 @@ lazy trigger, jitter, local-file option, and a documented "use your egress proxy
 path. Do not invent a bespoke update service or a unique per-install URL — a
 shared public asset maximises the anonymity set.
 
-## 6. Feed format and trust
+## 7. Feed format and trust
 
 ```json
 {
@@ -159,7 +196,7 @@ UI, matching how `server/posture.py` treats other unsafe flags.
 If signing is deferred, v1 must fall back to the GitHub tags API and still only
 ever render a validated version plus a fixed releases-page link.
 
-## 7. Server surface
+## 8. Server surface
 
 New module `server/updates.py` (pure logic, injectable clock + fetcher):
 
@@ -192,7 +229,7 @@ Endpoints:
 - No `GET` side effects means crawlers, uptime probes and prefetchers cannot
   cause egress.
 
-## 8. Configuration
+## 9. Configuration
 
 All read at call time, like `server/posture.py`.
 
@@ -214,7 +251,7 @@ All read at call time, like `server/posture.py`.
 Add every one to `.env.sample` with the privacy comment, and to the README
 configuration table.
 
-## 9. UI
+## 10. UI
 
 In `render_sidebar()` (so it appears on every page), for every viewer:
 
@@ -241,7 +278,7 @@ Implementation constraints:
 - unauthenticated viewers can see the notice (it is not fleet data), but only an
   admin/operator can trigger `POST`.
 
-## 10. CLI, client, MCP (all four layers, per AGENTS.md)
+## 11. CLI, client, MCP (all four layers, per AGENTS.md)
 
 - `client/opamp_client.py`: `get_updates()` (read) and `check_updates()`
   (explicit action).
@@ -251,7 +288,7 @@ Implementation constraints:
   causing one outbound request). 29 → 31 tools.
 - Tests for each layer, plus one test asserting `get_updates` performs no I/O.
 
-## 11. Close the existing hidden beacon first
+## 12. Close the existing hidden beacon first
 
 `ui/shared.py::get_collector_versions()` currently fetches
 `https://api.github.com/repos/open-telemetry/opentelemetry-collector-releases/tags?per_page=250`
@@ -267,7 +304,7 @@ exactly what #46 is supposed to avoid. Before or with #46:
 Otherwise a server with "update checks off" would still beacon GitHub hourly,
 which would make the privacy claim false.
 
-## 12. Logs, metrics, storage
+## 13. Logs, metrics, storage
 
 - Log one line per check: `update check: current=0.1.0 latest=0.2.0 verified=true`
   — never the URL, response headers, or body.
@@ -281,7 +318,7 @@ which would make the privacy claim false.
 - Do not add the application version to unauthenticated `/health` (spec version
   is already there; the app version is available from `/updates` and the UI).
 
-## 13. What this deliberately does not build
+## 14. What this deliberately does not build
 
 - no automatic upgrade, restart, `pip install`, `docker pull`, or subprocess;
 - no telemetry, usage ping, install count, or "anonymous" UUID;
@@ -289,9 +326,11 @@ which would make the privacy claim false.
 - no browser-side request to GitHub (links are human clicks);
 - no remote release notes / HTML / markdown / shell text;
 - no project-operated update service that could accumulate install data;
+- no webhook registration or install phone-home (that would identify every
+  deployment to the project, which is worse than an anonymous GET to GitHub);
 - no version or fleet information in the request.
 
-## 14. Tests
+## 15. Tests
 
 Deterministic, offline; inject clock, RNG and an `httpx.MockTransport`.
 
@@ -316,7 +355,7 @@ Deterministic, offline; inject clock, RNG and an `httpx.MockTransport`.
 - a socket-level guard fixture that fails any test making an un-mocked outbound
   connection, so the suite proves the default is silent.
 
-## 15. Release plumbing
+## 16. Release plumbing
 
 `release.py` already prints a checklist; extend it so the feed actually exists:
 
@@ -328,7 +367,7 @@ Deterministic, offline; inject clock, RNG and an `httpx.MockTransport`.
 A GitHub Actions job on tag push can do the same if the maintainer does not want
 to run it locally.
 
-## 16. Docs
+## 17. Docs
 
 - README: "Update notifications (#46)" — modes, what leaves the box, how to
   disable, how to use a local mirror, and how to verify a signature.
@@ -338,7 +377,7 @@ to run it locally.
 - `.env.sample`: all variables with the privacy comment.
 - The UI caption is the policy in one sentence where people actually read it.
 
-## 17. Task breakdown
+## 18. Task breakdown
 
 | # | Task | Notes |
 |---|---|---|
@@ -351,9 +390,10 @@ to run it locally.
 | 6 | `release.py` feed generation/signing + GitHub Release asset | or Actions job |
 | 7 | tests, offline guard, docs, `.env.sample`, memory entry | |
 
-## 18. Decisions to confirm
+## 19. Decisions to confirm
 
-1. **Default mode:** `manual` (recommended) vs `auto` vs `off`.
+1. **Default mode:** `auto` (recommended: lazy, jittered, anonymous) vs
+   `manual` (zero unrequested egress, needs a click) vs `off`.
 2. **Auto interval/jitter:** 24 h ± 25% (recommended) vs longer.
 3. **Feed source:** signed static `update.json` attached to each release
    (recommended) vs GitHub tags API (no release-process change, unsigned).

@@ -28,7 +28,14 @@ from server.logging import RequestContextMiddleware  # noqa: E402
 
 server_logging.configure_logging()
 
-from proto.opamp_pb2 import AgentCapabilities, AgentToServer, ServerToAgent, ServerCapabilities, ServerToAgentFlags
+from proto.opamp_pb2 import (
+    AgentCapabilities,
+    AgentToServer,
+    AgentToServerFlags,
+    ServerCapabilities,
+    ServerToAgent,
+    ServerToAgentFlags,
+)
 from server.state import (
     AgentRegistry,
     AgentState,
@@ -61,10 +68,12 @@ from server import (
     config_validation,
     crypto,
     posture,
+    protocol,
     redaction,
     remote_config,
     tracing,
 )
+from server.http_body import BodyTooLarge, read_body
 from server.redaction import redact_document
 from server.auth import (  # noqa: F401  (privileged routes below)
     ROLE_ADMIN,
@@ -965,6 +974,11 @@ def _handle_agent_message(
     bound to a different principal, raises `AgentAuthError` — before any state is
     read or written, so a refusal can never leave a half-applied report behind.
 
+    A body that is not a usable `AgentToServer` raises `protocol.BadRequest` (#73):
+    the HTTP transport answers 400 and the socket closes 1002, each after sending a
+    `ServerErrorResponse{BAD_REQUEST}` with a human-readable reason. Nothing is
+    registered or mutated, because every check here runs before `_apply`.
+
     `transport` is only for observability (#108): the log line carries it, and the
     `opamp.message` span records `transport=http|ws`, which is the first question
     asked when one transport misbehaves and the other does not.
@@ -973,6 +987,9 @@ def _handle_agent_message(
     response.capabilities = 0
 
     if not data:
+        # Bare poll, kept for compatibility. The spec expects a uid on every
+        # AgentToServer (even a poll), but an empty body has always been answered
+        # with capabilities here and refusing it would break existing clients.
         response.capabilities = ServerCapabilities.ServerCapabilities_AcceptsStatus
         return ProcessedMessage(response.SerializeToString())
 
@@ -980,20 +997,36 @@ def _handle_agent_message(
         agent_msg = AgentToServer()
         agent_msg.ParseFromString(data)
     except Exception as e:
-        logger.bind(event="opamp.message.rejected", transport=transport, reason="parse").error(
-            f"Failed to parse OpAMP message: {e}"
-        )
-        response.capabilities = ServerCapabilities.ServerCapabilities_AcceptsStatus
-        return ProcessedMessage(response.SerializeToString())
+        raise protocol.BadRequest(f"malformed AgentToServer message: {e}") from e
 
-    agent_id = binascii.hexlify(agent_msg.instance_uid).decode('utf-8')
+    original_uid = bytes(agent_msg.instance_uid)
+    if len(original_uid) < protocol.MIN_ACCEPTED_UID_BYTES:
+        # An empty uid is not an identity: every such agent would share agent_id
+        # "" and overwrite the others in one registry row and SQLite row.
+        raise protocol.BadRequest(
+            "AgentToServer.instance_uid must not be empty; "
+            f"the spec says {protocol.EXPECTED_INSTANCE_UID_BYTES} bytes (UUIDv7)"
+        )
+
+    wants_uid = bool(
+        agent_msg.flags & AgentToServerFlags.AgentToServerFlags_RequestInstanceUid
+    )
+    agent_id = binascii.hexlify(original_uid).decode('utf-8')
     agent_dict = MessageToDict(agent_msg)
 
     if principal is not None:
         # Identity comes from the credential, never from the body (D1). Reject
         # before `_apply_status_report`, so an impostor cannot mutate even briefly.
         agent_auth.authorize_uid(principal, agent_id)
-        bound = WS_REGISTRY.principal_for(agent_msg.instance_uid)
+        if wants_uid:
+            # A server-minted uid has no credential behind it, so honouring this in
+            # token mode would create an unauthenticated agent (D1). Refuse instead.
+            raise protocol.BadRequest(
+                "RequestInstanceUid is only available when OPAMP_AGENT_AUTH=off; "
+                "with agent authentication the credential is the identity",
+                instance_uid=original_uid,
+            )
+        bound = WS_REGISTRY.principal_for(original_uid)
         if bound is not None and bound != principal.agent_id:
             raise agent_auth.AgentAuthError(
                 agent_auth.REASON_BINDING_CONFLICT,
@@ -1002,11 +1035,40 @@ def _handle_agent_message(
                 claimed=agent_id,
             )
 
+    # #73: the server may name the agent. The temporary uid the agent sent is not
+    # registered at all; state for this message is applied under the new id. If the
+    # temporary uid was already a real record (a restart reusing a placeholder), it
+    # is cleaned up after the new identity exists, so no stale duplicate is left.
+    effective_uid = original_uid
+    minted_uid = None
+    if wants_uid:
+        minted_uid = protocol.uuid7()
+        effective_uid = minted_uid
+        agent_id = binascii.hexlify(effective_uid).decode('utf-8')
+        logger.bind(
+            event="agent.uid_minted",
+            temporary_uid=original_uid.hex(),
+            agent_id=agent_id,
+            transport=transport,
+        ).info(
+            f"Minted instance_uid {agent_id} for agent that sent "
+            f"temporary uid {original_uid.hex()}"
+        )
+
     # Bound here, not per log call: every line written while applying this message
     # (the offer decision, the audit write, the alert it may trigger) carries the
     # same `agent_id` without threading it through every function (#108).
     with logger.contextualize(agent_id=agent_id, transport=transport):
-        return _apply_agent_message(agent_msg, agent_dict, agent_id, principal, transport)
+        return _apply_agent_message(
+            agent_msg,
+            agent_dict,
+            agent_id,
+            principal,
+            transport,
+            instance_uid=effective_uid,
+            reply_uid=original_uid,
+            minted_uid=minted_uid,
+        )
 
 
 def _apply_agent_message(
@@ -1015,10 +1077,17 @@ def _apply_agent_message(
     agent_id: str,
     principal: "agent_auth.Principal | None",
     transport: str,
+    *,
+    instance_uid: bytes | None = None,
+    reply_uid: bytes | None = None,
+    minted_uid: bytes | None = None,
 ) -> ProcessedMessage:
     """The state-mutating half of `_handle_agent_message`, inside the log/trace scope."""
+    effective_uid = bytes(agent_msg.instance_uid) if instance_uid is None else instance_uid
     response = ServerToAgent()
-    response.instance_uid = agent_msg.instance_uid
+    # The reply is addressed to the uid the agent used in *this* message; a minted
+    # replacement travels separately in `agent_identification.new_instance_uid`.
+    response.instance_uid = effective_uid if reply_uid is None else reply_uid
 
     # #102: one advertisement for both paths. `OffersRemoteConfig` is only included
     # when the server may actually deliver (#96), so an unsolicited push frame and a
@@ -1073,7 +1142,7 @@ def _apply_agent_message(
                 f"New agent connecting: {agent_id}"
             )
             AGENT_REGISTRY.register(agent_id, AgentState(
-                instance_uid=agent_msg.instance_uid,
+                instance_uid=effective_uid,
                 agent_id=agent_id,
                 capabilities=agent_msg.capabilities,
                 description=agent_dict.get("agentDescription", {}),
@@ -1119,18 +1188,60 @@ def _apply_agent_message(
         # wire while the posture says config push is not allowed.
         posture.scrub_remote_config(response)
 
+        # #73: a server-minted identity replaces the temporary uid the agent used.
+        # The reply still carries that temporary uid (multiplexing), while state and
+        # future messages are keyed by the minted one. The temporary record is removed
+        # rather than migrated: it was a placeholder, never an established agent.
+        if minted_uid is not None:
+            response.agent_identification.new_instance_uid = minted_uid
+            temporary_uid = effective_uid if reply_uid is None else reply_uid
+            temporary_id = binascii.hexlify(temporary_uid).decode('utf-8')
+            if temporary_id != agent_id and AGENT_REGISTRY.get(temporary_id) is not None:
+                logger.bind(
+                    event="agent.uid_minted_cleanup",
+                    temporary_uid=temporary_id,
+                    agent_id=agent_id,
+                    transport=transport,
+                ).info(
+                    f"Removing temporary identity {temporary_id} after minting {agent_id}"
+                )
+                AGENT_REGISTRY.remove(temporary_id)
+                PROM_AGENT_HEALTH.remove(temporary_id)
+                _METRICS_STORE.delete(temporary_id)
+                AGENT_METRICS.pop(temporary_id, None)
+                update_metrics()
+
         tracing.set_span_attributes(
             sp,
             **{
                 "reply.capabilities": response.capabilities,
                 "reply.remote_config_offered": offered,
+                "reply.instance_uid_minted": minted_uid is not None,
             },
         )
 
     return ProcessedMessage(
         response.SerializeToString(),
-        instance_uid=bytes(agent_msg.instance_uid),
+        instance_uid=effective_uid,
         disconnected=disconnected,
+    )
+
+
+# #76 will standardise this header; read it opportunistically now so a refused body
+# still logs the only identity it carries.
+INSTANCE_UID_HEADER = "opamp-instance-uid"
+
+
+def _instance_uid_header(request: Request) -> str:
+    return request.headers.get(INSTANCE_UID_HEADER, "")
+
+
+def _bad_request_response(exc: protocol.BadRequest) -> Response:
+    """400 carrying a spec-shaped `ServerErrorResponse`, so the agent can read why."""
+    return Response(
+        content=protocol.error_response(exc.detail, exc.instance_uid).SerializeToString(),
+        status_code=400,
+        media_type="application/x-protobuf",
     )
 
 
@@ -1153,6 +1264,12 @@ async def opamp_endpoint(request: Request) -> Response:
     `opamp_agent_auth_failures_total{reason}`. The default (`off`) is
     unauthenticated, exactly as before.
 
+    **Malformed input** (unparseable protobuf, empty `instance_uid`, unsupported or
+    corrupt `Content-Encoding`) is **400** with a `ServerToAgent.error_response`
+    (`type: BAD_REQUEST`, human-readable `error_message`) and changes no state. A
+    body over `OPAMP_MAX_MESSAGE_BYTES` — measured after gzip decompression — is
+    **413** and likewise changes nothing.
+
     The same path also accepts a WebSocket upgrade when `OPAMP_WS_ENABLED=true`.
     """
     client = request.client.host if request.client else ""
@@ -1169,7 +1286,40 @@ async def opamp_endpoint(request: Request) -> Response:
         )
 
     try:
-        result = _handle_agent_message(await request.body(), principal)
+        body = await read_body(request)
+    except BodyTooLarge as exc:
+        # Refuse before parsing, so no registration, heartbeat or metric changes.
+        # The uid header is the only identity available for a body we won't read.
+        logger.bind(
+            event="opamp.body.too_large",
+            transport="http",
+            client=client,
+            instance_uid=_instance_uid_header(request),
+            size=exc.size,
+            limit=exc.limit,
+        ).warning(f"refusing OpAMP request body: {exc}")
+        raise HTTPException(status_code=413, detail="OpAMP request body too large")
+    except protocol.BadRequest as exc:
+        logger.bind(
+            event="opamp.message.rejected",
+            transport="http",
+            reason="bad_request",
+            client=client,
+            instance_uid=_instance_uid_header(request),
+        ).warning(f"refusing OpAMP message: {exc.detail}")
+        return _bad_request_response(exc)
+
+    try:
+        result = _handle_agent_message(body, principal)
+    except protocol.BadRequest as exc:
+        logger.bind(
+            event="opamp.message.rejected",
+            transport="http",
+            reason="bad_request",
+            client=client,
+            instance_uid=_instance_uid_header(request) or exc.instance_uid.hex(),
+        ).warning(f"refusing OpAMP message: {exc.detail}")
+        return _bad_request_response(exc)
     except agent_auth.AgentAuthError as exc:
         agent_auth.record_failure(
             exc.reason,
@@ -1180,8 +1330,23 @@ async def opamp_endpoint(request: Request) -> Response:
         )
         raise HTTPException(status_code=403, detail=exc.detail)
 
+    payload = result.response
+    limit = message_limit()
+    if len(payload) > limit:
+        # Spec: MUST NOT send an oversized response. Nothing is lost by answering
+        # with an empty ack — the desired state is stored and the next poll retries.
+        logger.bind(
+            event="opamp.response.too_large",
+            transport="http",
+            client=client,
+            agent_id=result.instance_uid.hex() if result.instance_uid else "",
+            size=len(payload),
+            limit=limit,
+        ).error("refusing to send oversized ServerToAgent; returning an empty ack")
+        payload = b""
+
     return Response(
-        content=result.response,
+        content=payload,
         media_type="application/x-protobuf",
         headers={"Connection": "keep-alive"}
     )

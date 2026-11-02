@@ -42,13 +42,23 @@ class TestOpAMPEndpoint:
         assert response.headers["content-type"] == "application/x-protobuf"
 
     def test_invalid_protobuf(self, client):
+        from proto import opamp_pb2
+
         response = client.post(
             "/v1/opamp",
             content=b"invalid data",
             headers={"Content-Type": "application/x-protobuf"}
         )
-        assert response.status_code == 200
+        # #73: malformed input is a BAD_REQUEST with a readable reason, not a
+        # 200 that looks like a normal acknowledgement.
+        assert response.status_code == 400
         assert response.headers["content-type"] == "application/x-protobuf"
+        server_msg = opamp_pb2.ServerToAgent()
+        server_msg.ParseFromString(response.content)
+        assert server_msg.error_response.type == (
+            opamp_pb2.ServerErrorResponseType_BadRequest
+        )
+        assert server_msg.error_response.error_message
 
     def test_valid_agent_message(self, client):
         from proto import opamp_pb2

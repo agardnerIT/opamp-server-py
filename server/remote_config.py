@@ -576,6 +576,54 @@ def deliverable(record: Optional[Dict[str, Any]]) -> bool:
     return True
 
 
+# Every ServerCapabilities bit in proto/opamp.proto, classified (#74). The
+# capability test fails when a proto bump adds a value none of these maps mentions,
+# which is the durable guard: silently dropping a bit is a symptom, an unclassified
+# bit is what over-claims to every agent. A set bit is a promise, and a supervisor
+# that sees one is entitled to wait for behaviour that may never arrive.
+
+# Backed by code today, so advertised unconditionally.
+ALWAYS_ADVERTISED_CAPABILITIES = frozenset(
+    {
+        # _apply_status_report() persists health, description, effective config,
+        # remote-config status and package statuses.
+        ServerCapabilities.ServerCapabilities_AcceptsStatus,
+        # `effective_config` is stored on AgentState and served by /agent/{id}.
+        ServerCapabilities.ServerCapabilities_AcceptsEffectiveConfig,
+        # `package_statuses` is persisted in the agent row (state.py).
+        ServerCapabilities.ServerCapabilities_AcceptsPackagesStatus,
+    }
+)
+
+# Backed by code, but only advertised in the posture that can honour it.
+CONDITIONAL_CAPABILITIES = {
+    # Delivered by #81/#102, allowed only by posture.push_allowed() (#96).
+    ServerCapabilities.ServerCapabilities_OffersRemoteConfig: (
+        "advertised only when posture.push_allowed()"
+    ),
+}
+
+# No implementation yet. Each bit names the issue that turns it on, so re-adding
+# one is a deliberate, reviewable change rather than a drive-by bitmask edit.
+UNIMPLEMENTED_CAPABILITIES = {
+    ServerCapabilities.ServerCapabilities_OffersPackages: "#82",
+    ServerCapabilities.ServerCapabilities_OffersConnectionSettings: "#83",
+    ServerCapabilities.ServerCapabilities_AcceptsConnectionSettingsRequest: "#83",
+}
+
+# Proto sentinels that are never advertised.
+RESERVED_CAPABILITIES = {
+    ServerCapabilities.ServerCapabilities_Unspecified: "sentinel; never advertised",
+}
+
+CLASSIFIED_CAPABILITIES = frozenset(
+    ALWAYS_ADVERTISED_CAPABILITIES
+    | CONDITIONAL_CAPABILITIES.keys()
+    | UNIMPLEMENTED_CAPABILITIES.keys()
+    | RESERVED_CAPABILITIES.keys()
+)
+
+
 def server_capabilities() -> int:
     """The `ServerToAgent.capabilities` advertisement (#74, used by #102).
 
@@ -583,14 +631,14 @@ def server_capabilities() -> int:
     different server depending on who spoke first. `OffersRemoteConfig` is only
     advertised when the server may actually deliver a config (#96): a capability bit
     is a promise, and a supervisor that sees it waits for a config that never comes.
+
+    `OffersConnectionSettings` and `AcceptsConnectionSettingsRequest` are deliberately
+    absent until #83 implements CSR/TOFU — a supervisor would otherwise block waiting
+    for an offer this server never sends.
     """
-    capabilities = (
-        ServerCapabilities.ServerCapabilities_AcceptsStatus
-        | ServerCapabilities.ServerCapabilities_AcceptsEffectiveConfig
-        | ServerCapabilities.ServerCapabilities_AcceptsPackagesStatus
-        | ServerCapabilities.ServerCapabilities_OffersConnectionSettings
-        | ServerCapabilities.ServerCapabilities_AcceptsConnectionSettingsRequest
-    )
+    capabilities = 0
+    for bit in ALWAYS_ADVERTISED_CAPABILITIES:
+        capabilities |= bit
     if posture.push_allowed():
         capabilities |= ServerCapabilities.ServerCapabilities_OffersRemoteConfig
     return capabilities

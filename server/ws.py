@@ -49,7 +49,7 @@ from server.framing import (
     encode_message,
     message_limit,
 )
-from server import agent_auth, tracing
+from server import agent_auth, protocol, tracing
 
 CLOSE_PROTOCOL_ERROR = 1002
 CLOSE_POLICY_VIOLATION = 1008
@@ -830,6 +830,22 @@ async def _serve_frames(
             # `transport` is observability only (#108): the shared handler tags its
             # log line and span with which transport carried the message.
             result = process(payload, principal, transport="ws")
+        except protocol.BadRequest as exc:
+            # #73: a malformed message gets a readable BAD_REQUEST before the socket
+            # closes 1002. No state was touched — validation runs before `_apply`.
+            logger.bind(
+                event="opamp.ws.message_rejected", conn_id=conn_id, reason="bad_request"
+            ).warning(f"Connection {conn_id}: refused message: {exc.detail}")
+            OPAMP_WS_MESSAGES.labels(direction="received", outcome="bad_request").inc()
+            reply = protocol.error_response(exc.detail, exc.instance_uid)
+            try:
+                await websocket.send_bytes(
+                    encode_message(reply.SerializeToString(), max_bytes=message_limit())
+                )
+            except Exception:  # pragma: no cover - transport already gone
+                pass
+            await _close(websocket, CLOSE_PROTOCOL_ERROR)
+            return CLOSE_PROTOCOL_ERROR
         except agent_auth.AgentAuthError as exc:
             # #94: identity, not the message body, decides who may speak. The
             # handler refused before applying anything, so state is untouched.

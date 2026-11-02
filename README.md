@@ -163,6 +163,29 @@ must be listed in `CORS_ORIGINS` unless that is `*`. If you launch uvicorn
 directly, set `--ws-max-size` to at least `OPAMP_MAX_MESSAGE_BYTES` or uvicorn's
 16 MiB default will close frames before the app limit applies.
 
+Both transports enforce `OPAMP_MAX_MESSAGE_BYTES` (64 MiB by default). On HTTP the
+limit is checked against `Content-Length` first and then while streaming, **after**
+`Content-Encoding: gzip` decompression — so a small compressed body cannot expand
+past the cap. An oversized body gets `413 Content Too Large` and changes no state
+(no registration, no heartbeat, no metrics). A body that is not a usable
+`AgentToServer` — unparseable protobuf, an empty `instance_uid`, or an unknown or
+corrupt `Content-Encoding` — gets `400` with a `ServerToAgent.error_response`
+(`type: BAD_REQUEST`) and a human-readable reason. `/v1/metrics` carries OTLP, not
+OpAMP, and deliberately does not share this limit. On WebSocket the same rejections
+send the error frame and close `1002`; oversized frames close `1009`.
+
+### Server capabilities
+
+The server advertises exactly what it implements: `AcceptsStatus`,
+`AcceptsEffectiveConfig` and `AcceptsPackagesStatus`, plus `OffersRemoteConfig`
+only while [config push](#remote-config-push) is allowed by the posture.
+`OffersPackages` (#82) and `OffersConnectionSettings` /
+`AcceptsConnectionSettingsRequest` (#83) stay **off** until those flows exist: a set
+bit is a promise an agent is entitled to act on, and a supervisor would otherwise
+wait for a connection-settings offer that never arrives. The classification lives
+in `server/remote_config.py`; a test fails when a proto bump adds an unclassified
+capability.
+
 Both transports accept credential headers, which is what makes per-agent
 authentication possible without a wire extension: `extension/opampextension`
 supports `server.http.headers` **and** `server.ws.headers` (verified against
@@ -710,7 +733,7 @@ line carries the silence, the timeout and the interval.
 | `TRUST_PROXY_HEADERS` | `false` | Believe `X-Forwarded-For` for the lockout key and audit client. Only behind a proxy you control — otherwise it is forgeable |
 | `CORS_ORIGINS` | `*` | Comma-separated list of allowed CORS origins (browser clients) |
 | `OPAMP_WS_ENABLED` | `false` | Enable the WebSocket transport on `/v1/opamp` (see [Transports](#transports)) |
-| `OPAMP_MAX_MESSAGE_BYTES` | `67108864` | Max OpAMP message size (64 MiB), varint header included |
+| `OPAMP_MAX_MESSAGE_BYTES` | `67108864` | Max OpAMP message size (64 MiB) on both transports; varint header included. HTTP request bodies are capped after gzip decompression. `/v1/metrics` (OTLP) is not affected |
 | `OPAMP_WS_OUTBOUND_QUEUE` | `32` | Per-connection WebSocket send queue depth; oldest is dropped when full. A dropped config frame is re-sent by reconciliation, never counted as a delivery (#102) |
 | `CONFIG_PUSH_RATE_PER_SECOND` | `20` | Config frames per second allowed on one WebSocket connection. Over the limit the push is `queued` (delivered on the next report), never blocked |
 | `CONFIG_PUSH_BURST` | `20` | Burst allowance per connection before the rate applies |
@@ -925,8 +948,8 @@ secret only) or `disabled` (read-only mode).
 | POST | `/auth/principals` | admin | Create an identity: `{"name", "role", "password", "expires_at"}`. scrypt-hashed; 409 taken name, 422 bad role/short password |
 | DELETE | `/auth/principals/{id}` | admin | Revoke an identity and close its sessions (row kept, name stays reserved) |
 | GET | `/auth/verify` | viewer | Validate a credential — any role passes (200, 401, or 429 when locked out); failures feed the lockout |
-| POST | `/v1/opamp` | 🔑 | OpAMP protocol endpoint — agents connect here (protobuf). With `OPAMP_AGENT_AUTH=token` the agent must send `Authorization: Bearer <token>`: 401 without a valid one, 403 when the token is for another `instance_uid` |
-| WS | `/v1/opamp` | 🔑 | Same endpoint over WebSocket when `OPAMP_WS_ENABLED=true`; credential checked before `accept()`, refusals close `1008` |
+| POST | `/v1/opamp` | 🔑 | OpAMP protocol endpoint — agents connect here (protobuf). With `OPAMP_AGENT_AUTH=token` the agent must send `Authorization: Bearer <token>`: 401 without a valid one, 403 when the token is for another `instance_uid`. Malformed input (including an empty `instance_uid`) is 400 with a `BAD_REQUEST` error body; a body over `OPAMP_MAX_MESSAGE_BYTES` (after decompression) is 413 |
+| WS | `/v1/opamp` | 🔑 | Same endpoint over WebSocket when `OPAMP_WS_ENABLED=true`; credential checked before `accept()`, refusals close `1008`. Malformed messages (including an empty `instance_uid`) get a `BAD_REQUEST` error frame then close `1002`; oversized frames close `1009` |
 | POST | `/v1/metrics` | | OTLP/HTTP metrics ingestion from collectors (JSON or protobuf) |
 | GET | `/agents` | | List agents. Filters: `healthy=true\|false\|unknown`, `status=` (remote config status, or alias `remote_config_status=`), or any description attribute, e.g. `?environment=prod`. Repeated params are OR. Each agent carries a `credential` block |
 | GET | `/agent/{id}` | | Agent details incl. latest OTLP metrics and `credential` state (`enrolled`, `active`, `last_seen_at`, `revoked_at` — never a token) |

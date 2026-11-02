@@ -225,14 +225,7 @@ class TestUnsolicitedSend:
             push(client)
             pushed = recv(socket)
 
-        expected = (
-            opamp_pb2.ServerCapabilities.ServerCapabilities_AcceptsStatus
-            | opamp_pb2.ServerCapabilities.ServerCapabilities_AcceptsEffectiveConfig
-            | opamp_pb2.ServerCapabilities.ServerCapabilities_AcceptsPackagesStatus
-            | opamp_pb2.ServerCapabilities.ServerCapabilities_OffersConnectionSettings
-            | opamp_pb2.ServerCapabilities.ServerCapabilities_AcceptsConnectionSettingsRequest
-            | opamp_pb2.ServerCapabilities.ServerCapabilities_OffersRemoteConfig
-        )
+        expected = remote_config.server_capabilities()
         assert reply.capabilities == expected
         assert pushed.capabilities == expected
         # A push answers nothing, so it must not request a full state report.

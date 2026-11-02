@@ -72,6 +72,7 @@ from server import (
     protocol,
     redaction,
     remote_config,
+    rollout,
     sequence,
     tracing,
 )
@@ -108,6 +109,7 @@ AGENT_TIMEOUT_INTERVAL_MARGIN = float(os.environ.get("AGENT_TIMEOUT_INTERVAL_MAR
 # startup" are indistinguishable, so the first contact gets a generous window.
 AGENT_FIRST_CONTACT_SECONDS = float(os.environ.get("AGENT_FIRST_CONTACT_SECONDS", 900))
 _cleanup_task = None
+_rollout_task = None
 
 
 def _log_audit_startup() -> None:
@@ -169,9 +171,34 @@ async def periodic_cleanup():
             ).warning(f"include_future sweep failed: {exc}")
 
 
+async def rollout_loop():
+    """Advance staged rollouts (#101) — one task, every tick, never a thread per rollout.
+
+    The engine is synchronous (SQLite reads plus the bounded push wait), so it runs in a
+    worker thread: a rollout that has to wait `CONFIG_PUSH_WAIT_SECONDS` for a socket
+    must not stall heartbeats. Not started when config push is disabled — there is
+    nothing it could legitimately do, and a background loop that only logs refusals is
+    noise.
+    """
+    while True:
+        await asyncio.sleep(rollout.tick_seconds())
+        try:
+            # Read per iteration, so an operator flipping the posture does not need a
+            # restart to stop promotion.
+            if not posture.push_allowed():
+                continue
+            await asyncio.to_thread(rollout.tick)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # pragma: no cover - the tick must never die
+            logger.bind(event="config.rollout.tick_failed").warning(
+                f"rollout tick failed: {exc}"
+            )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _cleanup_task
+    global _cleanup_task, _rollout_task
     # Credential first: the posture check needs to know whether admin auth exists.
     admin_auth.ensure()
     # #95: no credential at all means read-open / write-closed; a shared password
@@ -199,9 +226,14 @@ async def lifespan(app: FastAPI):
     # SQLite per message (#109).
     remote_config.REGISTRY.reload()
     _cleanup_task = asyncio.create_task(periodic_cleanup())
+    # #101: the staged rollout engine. Separate from the 15s cleanup tick on purpose:
+    # promotion latency and stale-agent reaping are unrelated knobs.
+    _rollout_task = asyncio.create_task(rollout_loop())
     yield
     if _cleanup_task:
         _cleanup_task.cancel()
+    if _rollout_task:
+        _rollout_task.cancel()
     tracing.shutdown_tracing()
 
 prom_client.REGISTRY.unregister(prom_client.PROCESS_COLLECTOR)
@@ -864,14 +896,20 @@ def cleanup_stale_agents(now: Optional[datetime] = None) -> list:
     stale = []
 
     for agent in AGENT_REGISTRY.list_all():
+        if not agent.is_stale(
+            now,
+            AGENT_TIMEOUT_SECONDS,
+            AGENT_TIMEOUT_INTERVAL_MARGIN,
+            AGENT_FIRST_CONTACT_SECONDS,
+        ):
+            continue
         timeout = agent.timeout_seconds(
             AGENT_TIMEOUT_SECONDS,
             AGENT_TIMEOUT_INTERVAL_MARGIN,
             AGENT_FIRST_CONTACT_SECONDS,
         )
         silent = (now - agent.last_heartbeat).total_seconds()
-        if silent > timeout:
-            stale.append((agent, silent, timeout))
+        stale.append((agent, silent, timeout))
 
     if not stale:
         # Every 15s is 5760 identical lines a day, and this is the tick that also
@@ -3204,6 +3242,16 @@ def config_posture(request: Request):
             # *why* an agent stopped being offered a config.
             "max_delivery_attempts": remote_config.max_delivery_attempts(),
             "revert_grace_seconds": remote_config.revert_grace_seconds(),
+            # #101: the staged-rollout bounds, so "why did this rollout pause / why is
+            # this agent held?" is answerable from one endpoint.
+            "rollout": {
+                "canary_percent": rollout.canary_percent(),
+                "max_agents_per_batch": rollout.max_agents_per_batch(),
+                "max_percent_per_batch": rollout.max_percent_per_batch(),
+                "health_gate_seconds": rollout.health_gate_seconds(),
+                "ttl_minutes": rollout.ttl_minutes(),
+                "tick_seconds": rollout.tick_seconds(),
+            },
             "validation": {
                 "max_aliases": config_validation.max_aliases(),
                 "max_depth": config_validation.max_depth(),

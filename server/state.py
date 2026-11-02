@@ -747,6 +747,12 @@ class SQLiteDesiredConfigStore:
         "attempts": "INTEGER NOT NULL DEFAULT 0",
         "poisoned": "INTEGER NOT NULL DEFAULT 0",
         "unconfirmed": "INTEGER NOT NULL DEFAULT 0",
+        # #101: a staged rollout assigns every revision up front but *holds* delivery
+        # until that agent's batch is promoted. Held is a property of this
+        # assignment (it resets on the next one), so a rollout that is aborted or
+        # expires simply leaves it in place: the agent is never handed a config the
+        # gate has not cleared, and any new revision releases it.
+        "held": "INTEGER NOT NULL DEFAULT 0",
     }
     # Delivery facts joined onto the current revision. One query per agent gives the
     # message path everything it needs without a second lookup (#109).
@@ -818,7 +824,7 @@ class SQLiteDesiredConfigStore:
     @staticmethod
     def _row(row) -> Dict[str, Any]:
         record = {key: row[key] for key in row.keys()}
-        for flag in ("withdrawn", "poisoned", "unconfirmed"):
+        for flag in ("withdrawn", "poisoned", "unconfirmed", "held"):
             if flag in record:
                 record[flag] = bool(record[flag])
         if "attempts" in record:
@@ -844,6 +850,7 @@ class SQLiteDesiredConfigStore:
         parent_revision_id: Optional[str] = None,
         verdict_json: Optional[str] = None,
         make_current: bool = True,
+        held: bool = False,
     ) -> Dict[str, Any]:
         """Append a revision, optionally making it the desired state for `agent_id`.
 
@@ -884,7 +891,7 @@ class SQLiteDesiredConfigStore:
                 ),
             )
             if make_current:
-                self._assign_on(conn, agent_id, revision_id, now)
+                self._assign_on(conn, agent_id, revision_id, now, held=held)
         # `current()` for a made-current revision (it carries the delivery facts);
         # the new row itself when the caller is only proposing.
         if make_current:
@@ -897,6 +904,7 @@ class SQLiteDesiredConfigStore:
         agent_id: str,
         revision_id: str,
         now: Optional[str] = None,
+        held: bool = False,
     ) -> None:
         """Point `agent_id` at `revision_id`, resetting the delivery facts.
 
@@ -921,8 +929,8 @@ class SQLiteDesiredConfigStore:
             )
         conn.execute(
             "INSERT INTO desired_configs "
-            "(agent_id, revision_id, previous_revision_id, updated_at) "
-            "VALUES (?, ?, ?, ?) "
+            "(agent_id, revision_id, previous_revision_id, updated_at, held) "
+            "VALUES (?, ?, ?, ?, ?) "
             "ON CONFLICT(agent_id) DO UPDATE SET "
             "revision_id=excluded.revision_id, "
             "previous_revision_id=CASE "
@@ -935,14 +943,28 @@ class SQLiteDesiredConfigStore:
             # agent: a new assignment must be deliverable even when the one it
             # replaces was poisoned. Without this a rollback after a failed push is
             # silently undeliverable — the one-click recovery the epic promises.
-            "attempts=0, poisoned=0, unconfirmed=0, updated_at=excluded.updated_at",
-            (agent_id, revision_id, previous_id, now),
+            "attempts=0, poisoned=0, unconfirmed=0, held=excluded.held, "
+            "updated_at=excluded.updated_at",
+            (agent_id, revision_id, previous_id, now, int(held)),
         )
 
-    def assign(self, agent_id: str, revision_id: str) -> None:
+    def assign(self, agent_id: str, revision_id: str, held: bool = False) -> None:
         """Approve-time assignment: make `revision_id` the agent's desired config."""
         with self._connect() as conn:
-            self._assign_on(conn, agent_id, revision_id)
+            self._assign_on(conn, agent_id, revision_id, held=held)
+
+    def set_held(self, agent_id: str, held: bool) -> bool:
+        """Release or re-apply the rollout hold on an agent's assignment (#101).
+
+        Returns False when the agent has no assignment (nothing to hold), so a
+        rollout that has been overtaken by a newer revision cannot resurrect it.
+        """
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE desired_configs SET held=?, updated_at=? WHERE agent_id=?",
+                (int(held), utcnow().isoformat(), agent_id),
+            )
+            return bool(cursor.rowcount)
 
     def set_status(
         self,
@@ -1214,6 +1236,270 @@ class SQLiteDesiredConfigStore:
                 (utcnow().isoformat(), cutoff),
             )
             return cursor.rowcount or 0
+
+
+class SQLiteRolloutStore:
+    """Staged rollouts (#101): one row per rollout, one row per (rollout, agent).
+
+    Two tables, because they answer two different questions and are written at two
+    different rates: `config_rollouts` is the operator-visible state machine (a
+    handful of rows, one update per batch transition) and `config_rollout_agents` is
+    the blast-radius record (one row per agent, batched reads on the tick).
+
+    The batch plan is **stored, not recomputed** (`batch_index` per agent plus the
+    settings that produced it). A rollout whose plan changed between ticks because the
+    fleet changed underneath it would be a second, undocumented rollout.
+    """
+
+    STATUS_PENDING = "pending"
+    STATUS_RUNNING = "running"
+    STATUS_PAUSED = "paused"
+    STATUS_COMPLETED = "completed"
+    STATUS_ABORTED = "aborted"
+    STATUS_CANCELLED = "cancelled"
+    STATUSES = (
+        STATUS_PENDING,
+        STATUS_RUNNING,
+        STATUS_PAUSED,
+        STATUS_COMPLETED,
+        STATUS_ABORTED,
+        STATUS_CANCELLED,
+    )
+    # Statuses that still control delivery (and therefore still expire on TTL).
+    OPEN_STATUSES = (STATUS_PENDING, STATUS_RUNNING, STATUS_PAUSED)
+
+    # Per-agent state vocabulary, from the issue: pending -> delivered -> applying ->
+    # applied | failed | reverted | paused. `applying` is the agent's own word.
+    AGENT_STATES = (
+        "pending",
+        "delivered",
+        "applying",
+        "applied",
+        "failed",
+        "reverted",
+        "paused",
+    )
+
+    # Editable rollout columns. Fixed set: a caller cannot rewrite `created_at` or the
+    # recorded batch plan, which is what makes a rollout reproducible in tests.
+    _ROLLOUT_FIELDS = {
+        "status",
+        "current_batch",
+        "batch_started_at",
+        "paused_reason",
+        "pause_detail",
+        "paused_at",
+        "completed_at",
+        "cancelled_at",
+        "detail_json",
+        "updated_at",
+    }
+    _AGENT_FIELDS = {"state", "delivered_at", "applied_at", "detail", "updated_at"}
+
+    def __init__(self, db_path: Path = DB_PATH):
+        self.db_path = db_path
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._connect() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS config_rollouts (
+                    rollout_id TEXT PRIMARY KEY,
+                    proposal_id TEXT,
+                    kind TEXT NOT NULL DEFAULT 'promote',
+                    status TEXT NOT NULL,
+                    config_hash TEXT,
+                    author TEXT,
+                    approver TEXT,
+                    scope_json TEXT,
+                    note TEXT,
+                    canary_percent REAL,
+                    max_agents_per_batch INTEGER,
+                    max_percent_per_batch INTEGER,
+                    health_gate_seconds INTEGER,
+                    ttl_minutes INTEGER,
+                    batch_size INTEGER,
+                    total_agents INTEGER,
+                    batch_count INTEGER,
+                    current_batch INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    expires_at TEXT,
+                    batch_started_at TEXT,
+                    paused_reason TEXT,
+                    pause_detail TEXT,
+                    paused_at TEXT,
+                    completed_at TEXT,
+                    cancelled_at TEXT,
+                    detail_json TEXT
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS config_rollout_agents (
+                    rollout_id TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    batch_index INTEGER NOT NULL,
+                    state TEXT NOT NULL,
+                    revision_id TEXT,
+                    config_hash TEXT,
+                    parent_revision_id TEXT,
+                    delivered_at TEXT,
+                    applied_at TEXT,
+                    detail TEXT,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (rollout_id, agent_id)
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS config_rollouts_status_idx "
+                "ON config_rollouts(status, created_at)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS config_rollout_agents_batch_idx "
+                "ON config_rollout_agents(rollout_id, batch_index)"
+            )
+            conn.execute("PRAGMA journal_mode=WAL")
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=5000")
+        return conn
+
+    @staticmethod
+    def _row(row) -> Dict[str, Any]:
+        record = {key: row[key] for key in row.keys()}
+        for numeric in ("current_batch", "batch_count", "total_agents", "batch_size"):
+            if record.get(numeric) is not None:
+                record[numeric] = int(record[numeric])
+        return record
+
+    # ------------------------------------------------------------------ writes
+
+    def create(self, rollout_id: str, **fields: Any) -> Dict[str, Any]:
+        """Insert one rollout row."""
+        values = dict(fields)
+        now = utcnow().isoformat()
+        values.setdefault("created_at", now)
+        values.setdefault("updated_at", now)
+        values["rollout_id"] = rollout_id
+        columns = list(values)
+        with self._connect() as conn:
+            conn.execute(
+                f"INSERT INTO config_rollouts ({', '.join(columns)}) "
+                f"VALUES ({', '.join('?' for _ in columns)})",
+                tuple(values[column] for column in columns),
+            )
+        return self.get(rollout_id) or {}
+
+    def update(self, rollout_id: str, **fields: Any) -> None:
+        """One state transition. The editable set is fixed on purpose."""
+        assignments = []
+        values: List[Any] = []
+        for name, value in fields.items():
+            if name not in self._ROLLOUT_FIELDS:
+                raise ValueError(f"cannot set {name!r} on a rollout")
+            assignments.append(f"{name}=?")
+            values.append(value)
+        if not assignments:
+            return
+        assignments.append("updated_at=?")
+        values.append(utcnow().isoformat())
+        values.append(rollout_id)
+        with self._connect() as conn:
+            conn.execute(
+                f"UPDATE config_rollouts SET {', '.join(assignments)} WHERE rollout_id=?",
+                tuple(values),
+            )
+
+    def put_agent(self, rollout_id: str, agent_id: str, **fields: Any) -> None:
+        """Record one agent's place in the plan (written once, at creation)."""
+        values = dict(fields)
+        values.setdefault("state", "pending")
+        values.setdefault("updated_at", utcnow().isoformat())
+        values["rollout_id"] = rollout_id
+        values["agent_id"] = agent_id
+        columns = list(values)
+        with self._connect() as conn:
+            conn.execute(
+                f"INSERT OR REPLACE INTO config_rollout_agents ({', '.join(columns)}) "
+                f"VALUES ({', '.join('?' for _ in columns)})",
+                tuple(values[column] for column in columns),
+            )
+
+    def set_agent(self, rollout_id: str, agent_id: str, **fields: Any) -> None:
+        assignments = []
+        values: List[Any] = []
+        for name, value in fields.items():
+            if name not in self._AGENT_FIELDS:
+                raise ValueError(f"cannot set {name!r} on a rollout agent")
+            assignments.append(f"{name}=?")
+            values.append(value)
+        if not assignments:
+            return
+        assignments.append("updated_at=?")
+        values.append(utcnow().isoformat())
+        values.extend([rollout_id, agent_id])
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE config_rollout_agents SET "
+                + ", ".join(assignments)
+                + " WHERE rollout_id=? AND agent_id=?",
+                tuple(values),
+            )
+
+    # ------------------------------------------------------------------- reads
+
+    def get(self, rollout_id: str) -> Optional[Dict[str, Any]]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM config_rollouts WHERE rollout_id=?", (rollout_id,)
+            ).fetchone()
+        return self._row(row) if row else None
+
+    def list(
+        self,
+        statuses: Optional[List[str]] = None,
+        kind: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        where: List[str] = []
+        values: List[Any] = []
+        if statuses:
+            where.append(f"status IN ({', '.join('?' for _ in statuses)})")
+            values.extend(statuses)
+        if kind:
+            where.append("kind=?")
+            values.append(kind)
+        clause = f" WHERE {' AND '.join(where)}" if where else ""
+        values.append(max(1, min(int(limit), 1000)))
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM config_rollouts" + clause
+                + " ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                tuple(values),
+            ).fetchall()
+        return [self._row(row) for row in rows]
+
+    def agents(self, rollout_id: str) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM config_rollout_agents WHERE rollout_id=? "
+                "ORDER BY batch_index, agent_id",
+                (rollout_id,),
+            ).fetchall()
+        return [self._row(row) for row in rows]
+
+    def state_counts(self, rollout_ids: List[str]) -> Dict[str, int]:
+        """`{state: n}` for the agent gauge - one query for the whole tick."""
+        if not rollout_ids:
+            return {}
+        placeholders = ", ".join("?" for _ in rollout_ids)
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT state, COUNT(*) AS n FROM config_rollout_agents "
+                f"WHERE rollout_id IN ({placeholders}) GROUP BY state",
+                tuple(rollout_ids),
+            ).fetchall()
+        return {row["state"]: int(row["n"]) for row in rows}
 
 
 # ---------------------------------------------------------------------------- audit
@@ -1762,6 +2048,26 @@ class AgentState:
         if self.report_samples < TRUSTED_REPORT_SAMPLES or not self.report_interval:
             return max(floor, first_contact)
         return max(floor, margin * self.report_interval)
+
+    def is_stale(
+        self,
+        now: Optional[datetime] = None,
+        floor: float = 180.0,
+        margin: float = 3.0,
+        first_contact: float = 900.0,
+    ) -> bool:
+        """Has this agent been silent longer than its own budget? (#69, #101)
+
+        One implementation shared by the stale-agent sweep (`server/main.py`) and the
+        rollout health gate: a gate that used a *different* idea of "silent" than the
+        reaper would either promote over a dead agent or pause a healthy one.
+        """
+        now = now or utcnow()
+        timeout = self.timeout_seconds(floor, margin, first_contact)
+        heartbeat = self.last_heartbeat
+        if heartbeat.tzinfo is None:
+            heartbeat = heartbeat.replace(tzinfo=timezone.utc)
+        return (now - heartbeat).total_seconds() > timeout
 
     @property
     def capability_tags(self) -> list[dict]:

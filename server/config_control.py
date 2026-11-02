@@ -432,6 +432,7 @@ def approve(
     confirm_scope_change: bool = False,
     override_reason: Optional[str] = None,
     note: Optional[str] = None,
+    hold_all: bool = False,
 ) -> Dict[str, Any]:
     """Approve a proposal: re-resolve, re-validate, supersede, assign.
 
@@ -450,6 +451,12 @@ def approve(
 
     Everything is validated *before* the first mutation, so a refused approval leaves
     the store exactly as it was.
+
+    `hold_all` (#101) activates every revision but **holds delivery** for all of them,
+    which is what lets a staged rollout own the promotion: the assignment exists (so
+    nothing else can deliver it), yet no agent receives the config until its batch is
+    released. Holding happens in the same statement as the assignment, so a status
+    report arriving mid-approval cannot collect a config the rollout has not cleared.
     """
     store = remote_config.REGISTRY.store
     rows = store.by_proposal(proposal_id)
@@ -566,7 +573,7 @@ def approve(
             verdict_json=json.dumps(verdicts[agent_id].to_dict(), sort_keys=True),
             scope_json=scope_json,
         )
-        remote_config.REGISTRY.activate(agent_id, revision_id)
+        remote_config.REGISTRY.activate(agent_id, revision_id, held=hold_all)
         approved.append({"agent_id": agent_id, "revision_id": revision_id})
 
     return {
@@ -578,6 +585,7 @@ def approve(
         "agents": len(approved),
         "dropped": dropped,
         "added": newcomers,
+        "held": bool(hold_all),
         "verdict": next(iter(verdicts.values())).to_dict() if verdicts else {},
         "override_reason": (override_reason or "").strip() or None,
         # `delivery` is deliberately absent: the route attaches the result of actually
@@ -725,6 +733,7 @@ def rollback(
     agents: Sequence[AgentState] = (),
     note: Optional[str] = None,
     revision_id: Optional[str] = None,
+    held: bool = False,
 ) -> Dict[str, Any]:
     """Roll an agent back to its previous revision, as a **new** revision (D4).
 
@@ -778,6 +787,7 @@ def rollback(
         note=note or f"rollback to {previous['revision_id']}",
         parent_revision_id=previous["revision_id"],
         verdict=verdict,
+        held=held,
     )
     if current and current.get("revision_id") != revision_id:
         store.set_status(

@@ -630,6 +630,65 @@ Lifecycle: `proposed → active → superseded | rolled_back | poisoned`, plus
   missing YAML paths) and fires **one** `config_drift` alert per (agent, revision),
   never one per poll.
 
+### Staged rollouts (#101)
+
+The failure this engine exists for: one typo, four hundred collectors down, and
+because their `opamp` extension is no longer running there is no remote way to fix
+them (upstream is explicit that an invalid config leaves the collector down until a
+manual restart). So a rollout never moves from one agent to two hundred without
+evidence that agent one came back healthy.
+
+```
+canary (CONFIG_PUSH_CANARY_PERCENT, ≥1 agent)
+   → every agent APPLIED *with our hash*      ┐
+   → every agent healthy                     │ promotion gate
+   → no agent silent since delivery          │ (all must hold)
+   → CONFIG_PUSH_HEALTH_GATE_SECONDS elapsed ┘
+   → next batch, capped at CONFIG_PUSH_MAX_AGENTS_PER_BATCH *and*
+     CONFIG_PUSH_MAX_PERCENT_PER_BATCH → … → completed
+```
+
+- **Approval assigns, the rollout releases.** Every revision becomes the agent's
+desired config at approval time but is **held** (`desired_configs.held`), so an
+HTTP agent polling in the meantime is refused the config (`held_by_rollout`) until
+its batch is promoted. The hold is written in the same statement as the
+assignment, so there is no window in which a report could collect an unpromoted
+config. Any *new* revision releases the hold, which is the escape hatch after an
+abort.
+- **Deterministic batches.** Targets are sorted, so the same fleet produces the
+same plan; the plan is stored per agent (`config_rollout_agents.batch_index`)
+rather than recomputed, so a rollout is reproducible in a test and reviewable
+before it runs.
+- **A failure pauses; it never rolls the fleet back.** Rolling back 300 agents
+because one failed is a second outage. The pause carries one reason
+(`failed`, `auto_reverted`, `agent_went_silent`, `unhealthy`,
+`delivery_unconfirmed`, `superseded`) and the summary is "N applied, K failed,
+paused at batch 2". The two decisions stay human: retry the failed agents (an
+approver `reactivate`, #99) or roll back the applied ones — which runs as its own
+rollout, canary first, gated the same way.
+- **Abort stops promotion immediately, and cannot recall.** `abort()` stops the
+next batch, leaves already-applied agents exactly as they are (the config is on
+the agent and it is running it), and leaves un-promoted agents held so a stopped
+rollout can never widen.
+- **A stalled rollout expires.** `CONFIG_PUSH_ROLLOUT_TTL_MINUTES` (default 60)
+cancels a running or paused rollout, audits `config.rollout.cancelled` with
+`reason: ttl_expired`, and leaves the remaining holds in place — an approval
+nobody acted on must not fire three weeks later against a fleet that has moved on.
+- **Gates are pure functions.** `rollout.batch_gate()` takes the agent facts, the
+window and a clock value; it has no database, env or wall-clock dependency, so
+"the gate never opened" is an assertion about values. `APPLIED` is only evidence
+when the reported hash is *ours*, after base64→hex conversion — naive equality is
+how a rollout promotes on an agent that is running something else.
+- **One background task, not a thread per rollout.** `rollout_loop()` ticks every
+`CONFIG_PUSH_TICK_SECONDS` (default 5) in a worker thread and does nothing at all
+when config push is disabled.
+- **Observability:** `opamp_config_rollout_agents_total{state}`,
+`opamp_config_rollout_paused_total{reason}`,
+`opamp_config_rollout_promoted_total{kind}`, `opamp_config_rollout_status{status,kind}`,
+`opamp_config_rollout_batch{status}`, and one structured log line per batch
+transition (`event=config.rollout.batch`). Pauses, completions, cancellations and
+aborts are audit rows.
+
 ### What validation can and cannot promise (#100)
 
 The server cannot prove a config will not crash a collector — that is why rollout

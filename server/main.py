@@ -3389,20 +3389,22 @@ def create_config_rollout(
 
     **`dry_run: true`** returns the exact batch plan, the caps in force and the stored
     validation verdict, and changes nothing: it does not approve, hold or deliver. It
-    is a **200**, not a preview of future state, so a UI can show it before the approver
-    clicks.
+    needs only `operator` (it is a question, not a decision), so a UI can show the plan
+    to the person who proposed it before an approver clicks.
 
     Errors: **404** config push is disabled (#96) or the proposal is unknown; **409** the
     proposal was already decided, or re-validation at approval failed (`detail` carries
     the findings); **422** a bad parameter (extra fields are rejected, `extra="forbid"`).
     """
-    principal = require_roles(request, ROLE_APPROVER)
-    try:
-        info = config_control.summary(proposal_id)
-    except config_control.ConfigControlError as exc:
-        raise _control_error(exc)
-
+    # A dry run reads and plans; it approves, holds and delivers nothing, so it is an
+    # `operator` question ("what would happen?") rather than an approval. Creating the
+    # rollout below is the approval and needs `approver`.
     if body.dry_run:
+        require_roles(request, ROLE_OPERATOR)
+        try:
+            info = config_control.summary(proposal_id)
+        except config_control.ConfigControlError as exc:
+            raise _control_error(exc)
         try:
             return rollout.preview_rollout(
                 proposal_id,
@@ -3416,6 +3418,11 @@ def create_config_rollout(
         except rollout.RolloutError as exc:
             raise HTTPException(status_code=exc.status_code, detail=exc.detail)
 
+    principal = require_roles(request, ROLE_APPROVER)
+    try:
+        info = config_control.summary(proposal_id)
+    except config_control.ConfigControlError as exc:
+        raise _control_error(exc)
     audit_action(
         principal,
         "config.rollout.create",

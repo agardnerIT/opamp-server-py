@@ -111,3 +111,39 @@ capabilities:
   accepts_packages: true
 ```
 """)
+
+st.divider()
+
+st.markdown("### Remote config: propose → approve → canary → promote")
+st.markdown("""
+The **Remote Config** page can change what a whole fleet runs, so it is built around
+review rather than a single "push" button. The flow:
+
+1. **Target** — pick agents with the same filters as the Agents page. The page shows
+   the count and the blast-radius breakdown before anything else.
+2. **Edit** — paste the config (or prefill from an agent's current effective config).
+   A **redacted** document is refused: pushing one back would wipe the fleet's
+   credentials.
+3. **Validate** — structural checks, protected invariants and the policy gate. Errors
+   block the next step.
+4. **Propose** — stores one immutable revision per target and delivers *nothing*.
+5. **Approve & roll out** (approver) — the canary batch is released first; the rest of
+   the fleet is **held** until every agent in the canary reports `APPLIED` with our
+   hash, stays healthy, and the health-gate window has elapsed.
+6. **Stop** — *abort* stops promotion (it cannot recall a config already on an agent);
+   *roll back* creates a new revision per applied agent and runs it as its own gated
+   rollout.
+
+Two prerequisites, both upstream realities:
+
+- A pushed config is applied by the **OpAMP Supervisor** (`cmd/opampsupervisor`), not by
+  `extension/opampextension` — a bare collector never advertises `AcceptsRemoteConfig`.
+- An invalid config leaves the collector **down until it is manually restarted** (the
+  extension is no longer running), which is why rollout staging and the health gate are
+  not optional.
+
+Need a restart after the config lands? Tick "Restart each agent once its batch passes
+the gate" on the rollout plan — and enable `accepts_restart_command: true` in the
+collector's `opamp` extension, or the server will refuse the restart with a 409 rather
+than pretending to have sent one.
+""")

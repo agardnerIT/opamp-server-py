@@ -5,18 +5,20 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ui.shared import (
+    ROLE_OPERATOR,
     SERVER_URL,
     format_local_time,
     get_agents,
     get_agent,
     _compliance_badge,
+    admin_request,
     render_sidebar,
+    require_admin,
     show_slim_distro_builder_page,
     display_config_yaml,
     generate_manifest,
     generate_ocb_command,
-    get_auth_headers,
-    base64,
+    get_session,
     datetime,
     requests,
     pd,
@@ -290,64 +292,32 @@ if agent_id_param:
     if not opa_enabled:
         st.info("Compliance checking is disabled. Set `OPA_ENABLED=true` and configure `OPA_URL` to enable.")
     else:
-        has_password = bool(st.session_state.get("admin_password"))
-        
-        if not has_password:
-            st.warning("🔒 Admin password required to check compliance")
-            
-            if "compliance_auth_attempt" not in st.session_state:
-                st.session_state["compliance_auth_attempt"] = 0
-            form_key = f"compliance_auth_{selected_id[:8]}_{st.session_state['compliance_auth_attempt']}"
-            
-            with st.form(key=form_key):
-                if st.session_state.get("admin_password_error"):
-                    st.error("Invalid password. Try again.")
-                    st.session_state["admin_password_error"] = False
-                password = st.text_input("Password", type="password", key=f"compliance_pwd_{selected_id[:8]}")
-                col1, col2 = st.columns([1, 1])
-                with col1:
-                    submit = st.form_submit_button("Submit", type="primary")
-                with col2:
-                    skip = st.form_submit_button("Skip")
-                
-                if submit and password:
-                    test_encoded = base64.b64encode(f":{password}".encode()).decode()
-                    test_headers = {"Authorization": f"Basic {test_encoded}"}
-                    try:
-                        test_resp = requests.get(f"{SERVER_URL}/auth/verify", headers=test_headers, timeout=5)
-                        if test_resp.status_code == 200:
-                            st.session_state["admin_password"] = password
-                            st.rerun()
-                        elif test_resp.status_code == 401:
-                            st.session_state["compliance_auth_attempt"] += 1
-                            st.session_state["admin_password_error"] = True
-                            st.rerun()
-                        else:
-                            st.error(f"Server error: {test_resp.status_code}")
-                    except Exception as e:
-                        st.error(f"Failed to verify password: {e}")
-                elif submit and not password:
-                    st.error("Please enter a password")
-        else:
-            if st.button("🔍 Check Compliance", key=f"check_compliance_{selected_id[:8]}_btn", type="primary"):
-                with st.spinner("Evaluating compliance..."):
-                    try:
-                        headers = get_auth_headers()
-                        resp = requests.post(f"{SERVER_URL}/compliance/check/{selected_id}", headers=headers, timeout=30)
-                        if resp.status_code == 200:
-                            st.success("Compliance check completed!")
-                            st.session_state.metrics_refresh = st.session_state.get("metrics_refresh", {})
-                            st.session_state.metrics_refresh[selected_id] = True
-                            st.rerun()
-                        elif resp.status_code == 401:
-                            st.session_state.pop("admin_password", None)
-                            st.session_state["compliance_auth_attempt"] = st.session_state.get("compliance_auth_attempt", 0) + 1
-                            st.session_state["admin_password_error"] = True
-                            st.rerun()
-                        else:
-                            st.error(f"Compliance check failed: {resp.text}")
-                    except Exception as e:
-                        st.error(f"Failed to check compliance: {e}")
+        # #105: this page used to own a second copy of the login form, and held the
+        # password in session state to build HTTP Basic headers. It now shares the one
+        # implementation in `ui/shared.py` — the same form, the same token, the same
+        # 401/403/429 handling as the Admin page.
+        current = get_session()
+        if current is None or not current.can(ROLE_OPERATOR):
+            st.caption(
+                "🔒 Checking compliance is audited and needs the `operator` role — "
+                "you will be asked to sign in."
+            )
+        if st.button("🔍 Check Compliance", key=f"check_compliance_{selected_id[:8]}_btn", type="primary"):
+            require_admin(ROLE_OPERATOR)  # renders sign-in and stops when needed
+            with st.spinner("Evaluating compliance..."):
+                resp = admin_request(
+                    "POST", f"/compliance/check/{selected_id}",
+                    required_role=ROLE_OPERATOR, timeout=30,
+                )
+                if resp is None:
+                    st.error("Compliance check failed.")
+                elif resp.status_code == 200:
+                    st.success("Compliance check completed!")
+                    st.session_state.metrics_refresh = st.session_state.get("metrics_refresh", {})
+                    st.session_state.metrics_refresh[selected_id] = True
+                    st.rerun()
+                else:
+                    st.error(f"Compliance check failed: {resp.text}")
         
         if compliance:
             policy_results = compliance.get("policy_results", [])

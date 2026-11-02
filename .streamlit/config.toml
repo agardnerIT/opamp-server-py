@@ -1,2 +1,21 @@
+# Streamlit configuration (#105).
+#
+# The UI is an admin console, not a public site: it holds a session token that can
+# change fleet configuration, so it gets the same posture as the API.
+[server]
+# Both of these are Streamlit's defaults; they are pinned so an environment
+# variable or a `--server.` flag cannot quietly weaken them, and so the intended
+# posture is reviewable in one place.
+#
+# XSRF protection covers Streamlit's own endpoints and component iframes. Keep it on:
+# a cross-site POST that reaches the websocket endpoint with a live session is
+# exactly what it exists to stop.
+enableXsrfProtection = true
+# Same-origin only. The UI is same-origin by construction (it talks to the API
+# server-side, never from the browser), so no cross-origin request is legitimate
+# here — and Streamlit's CORS default would answer `Access-Control-Allow-Origin`
+# for origins that have no business reading an admin console.
+enableCORS = false
+
 [browser]
 gatherUsageStats = false

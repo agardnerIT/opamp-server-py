@@ -50,6 +50,29 @@ st.download_button(
 
 st.divider()
 
+st.markdown("### Admin console security")
+st.markdown("""
+This UI is an **admin console**, not a public site:
+
+- Signing in posts your name and password to `POST /auth/session` **once**; the
+  password is discarded and only the short-lived bearer **token** is kept. Sessions
+  expire on a server TTL and after a period of inactivity, and can be revoked.
+  *Extend* on the Admin page is an audited re-auth: it issues a new token and
+  revokes the old one.
+- **Roles** (`viewer` < `operator` < `approver` < `admin`) decide which actions are
+  offered. Hiding a button is cosmetic — the server re-checks your role on every
+  request and records the action in the audit log.
+- Streamlit keeps the session **server-side**, but the browser↔UI hop is plain HTTP
+  unless you put it behind TLS. Never publish port 8501 directly: bind it to
+  loopback (as `docker-compose.yml` does) or terminate TLS in front of it.
+- With no admin credential configured the server is **read-only**: reads work,
+  every privileged action is refused.
+- No secret is ever placed in a URL. Only non-secret identifiers (agent ids,
+  grouping) appear in query parameters, because they land in proxy logs.
+""")
+
+st.divider()
+
 st.markdown("### Agent Description")
 st.markdown("""
 The OpAMP extension supports both **identifying** and **non-identifying** attributes:

@@ -6,11 +6,15 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from ui.shared import (
+    ROLE_ADMIN,
+    ROLE_OPERATOR,
     SERVER_URL,
+    REAUTH_KEY,
+    admin_request,
     get_agents,
-    get_auth_status,
+    logout,
     render_sidebar,
-    base64,
+    require_admin,
     requests,
     pd,
 )
@@ -23,80 +27,50 @@ st.set_page_config(
 
 render_sidebar()
 
+# #105: one login implementation, one session token, no password in session state.
+# This page needs `operator`: alerts are the only thing here an operator may change.
+# `require_admin` renders the sign-in form and `st.stop()`s if the requirement is not
+# met, so everything below runs for an authenticated caller only.
+session = require_admin(ROLE_OPERATOR)
+
 st.markdown("**Admin Panel**")
-st.caption("Sensitive operations that require authentication.")
+st.caption(
+    "Sensitive operations. The server enforces your role on every call — the buttons "
+    "this page hides are also refused by the API."
+)
+
+# ------------------------------------------------------------------ session bar
+with st.container(border=True):
+    left, middle, right = st.columns([3, 1, 1])
+    with left:
+        st.markdown(f"Signed in as **{session.name}** · role `{session.role}`")
+        st.caption(f"{session.expiry_label()} · token only, the password was discarded")
+    with middle:
+        if st.button("Extend", key="admin_extend_session", help=(
+            "Sign in again to extend. This is an audited re-auth: the server issues a "
+            "new token and the old one is revoked."
+        )):
+            st.session_state[REAUTH_KEY] = True
+            st.rerun()
+    with right:
+        if st.button("Sign out", key="admin_sign_out_button"):
+            logout()
+
 st.divider()
 
-password = None
-if get_auth_status().get("password_required"):
-    if "admin_password" not in st.session_state:
-        if "admin_password_attempt" not in st.session_state:
-            st.session_state["admin_password_attempt"] = 0
-        show_form = True
-        form_key = f"admin_password_form_{st.session_state['admin_password_attempt']}"
-        with st.form(form_key):
-            st.markdown("**🔒 Admin Password Required**")
-            if st.session_state.get("admin_password_error"):
-                st.error("Invalid password. Try again.")
-                st.session_state["admin_password_error"] = False
-            password = st.text_input("Password", type="password", key="admin_password_input_main")
-            submitted = st.form_submit_button("Submit")
-
-            if submitted and password:
-                test_encoded = base64.b64encode(f":{password}".encode()).decode()
-                test_headers = {"Authorization": f"Basic {test_encoded}"}
-                try:
-                    test_resp = requests.get(f"{SERVER_URL}/auth/verify", headers=test_headers, timeout=5)
-                    if test_resp.status_code == 200:
-                        st.session_state["admin_password"] = password
-                        st.rerun()
-                    elif test_resp.status_code == 401:
-                        st.session_state["admin_password_attempt"] += 1
-                        st.session_state["admin_password_error"] = True
-                        st.rerun()
-                    else:
-                        st.error(f"Server error: {test_resp.status_code}")
-                except Exception as e:
-                    st.error(f"Failed to verify password: {e}")
-            elif submitted and not password:
-                st.session_state["admin_password_attempt"] += 1
-                st.error("Password required")
-                st.rerun()
-            st.stop()
-    else:
-        password = st.session_state.get("admin_password")
-
-if password:
-    encoded = base64.b64encode(f":{password}".encode()).decode()
-    headers = {"Authorization": f"Basic {encoded}"}
-else:
-    # Read-only mode (#95): no credential is configured, so every privileged write
-    # would answer 403. Say so instead of showing a form that cannot work.
-    st.info(
-        "This server has no admin credential configured, so it is **read-only**. "
-        "Set `ADMIN_PASSWORD` (or create a principal with "
-        "`opampctl auth principals create`) and restart to enable the Admin page. "
-        "Session-token auth for this UI lands with #105."
-    )
-    st.stop()
-
-admin_tabs = st.tabs(["Alerts", "Compliance"])
+tab_names = ["Alerts", "Compliance"]
+if session.can(ROLE_ADMIN):
+    tab_names.append("Sessions")
+admin_tabs = st.tabs(tab_names)
 
 with admin_tabs[0]:
-    try:
-        resp = requests.get(f"{SERVER_URL}/alerts", timeout=5, headers=headers)
-        if resp.status_code == 401:
-            st.session_state.pop("admin_password", None)
-            st.session_state["admin_password_attempt"] = st.session_state.get("admin_password_attempt", 0) + 1
-            st.session_state["admin_password_error"] = True
-            st.rerun()
-        alert_data = resp.json()
-    except Exception as e:
-        st.error(f"Failed to load alerts config: {e}")
+    resp = admin_request("GET", "/alerts", required_role=ROLE_OPERATOR)
+    if resp is None or resp.status_code != 200:
+        st.error("Failed to load alerts config.")
         st.stop()
 
+    alert_data = resp.json()
     config = alert_data.get("config", {})
-    types = alert_data.get("types", [])
     events = alert_data.get("events", [])
 
     event_tabs = st.tabs([e.replace("_", " ").title() for e in events])
@@ -136,21 +110,22 @@ with admin_tabs[0]:
                         "body_template": body_template,
                     }
                     save_payload = {"events": {event: test_event_config}}
-                    requests.put(f"{SERVER_URL}/alerts", json=save_payload, timeout=5, headers=headers)
-                    test_resp = requests.post(f"{SERVER_URL}/alerts/test", json={"event_type": event}, timeout=10, headers=headers)
-                    try:
-                        result = test_resp.json()
-                        if test_resp.status_code == 401:
-                            st.session_state.pop("admin_password", None)
-                            st.session_state["admin_password_attempt"] = st.session_state.get("admin_password_attempt", 0) + 1
-                            st.session_state["admin_password_error"] = True
-                            st.rerun()
-                        elif result.get("success"):
+                    # Autosave first (memory.md: an unsaved template would otherwise be
+                    # ignored), then fire. Both go through the one admin transport.
+                    admin_request("PUT", "/alerts", required_role=ROLE_OPERATOR, json=save_payload)
+                    test_resp = admin_request(
+                        "POST", "/alerts/test", required_role=ROLE_OPERATOR,
+                        json={"event_type": event}, timeout=10,
+                    )
+                    if test_resp is not None:
+                        try:
+                            result = test_resp.json()
+                        except Exception:
+                            result = {}
+                        if result.get("success"):
                             st.success("Test sent!")
                         else:
                             st.error(f"Failed: {result.get('error')}")
-                    except:
-                        st.success("Test sent! (server received request)")
 
             event_configs[event] = {
                 "enabled": event_enabled,
@@ -160,38 +135,27 @@ with admin_tabs[0]:
             }
 
     if st.button("Save & Apply", type="primary", key="save_alerts"):
-        new_config = {
-            "events": event_configs,
-        }
-
-        resp = requests.put(f"{SERVER_URL}/alerts", json=new_config, timeout=5, headers=headers)
-        if resp.status_code == 401:
-            st.session_state.pop("admin_password", None)
-            st.session_state["admin_password_attempt"] = st.session_state.get("admin_password_attempt", 0) + 1
-            st.session_state["admin_password_error"] = True
-            st.rerun()
-        elif resp.status_code == 200:
+        save_resp = admin_request(
+            "PUT", "/alerts", required_role=ROLE_OPERATOR, json={"events": event_configs}
+        )
+        if save_resp is not None and save_resp.status_code == 200:
             st.success("Saved!")
-        else:
+        elif save_resp is not None:
             st.error("Failed to save")
 
 with admin_tabs[1]:
     col1, col2 = st.columns([1, 4])
     with col1:
-        if st.button("Reload & Validate", key="admin_reload_validate"):
-            try:
-                resp = requests.post(f"{SERVER_URL}/compliance/reload", timeout=10, headers=headers)
-                if resp.status_code == 401:
-                    st.session_state.pop("admin_password", None)
-                    st.session_state["admin_password_attempt"] = st.session_state.get("admin_password_attempt", 0) + 1
-                    st.session_state["admin_password_error"] = True
-                    st.rerun()
-                elif resp.status_code == 200:
+        if session.can(ROLE_ADMIN):
+            if st.button("Reload & Validate", key="admin_reload_validate"):
+                reload_resp = admin_request("POST", "/compliance/reload", required_role=ROLE_ADMIN)
+                if reload_resp is not None and reload_resp.status_code == 200:
                     st.success("Policies reloaded!")
-            except Exception as e:
-                st.error(f"Error: {e}")
-            st.rerun()
+                st.rerun()
+        else:
+            st.caption("Reloading policies needs the `admin` role.")
 
+    # Policy listing is unauthenticated and read-only, so it needs no token.
     try:
         resp = requests.get(f"{SERVER_URL}/compliance/validate", timeout=5)
         if resp.status_code == 200:
@@ -241,20 +205,15 @@ with admin_tabs[1]:
             if selected_ids:
                 results = []
                 for agent_id in selected_ids:
-                    try:
-                        resp = requests.get(f"{SERVER_URL}/agent/{agent_id}/compliance", timeout=30, headers=headers)
-                        if resp.status_code == 401:
-                            st.session_state.pop("admin_password", None)
-                            st.session_state["admin_password_attempt"] = st.session_state.get("admin_password_attempt", 0) + 1
-                            st.session_state["admin_password_error"] = True
-                            st.rerun()
-                            break
-                        elif resp.status_code == 200:
-                            result = resp.json()
-                            results.append((agent_id, result))
-                    except Exception as e:
-                        results.append((agent_id, {"error": str(e)}))
-                
+                    # POST /compliance/check audits and writes the verdict onto the
+                    # agent, so it is a mutation: operator, via the shared transport.
+                    check = admin_request(
+                        "POST", f"/compliance/check/{agent_id}",
+                        required_role=ROLE_OPERATOR, timeout=30,
+                    )
+                    if check is not None and check.status_code == 200:
+                        results.append((agent_id, check.json()))
+
                 if results:
                     for agent_id, result in results:
                         if "error" in result:
@@ -271,3 +230,52 @@ with admin_tabs[1]:
                 st.warning("Select agents first")
     else:
         st.info("No agents connected")
+
+if session.can(ROLE_ADMIN):
+    with admin_tabs[2]:
+        st.markdown("**Active admin sessions**")
+        st.caption(
+            "Every session the server currently honours, including other browsers. "
+            "Revoking one is audited against your principal."
+        )
+        sessions_resp = admin_request("GET", "/auth/sessions", required_role=ROLE_ADMIN)
+        if sessions_resp is None or sessions_resp.status_code != 200:
+            st.error("Failed to list sessions.")
+        else:
+            records = sessions_resp.json().get("sessions", [])
+            if not records:
+                st.info("No sessions.")
+            else:
+                st.dataframe(
+                    pd.DataFrame([
+                        {
+                            "Session": r.get("session_id"),
+                            "Principal": r.get("principal", ""),
+                            "Started": r.get("created_at"),
+                            "Last seen": r.get("last_seen_at"),
+                            "Expires": r.get("expires_at"),
+                            "Client IP": r.get("client_ip", ""),
+                            "Expired": "yes" if r.get("expired") else "no",
+                        }
+                        for r in records
+                    ]),
+                    width='stretch',
+                    hide_index=True,
+                )
+                revoke_id = st.text_input(
+                    "Revoke session id", key="admin_revoke_session_id",
+                    help="The short id from the Session column (at least 6 characters).",
+                )
+                if st.button("Revoke session", key="admin_revoke_session_button"):
+                    if not revoke_id.strip():
+                        st.warning("Enter a session id first.")
+                    else:
+                        revoke = admin_request(
+                            "DELETE", f"/auth/sessions/{revoke_id.strip()}",
+                            required_role=ROLE_ADMIN,
+                        )
+                        if revoke is not None and revoke.status_code == 200:
+                            st.success("Session revoked.")
+                            st.rerun()
+                        elif revoke is not None and revoke.status_code == 404:
+                            st.error("No session with that id.")

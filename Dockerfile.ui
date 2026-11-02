@@ -13,6 +13,10 @@ COPY proto/ ./proto/
 COPY policies/ ./policies/
 COPY data/ ./data/
 COPY collector/ ./collector/
+# Streamlit reads ./.streamlit/config.toml relative to the working directory, so
+# without this the XSRF/CORS posture in that file silently does not apply inside the
+# container (#105).
+COPY .streamlit/ ./.streamlit/
 COPY .env.sample .
 
 # Expose Streamlit port

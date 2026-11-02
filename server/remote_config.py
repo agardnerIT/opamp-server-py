@@ -380,6 +380,7 @@ class DesiredConfigRegistry:
         parent_revision_id: Optional[str] = None,
         verdict: Optional[config_validation.Verdict] = None,
         make_current: bool = True,
+        held: bool = False,
     ) -> Dict[str, Any]:
         """Store a new revision, optionally making it current. Returns the record.
 
@@ -405,6 +406,7 @@ class DesiredConfigRegistry:
             parent_revision_id=parent_revision_id,
             verdict_json=json.dumps(verdict.to_dict(), sort_keys=True) if verdict else None,
             make_current=make_current,
+            held=held,
         )
         if make_current:
             decoded = self._decode(record)
@@ -412,13 +414,29 @@ class DesiredConfigRegistry:
                 self._cache[agent_id] = decoded
         return record
 
-    def activate(self, agent_id: str, revision_id: str) -> None:
-        """Approve-time assignment, refreshing the cache without re-reading SQLite."""
-        self._store.assign(agent_id, revision_id)
+    def activate(
+        self, agent_id: str, revision_id: str, held: bool = False
+    ) -> None:
+        """Approve-time assignment, refreshing the cache without re-reading SQLite.
+
+        `held` is #101's rollout hold: the revision becomes the agent's desired config
+        but is not deliverable until its batch is promoted. It is written in the same
+        statement as the assignment, so there is no window in which a status report
+        could collect a config the rollout has not cleared.
+        """
+        self._store.assign(agent_id, revision_id, held=held)
         record = self._store.current(agent_id)
         decoded = self._decode(record)
         if decoded is not None:
             self._cache[agent_id] = decoded
+
+    def set_held(self, agent_id: str, held: bool) -> bool:
+        """Release (or re-apply) the rollout hold, cache and store (#101)."""
+        changed = self._store.set_held(agent_id, held)
+        record = self._cache.get(agent_id)
+        if record is not None:
+            record["held"] = bool(held)
+        return changed
 
     def withdraw(
         self, agent_id: str, author: str, revision_id: Optional[str] = None
@@ -561,15 +579,19 @@ def deliverable(record: Optional[Dict[str, Any]]) -> bool:
     Four reasons not to deliver, and they are all "stop", never "try again":
 
     * the revision is not `active` (proposed, rejected, superseded, rolled back);
+    * the revision is **held** by a staged rollout whose batch is not promoted yet
+      (#101) - the assignment exists, delivery does not;
     * the revision is poisoned, by a `FAILED` report or an auto-revert (D6);
     * the agent never acknowledged the last delivery (`unconfirmed`), so re-pushing
       is noise, not recovery;
-    * the revision body is gone (retention pruned a row that is somehow current) —
+    * the revision body is gone (retention pruned a row that is somehow current) -
       delivering an empty map would silently wipe the agent's config.
     """
     if not record:
         return False
     if record.get("status") != SQLiteDesiredConfigStore.STATUS_ACTIVE:
+        return False
+    if record.get("held"):
         return False
     if record.get("failed_at") or record.get("poisoned") or record.get("unconfirmed"):
         return False
@@ -669,6 +691,9 @@ REASON_DETAILS = {
     "revision_not_deliverable": "the current revision is not active and deliverable",
     "revision_has_no_body": "the revision body is unavailable (pruned or undecryptable)",
     "reported_hash_matches": "the agent already reports this config hash",
+    "held_by_rollout": (
+        "a staged rollout is holding this config until the agent's batch is promoted"
+    ),
     "frame_too_big": "the push frame would exceed OPAMP_MAX_MESSAGE_BYTES",
     "attempts_exhausted": (
         "the delivery budget is exhausted (CONFIG_MAX_DELIVERY_ATTEMPTS); the agent "
@@ -710,7 +735,8 @@ def decision_for(
     config_hash = record.get("config_hash")
     if not deliverable(record):
         return OfferDecision(False, revision_id=revision_id, config_hash=config_hash,
-                             reason="revision_not_deliverable")
+                             reason="held_by_rollout" if record.get("held")
+                             else "revision_not_deliverable")
     if not record.get("config_map") and not record.get("withdrawn"):
         logger.warning(
             f"agent {agent_id}: revision {revision_id} has no decoded body; "
@@ -1053,6 +1079,11 @@ def assignment_state(
         return "unconfirmed"
     if status == STATUS_FAILED:
         return "failed"
+    if record.get("held"):
+        # #101: assigned, approved, deliberately not deliverable yet. Before the
+        # poisoned/failed checks this would mask a poisoned assignment, so it sits
+        # after them; before `delivered`/`queued` because nothing was sent.
+        return "held"
     if not deliverable(record):
         return record.get("status") or "undeliverable"
     if record.get("delivered_hash") and record.get("delivered_hash") == ours:
@@ -1083,6 +1114,7 @@ def delivery_view(
         "attempts": int(record.get("attempts") or 0),
         "poisoned": bool(record.get("poisoned")),
         "unconfirmed": bool(record.get("unconfirmed")),
+        "held": bool(record.get("held")),
     }
 
 

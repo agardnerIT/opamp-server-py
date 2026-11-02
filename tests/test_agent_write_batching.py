@@ -8,6 +8,7 @@ message that changes N field groups must write exactly once.
 import binascii
 import json
 import sqlite3
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -143,7 +144,13 @@ def test_bare_heartbeat_is_flushed_only_when_the_stored_heartbeat_is_stale(
     assert registry._store.upserts == after_first
 
     # Pretend the last persisted heartbeat is old enough to matter for recovery.
-    registry._persisted_at[agent_id] = 0.0
+    # Offsets from `time.monotonic()` rather than using 0.0: on Linux that clock
+    # counts from boot, so on a freshly started CI runner `now - 0.0` is itself
+    # less than HEARTBEAT_PERSIST_SECONDS and the flush never becomes due. The
+    # test then passes on a long-uptime laptop and fails on a new VM (#110).
+    registry._persisted_at[agent_id] = (
+        time.monotonic() - (main.HEARTBEAT_PERSIST_SECONDS + 1)
+    )
     send(client, heartbeat)
     assert registry._store.upserts == after_first + 1
     assert stored_row(db_path, agent_id)["health"] is not None

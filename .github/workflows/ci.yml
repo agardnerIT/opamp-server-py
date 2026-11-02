@@ -1,0 +1,71 @@
+name: CI
+
+# The release workflow (build-and-push.yml) builds and publishes images on a tag
+# without ever running the test suite. This is the gate that has to exist before
+# a tag means anything: 900+ tests that only ever ran on a developer's laptop is
+# not a safety net, it is a habit.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # A new push to the same ref supersedes an in-flight run; nothing here is
+  # deploy-shaped, so cancelling is always safe and keeps the queue short.
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.12 is what Dockerfile.server and Dockerfile.ui ship, so a failure
+        # there blocks a release. 3.11 is the low end of what the metadata
+        # advertises (requires-python >=3.10); 3.13 is what developers actually
+        # run locally (see the protobuf runtime-version note in memory.md).
+        python-version: ["3.11", "3.12", "3.13"]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-ui.txt
+            pyproject.toml
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-ui.txt
+          pip install -e ".[mcp]" pytest
+
+      - name: Run test suite
+        # No live ports, no network: the suite is in-process by design
+        # (tests/asgi_transport.py exists because TestClient is broken against
+        # the installed httpx). A test needing a socket is a test that will
+        # flake in CI.
+        run: python -m pytest -q --durations=10
+
+  workflows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Lints the workflow files themselves. A YAML typo in build-and-push.yml
+      # is invisible until a release tag is pushed, which is the worst possible
+      # time to find out.
+      - name: Lint workflows
+        uses: raven-actions/actionlint@v2

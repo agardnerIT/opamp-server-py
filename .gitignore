@@ -194,3 +194,7 @@ memory.md
 
 .agents
 skills-lock.json
+
+# SQLite WAL sidecars — created at runtime, never committed
+data/opamp.db-wal
+data/opamp.db-shm

@@ -1276,13 +1276,14 @@ opampctl --show-completion      # show the install command/instructions
 ## MCP Server (for AI agents)
 
 An [MCP](https://modelcontextprotocol.io) server (`opamp-mcp` / `python -m mcp_server`)
-exposes 26 typed tools mirroring the API: `list_agents`, `get_agent`,
+exposes 29 typed tools mirroring the API: `list_agents`, `get_agent`,
 `get_agent_metrics`, `generate_manifest`, `fleet_report`, `heavy_collectors_report`,
 `outdated_collectors_report`, `get_compliance`, `check_compliance`,
 `compliance_summary`, `list_policies`, `validate_policies`, `reload_policies`,
 `get_alerts`, `update_alerts`, `test_alerts`, `agent_report`, `health`, `auth_status`,
 `whoami`, `config_posture`, `agent_config`, `validate_config`,
-`list_config_revisions`, `audit_log`, `audit_verify`, `audit_export`.
+`list_config_revisions`, `list_config_rollouts`, `get_config_rollout`, `audit_log`,
+`audit_verify`, `audit_export`.
 
 **Identity is never delegated to MCP.** Logins, principals and sessions have no MCP
 tools at all — minting an identity is a human/IaC action, not a tool call an AI can

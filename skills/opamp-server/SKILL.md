@@ -21,7 +21,7 @@ Control plane for OpenTelemetry collectors speaking the
 | Layer | When |
 |-------|------|
 | **`opampctl` CLI** | Default choice for shell agents. JSON output by default; `--raw` prints markdown/YAML. |
-| **MCP server** (`opamp-mcp`) | When running as an MCP client (Claude Desktop/Code, etc.). 20 typed tools, stdio by default. |
+| **MCP server** (`opamp-mcp`) | When running as an MCP client (Claude Desktop/Code, etc.). 29 typed tools, stdio by default. |
 | **`opamp_client` Python lib** | Inside Python code. One client for all HTTP/auth/error handling. |
 | **Raw REST API** | Only when the above don't cover it. Self-documenting: `GET /openapi.json`, `/docs`. |
 

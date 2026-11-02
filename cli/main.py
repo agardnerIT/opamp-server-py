@@ -169,6 +169,23 @@ def _client() -> OpampClient:
         _fail(str(exc))
 
 
+def _client_call(action):
+    """Run a client call and return its value, with the same error mapping as `_run`.
+
+    For the few commands that compose two calls (a dry run that resolves the selector
+    first, then prints what it *would* do) rather than emitting one response.
+    """
+    try:
+        with _client() as oc:
+            return action(oc)
+    except OpampApiError as exc:
+        _fail(f"HTTP {exc.status_code}", data={"detail": exc.detail})
+    except OpampConnectionError as exc:
+        _fail(str(exc))
+    except OpampClientError as exc:
+        _fail(str(exc))
+
+
 def _run(action, raw_field: Optional[str] = None) -> None:
     """Execute a client call, mapping client errors to structured CLI errors."""
     try:
@@ -474,16 +491,27 @@ def config_apply(
                                     help="Target agent id, repeatable"),
     attr: List[str] = typer.Option([], "--attr",
                                    help="Filter by metadata, repeatable: --attr environment=prod"),
-    confirm: bool = typer.Option(False, "--confirm",
-                                 help="Required: acknowledge the blast radius"),
+    confirm: bool = typer.Option(False, "--confirm", "--yes", "-y",
+                                 help="Required: acknowledge the blast radius (--yes is the "
+                                      "#106 spelling, --confirm the legacy one)"),
     role: str = typer.Option("", "--role",
                              help="Agent-defined role for this config object (v0.20.0)"),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Print the resolved target list and exit; pushes nothing",
+    ),
     note: Optional[str] = typer.Option(None, "--note", help="Reason, recorded in the audit log"),
 ) -> None:
     """Push one config to many agents (admin, live server only).
 
-    Requires `--confirm` and an explicit selector (`--agent` and/or `--attr`). A
-    missing selector is refused — it never means "all agents".
+    Requires `--confirm`/`--yes` and an explicit selector (`--agent` and/or `--attr`).
+    A missing selector is refused — it never means "all agents".
+
+    `--dry-run` resolves the selector server-side and prints the exact target list
+    (agent ids, count) without storing or delivering anything, which is the check to
+    make before typing `--yes`. For anything larger than one host, prefer the staged
+    flow (`config rollout plan` → `config rollout create`) over this direct push: this
+    one skips staging by design.
     """
     config_map = _read_config_file(file, role=role)
     config_map[""]["content_type"] = content_type
@@ -491,6 +519,9 @@ def config_apply(
     for item in attr:
         key, _, value = item.partition("=")
         filters.setdefault(key, []).append(value)
+    if dry_run:
+        _emit(_resolve_targets_preview(filters, agent, config_map))
+        return
     _run(
         lambda oc: oc.apply_agent_config(
             config_map,
@@ -499,6 +530,88 @@ def config_apply(
             confirm=confirm,
             note=note,
         )
+    )
+
+
+def _resolve_targets_preview(
+    filters: Dict[str, Any], agents: List[str], config_map: Dict[str, Any]
+) -> Dict[str, Any]:
+    """`config apply --dry-run`: the resolved targets, from the server's own filter.
+
+    Read-only. It asks `GET /agents` with the same selector the push would use, so the
+    list printed is the list that would be hit — resolving it client-side is how a
+    dry run ends up disagreeing with the real thing.
+    """
+    targets = agents
+    matched_by = "agents"
+    if not targets and filters:
+        listing = _client_call(lambda oc: oc.list_agents(**{
+            key: value[0] if len(value) == 1 else value
+            for key, value in filters.items()
+        }))
+        targets = [row["id"] for row in listing.get("agents", [])]
+        matched_by = "filter"
+    return {
+        "dry_run": True,
+        "matched_by": matched_by,
+        "agents": len(targets),
+        "targets": targets,
+        "objects": len(config_map),
+        "delivery": {
+            "state": "unchanged",
+            "reason": "dry_run",
+            "detail": "nothing was stored or delivered",
+        },
+    }
+
+
+@config_app.command("diff")
+def config_diff(
+    agent_id: str = typer.Argument(..., help="Agent id (hex instance_uid)"),
+    reveal: bool = typer.Option(
+        False, "--reveal", help="Show the desired body unredacted (approver, audited)"
+    ),
+) -> None:
+    """What this agent *should* be running versus what it *is* running (viewer).
+
+    Prints the desired revision/hash, the reported hash, `drift`
+    (`true | false | null`) and the YAML paths the desired config is missing from the
+    agent's effective config. `null` means "cannot tell yet" — not healthy, not broken.
+
+    Drift is deliberately a *containment* check, not a hash compare: the supervisor
+    composes and re-serialises files, so a byte compare reports drift on every healthy
+    agent.
+    """
+    detail = _client_call(lambda oc: oc.get_agent_config(agent_id, reveal=reveal))
+    desired = detail.get("desired") or {}
+    assignment = detail.get("assignment") or {}
+    drift = detail.get("drift") or {}
+    _emit(
+        {
+            "agent_id": agent_id,
+            "desired": {
+                "revision_id": desired.get("revision_id"),
+                "config_hash": desired.get("config_hash"),
+                "status": desired.get("status"),
+                "held": desired.get("held"),
+                "withdrawn": desired.get("withdrawn"),
+            },
+            "assignment": {
+                "state": assignment.get("state"),
+                "delivered_at": assignment.get("delivered_at"),
+                "channel": assignment.get("channel"),
+                "attempts": assignment.get("attempts"),
+                "last_status": assignment.get("last_status"),
+                "last_error": assignment.get("last_error"),
+            },
+            "reported_hash": (detail.get("remote_config_status") or {}).get(
+                "last_remote_config_hash"
+            ),
+            "drift": drift.get("drift"),
+            "drift_reason": drift.get("reason"),
+            "missing": drift.get("missing") or [],
+            "config_push_allowed": detail.get("config_push_allowed"),
+        }
     )
 
 

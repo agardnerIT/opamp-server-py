@@ -788,3 +788,50 @@ class TestRolloutCommands:
         # No such agent: the CLI maps the API's 404 to a structured error.
         result = run("--password", ADMIN_PW, "agents", "config", "restart", "cd" * 16)
         assert result.exit_code == 1
+
+
+class TestConfigDiffAndDryRun:
+    """#106: `config diff` and `config apply --dry-run` resolve, print and change nothing."""
+
+    @pytest.fixture(autouse=True)
+    def push_env(self, monkeypatch):
+        from server import crypto
+
+        monkeypatch.setenv("OPAMP_CONFIG_PUSH_ENABLED", "true")
+        monkeypatch.setenv("OPAMP_AGENT_AUTH", "token")
+        monkeypatch.setenv("PUBLIC_URL", "https://opamp.example.com")
+        monkeypatch.setenv("CONFIG_AT_REST_KEY", crypto.generate_key())
+        crypto.reset_key_cache()
+        yield
+        crypto.reset_key_cache()
+
+    def test_apply_dry_run_resolves_the_selector_and_pushes_nothing(self, live, tmp_path):
+        config = tmp_path / "collector.yaml"
+        config.write_text("exporters:\n  debug: {}\n")
+        AGENT_REGISTRY.register(
+            "ab" * 16,
+            AgentState(instance_uid=b"\xab" * 16, agent_id="ab" * 16, healthy=True),
+        )
+        result = run(
+            "--password", ADMIN_PW, "config", "apply", "--file", str(config),
+            "--attr", "environment=prod", "--dry-run",
+        )
+        # The filter matches nothing (that agent has no attributes), so the honest
+        # answer is zero targets — and, crucially, zero deliveries.
+        body = parse(result)
+        assert body["dry_run"] is True
+        assert body["matched_by"] == "filter"
+        assert body["agents"] == 0
+        assert body["delivery"]["reason"] == "dry_run"
+
+    def test_config_diff_reports_drift_without_a_body(self, live):
+        AGENT_REGISTRY.register(
+            "ab" * 16,
+            AgentState(instance_uid=b"\xab" * 16, agent_id="ab" * 16, healthy=True),
+        )
+        body = parse(run("--password", ADMIN_PW, "config", "diff", "ab" * 16))
+        assert body["agent_id"] == "ab" * 16
+        assert body["desired"]["revision_id"] is None  # nothing assigned yet
+        assert body["drift"] is None
+        # `diff` prints facts about the config, never the config.
+        assert "body" not in json.dumps(body)

@@ -21,9 +21,9 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from proto import anyvalue_pb2, opamp_pb2
+from proto import opamp_pb2
 from server import admin_auth, config_control, crypto, custom_messages
-from server.main import _handle_agent_message, app
+from server.main import app
 from server.state import AGENT_REGISTRY
 from tests.conformance.harness import handle_message as reply
 

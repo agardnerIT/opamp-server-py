@@ -23,18 +23,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from proto import anyvalue_pb2, opamp_pb2
-from server import (
-    admin_auth,
-    agent_auth,
-    config_control,
-    crypto,
-    groups,
-    remote_config,
-    rollout,
-)
+from server import admin_auth, config_control, crypto
 from server.main import _handle_agent_message, app
-from server.state import AGENT_REGISTRY, COLLECTOR_GROUPS, SQLiteGroupStore, utcnow
-from tests.conformance.harness import handle_message as reply
+from server.state import COLLECTOR_GROUPS, SQLiteGroupStore
 
 ADMIN = "admin-pw-1234567890"
 UID = bytes.fromhex("ab" * 16)

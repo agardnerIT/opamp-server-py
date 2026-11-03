@@ -847,3 +847,119 @@ class TestConfigDiffAndDryRun:
         assert body["drift"] is None
         # `diff` prints facts about the config, never the config.
         assert "body" not in json.dumps(body)
+
+
+class TestGroups:
+    """#111: `--group` is a saved selector, and the CLI must not let it look like `--attr`."""
+
+    @pytest.fixture(autouse=True)
+    def push_env(self, monkeypatch, tmp_path):
+        from server import crypto
+
+        monkeypatch.setenv("OPAMP_CONFIG_PUSH_ENABLED", "true")
+        monkeypatch.setenv("OPAMP_AGENT_AUTH", "token")
+        monkeypatch.setenv("PUBLIC_URL", "https://opamp.example.com")
+        monkeypatch.setenv("CONFIG_AT_REST_KEY", crypto.generate_key())
+        crypto.reset_key_cache()
+        yield
+        crypto.reset_key_cache()
+
+    @staticmethod
+    def described(agent_id, environment="prod"):
+        from proto import anyvalue_pb2
+
+        state = AgentState(instance_uid=bytes.fromhex(agent_id), agent_id=agent_id)
+        state.description = {
+            "nonIdentifyingAttributes": [
+                {
+                    "key": "environment",
+                    "value": {"stringValue": environment},
+                }
+            ]
+        }
+        AGENT_REGISTRY.register(agent_id, state)
+        return state
+
+    def test_create_list_show_and_preview_round_trip(self, live):
+        self.described("ab" * 16)
+        created = parse(
+            run(
+                "--password", ADMIN_PW, "groups", "create",
+                "--name", "prod-emea",
+                "--attr", "environment=prod",
+                "--description", "EMEA prod gateways",
+            )
+        )
+        assert created["name"] == "prod-emea"
+        assert created["member_count"] == 1
+        assert created["definition"] == {"environment": "prod"}
+
+        listing = parse(run("--password", ADMIN_PW, "groups", "list"))
+        assert [row["name"] for row in listing["groups"]] == ["prod-emea"]
+
+        shown = parse(run("--password", ADMIN_PW, "groups", "show", "prod-emea"))
+        assert shown["members"] == ["ab" * 16]
+        assert shown["description"] == "EMEA prod gateways"
+
+        previewed = parse(run("--password", ADMIN_PW, "groups", "preview", "prod-emea"))
+        assert previewed["count"] == 1
+        assert previewed["added"] == ["ab" * 16]
+
+        keys = parse(run("--password", ADMIN_PW, "groups", "keys"))
+        assert any(bucket["key"] == "environment" for bucket in keys["keys"])
+
+    def test_group_and_attr_cannot_be_combined(self, live, tmp_path):
+        config = tmp_path / "collector.yaml"
+        config.write_text("exporters:\n  debug: {}\n")
+        result = run(
+            "--password", ADMIN_PW, "config", "propose",
+            "--file", str(config),
+            "--group", "prod-emea",
+            "--attr", "environment=prod",
+        )
+        assert result.exit_code == 1
+        assert "exactly one scope" in result.output
+
+    def test_propose_with_a_group_resolves_it_server_side(self, live, tmp_path):
+        self.described("ab" * 16)
+        parse(run("--password", ADMIN_PW, "groups", "create", "--name", "prod", "--attr", "environment=prod"))
+        config = tmp_path / "collector.yaml"
+        config.write_text(
+            "extensions:\n  opamp:\n    server:\n      ws:\n"
+            "        endpoint: wss://opamp.example.com/v1/opamp\n"
+            "receivers:\n  otlp:\n    protocols:\n      grpc:\n"
+            "exporters:\n  debug: {}\n"
+            "service:\n  extensions: [opamp]\n  pipelines:\n    traces:\n"
+            "      receivers: [otlp]\n      exporters: [debug]\n"
+        )
+        proposed = parse(
+            run(
+                "--password", ADMIN_PW, "config", "propose",
+                "--file", str(config), "--group", "prod",
+            )
+        )
+        assert proposed["agents"] == 1
+        assert proposed["scope"]["group_name"] == "prod"
+        assert [row["agent_id"] for row in proposed["revisions"]] == ["ab" * 16]
+
+    def test_apply_dry_run_with_a_group_prints_members_and_the_snapshot(self, live, tmp_path):
+        self.described("ab" * 16)
+        parse(run("--password", ADMIN_PW, "groups", "create", "--name", "prod", "--attr", "environment=prod"))
+        config = tmp_path / "collector.yaml"
+        config.write_text("exporters:\n  debug: {}\n")
+        body = parse(
+            run(
+                "--password", ADMIN_PW, "config", "apply",
+                "--file", str(config), "--group", "prod", "--dry-run",
+            )
+        )
+        assert body["dry_run"] is True
+        assert body["matched_by"] == "group"
+        assert body["targets"] == ["ab" * 16]
+        assert body["group"]["definition"] == {"environment": "prod"}
+        assert body["group"]["health_defined"] == []
+        assert body["delivery"]["reason"] == "dry_run"
+        # A dry run must not record a resolution, or checking twice would move the
+        # baseline the shrink guard compares against.
+        shown = parse(run("--password", ADMIN_PW, "groups", "show", "prod"))
+        assert shown["last_resolution"] is None

@@ -41,6 +41,8 @@ from server.state import (
     AgentRegistry,
     AgentState,
     AGENT_REGISTRY,
+    COLLECTOR_GROUPS,
+    GroupError,
     COMPONENTS_IGNORED_LOG_AT,
     SQLiteMetricsStore,
     _normalise_audit_ts,
@@ -70,6 +72,7 @@ from server import (
     config_control,
     config_validation,
     crypto,
+    groups,
     posture,
     protocol,
     redaction,
@@ -351,6 +354,25 @@ PROM_DUPLICATE_UIDS = prom_client.Counter(
 PROM_UID_HEADER_PROBLEMS = prom_client.Counter(
     "opamp_instance_uid_header_problems_total",
     "OpAMP-Instance-UID request headers that were malformed or disagreed with the body",
+    ["reason"],
+)
+
+# #111: collector groups. A group is a saved selector, so "how many groups exist" and
+# "what does this one hit right now" are the two numbers an operator asks for. The
+# label is the group *name* (operator-controlled, few), never an agent id.
+PROM_GROUPS = prom_client.Gauge(
+    "opamp_groups_total",
+    "Collector groups (saved selectors), by archive state",
+    ["state"],
+)
+PROM_GROUP_MEMBERS = prom_client.Gauge(
+    "opamp_group_members",
+    "Live membership of a collector group, resolved at scrape time",
+    ["group"],
+)
+PROM_GROUP_MEMBERSHIP_CHANGES = prom_client.Counter(
+    "opamp_group_membership_changes_total",
+    "Group resolutions recorded, by reason (preview, propose, push, approve)",
     ["reason"],
 )
 
@@ -2629,11 +2651,39 @@ class RemoteConfigRequest(BaseModel):
 
 
 class FleetConfigRequest(RemoteConfigRequest):
-    """Body for a fleet-wide apply. Explicit targets or a filter; `confirm` gates it."""
+    """Body for a fleet-wide apply. Explicit targets, a filter or a group; `confirm` gates it."""
 
     agents: Optional[List[str]] = None
     filter: Optional[Dict[str, Any]] = None
+    # #111: break-glass pushes obey the same group guards as a proposal (health
+    # definition, shrink, empty), because bypassing them here would make the guards
+    # advisory.
+    group: Optional[str] = None
+    use_stored_resolution: bool = False
+    confirm_scope_change: bool = False
     confirm: bool = False
+
+
+class GroupCreateRequest(BaseModel):
+    """Body for `POST /groups` (#111): a name for a selector, not a member list."""
+
+    name: str
+    definition: Dict[str, Any]
+    include: List[str] = Field(default_factory=list)
+    exclude: List[str] = Field(default_factory=list)
+    description: Optional[str] = None
+    owner: Optional[str] = None
+
+
+class GroupUpdateRequest(BaseModel):
+    """Body for `PUT /groups/{id}`: only the fields that are present are changed."""
+
+    name: Optional[str] = None
+    definition: Optional[Dict[str, Any]] = None
+    include: Optional[List[str]] = None
+    exclude: Optional[List[str]] = None
+    description: Optional[str] = None
+    owner: Optional[str] = None
 
 
 class ValidateConfigRequest(BaseModel):
@@ -2645,12 +2695,21 @@ class ValidateConfigRequest(BaseModel):
 
 
 class ConfigScope(BaseModel):
-    """Who a proposal targets. Exactly one of `agent_id`, `agents` or `filter`."""
+    """Who a proposal targets. Exactly one of `agent_id`, `agents`, `filter` or `group`.
+
+    `group` (#111) names a saved selector and expands server-side into a `filter` plus
+    the group's `include`/`exclude` pins, so a group can never be combined with the
+    other three — the point of a named selector is that one definition decides the
+    targets. `use_stored_resolution` is the escape hatch for a health-defined group:
+    it pushes to the membership recorded at a stated time instead of re-matching.
+    """
 
     agent_id: Optional[str] = None
     agents: Optional[List[str]] = None
     filter: Optional[Dict[str, Any]] = None
+    group: Optional[str] = None
     include_future: bool = False
+    use_stored_resolution: bool = False
 
 
 class ProposeConfigRequest(BaseModel):
@@ -2661,6 +2720,9 @@ class ProposeConfigRequest(BaseModel):
     note: Optional[str] = None
     allow_endpoint_change: bool = False
     override_reason: Optional[str] = None
+    # A group that resolves smaller than its last recorded resolution needs this
+    # acknowledgement (#111): silent shrinkage is the failure the feature exists for.
+    confirm_scope_change: bool = False
 
 
 class ApproveConfigRequest(BaseModel):
@@ -3172,6 +3234,15 @@ def apply_config_fleet(
             ),
         )
 
+    group_scope: Dict[str, Any] = {}
+    if body.agents and (body.filter or body.group):
+        raise HTTPException(
+            status_code=400, detail="provide exactly one of agents, filter or group"
+        )
+    if body.filter and body.group:
+        raise HTTPException(
+            status_code=400, detail="provide exactly one of agents, filter or group"
+        )
     if body.agents:
         targets = []
         for raw_id in body.agents:
@@ -3179,6 +3250,23 @@ def apply_config_fleet(
                 targets.append(remote_config.normalize_agent_id(raw_id))
             except ValueError as exc:
                 raise HTTPException(status_code=422, detail=str(exc))
+    elif body.group:
+        # #111: a group-targeted break-glass push obeys the same guards as a proposal
+        # (health definition, empty group, silent shrinkage), because a guard that a
+        # second route can skip is advisory.
+        try:
+            group_scope = config_control.parse_scope(
+                {"group": body.group},
+                agents=AGENT_REGISTRY.list_all(),
+                actor=principal.name,
+                use_stored_resolution=body.use_stored_resolution,
+                confirm_scope_change=body.confirm_scope_change,
+            )
+            targets = config_control.resolve_targets(
+                group_scope, AGENT_REGISTRY.list_all()
+            )
+        except config_control.ConfigControlError as exc:
+            raise _control_error(exc)
     elif body.filter:
         attributes: Dict[str, List[str]] = {}
         filters = body.filter or {}
@@ -3201,7 +3289,8 @@ def apply_config_fleet(
     else:
         raise HTTPException(
             status_code=400,
-            detail="provide \"agents\": [...] or \"filter\": {...}; a missing selector is never \"all agents\"",
+            detail="provide \"agents\": [...], \"filter\": {...} or \"group\": \"<name>\"; "
+            "a missing selector is never \"all agents\"",
         )
 
     if not targets:
@@ -3239,7 +3328,14 @@ def apply_config_fleet(
         agent_count=len(targets),
         objects=len(config_map),
         note=body.note,
+        group_id=group_scope.get("group_id"),
+        group_name=group_scope.get("group_name"),
     )
+    if group_scope.get("group_id"):
+        groups.record_push_resolution(
+            group_scope, targets, actor=principal.name, reason=groups.REASON_PUSH
+        )
+        PROM_GROUP_MEMBERSHIP_CHANGES.labels(reason=groups.REASON_PUSH).inc()
 
     results = []
     for target in targets:
@@ -3252,6 +3348,8 @@ def apply_config_fleet(
                 revision_id=revision_id,
                 note=body.note,
                 verdict=verdict,
+                group_id=group_scope.get("group_id"),
+                group_snapshot=group_scope.get("group_snapshot"),
             )
             results.append({"agent_id": target, "revision_id": record["revision_id"], "ok": True})
             PROM_CONFIG_PUSHES.labels(result="ok").inc()
@@ -3351,6 +3449,299 @@ def _config_size(config_map: Dict[str, Dict[str, Any]]) -> Optional[int]:
     return sum(len((entry.get("body") or "").encode("utf-8")) for entry in config_map.values())
 
 
+# ------------------------------------------------------ collector groups (#111)
+
+
+def _group_error(exc: GroupError) -> HTTPException:
+    return HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+def _require_group(name_or_id: str, *, include_archived: bool = False) -> Dict[str, Any]:
+    """Resolve a group by name or id, 404 when absent, 409 when archived (#111)."""
+    record = COLLECTOR_GROUPS.find(name_or_id)
+    if record is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "message": f"group {name_or_id!r} not found",
+                "hint": "list the saved selectors with GET /groups",
+            },
+        )
+    if record.get("archived_at") and not include_archived:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": f"group {record['name']!r} is archived",
+                "archived_at": record.get("archived_at"),
+                "hint": "POST /groups/{id}/restore first; an archived group is history, "
+                "not a target",
+            },
+        )
+    return record
+
+
+def _publish_group_metrics(records: Optional[List[Dict[str, Any]]] = None) -> None:
+    """Refresh the two group gauges. Cheap: one list + one resolve per group."""
+    records = records if records is not None else COLLECTOR_GROUPS.list(include_archived=True)
+    live = [record for record in records if not record.get("archived_at")]
+    archived = [record for record in records if record.get("archived_at")]
+    PROM_GROUPS.labels(state="active").set(len(live))
+    PROM_GROUPS.labels(state="archived").set(len(archived))
+    agents = AGENT_REGISTRY.list_all()
+    for record in live:
+        resolved = groups.resolve_members(record, agents)
+        PROM_GROUP_MEMBERS.labels(group=record["name"]).set(resolved["count"])
+
+
+@app.get(
+    "/groups/attribute-keys",
+    tags=["groups"],
+    summary="Attribute keys and sample values from the live fleet (viewer)",
+)
+def list_group_attribute_keys(request: Request):
+    """Keys an operator can build a group definition from. Requires `viewer`.
+
+    Harvested from **live agents' descriptions only** — never from an effective
+    config, which is where a fleet's credentials live (D8). This is the typo-proofing
+    half of groups: a builder that offers `environment` cannot produce `env`, and a
+    dropdown of observed values cannot produce `prod-*` (matching is exact,
+    case-insensitive equality — no globs, no regex, no prefix).
+    """
+    require_roles(request, ROLE_VIEWER)
+    return groups.attribute_keys(AGENT_REGISTRY.list_all())
+
+
+@app.get("/groups", tags=["groups"], summary="List collector groups with live member counts (viewer)")
+def list_groups(
+    request: Request,
+    include_archived: bool = Query(False, description="Include archived groups"),
+):
+    """Saved selectors with their **live** member count. Requires `viewer`.
+
+    Membership is resolved on read, never stored, so a group cannot drift from the
+    fleet it names. `last_resolution` is what the group meant the last time it was
+    evaluated, which is the baseline a `preview` diff and the shrink guard use.
+    """
+    require_roles(request, ROLE_VIEWER)
+    agents = AGENT_REGISTRY.list_all()
+    records = COLLECTOR_GROUPS.list(include_archived=include_archived)
+    items = [groups.view(record, agents, include_history=False) for record in records]
+    _publish_group_metrics()
+    return {
+        "groups": items,
+        "count": len(items),
+        "matching": "exact, case-insensitive equality — no globs, no regex, no prefix",
+        "health_definition_note": (
+            "a group defined on healthy/status drops the agents that break; pushing to "
+            "one requires use_stored_resolution"
+        ),
+    }
+
+
+@app.post("/groups", tags=["groups"], summary="Create a collector group (operator)")
+def create_group(
+    body: GroupCreateRequest,
+    request: Request,
+    _audit=Depends(require_audit("group.create")),
+):
+    """Create a named selector. Requires `operator`. 409 when the name is taken.
+
+    Names are unique **case-insensitively** and cannot collide with the reserved
+    filter keys (`healthy`, `status`, `remote_config_status`), so `--group prod` and
+    `--attr environment=prod` stay visibly different things on every surface.
+
+    A group is a proposal of intent, not a push: creating one changes nothing that
+    any agent runs. It also may have **zero** members — writing the definition down
+    before the collectors exist is the point — but the definition may not be empty,
+    because `{}` means the whole fleet.
+    """
+    principal = require_roles(request, ROLE_OPERATOR)
+    try:
+        audit_action(
+            principal,
+            "group.create",
+            target_kind="group",
+            target_id=body.name,
+            definition=body.definition,
+            include=body.include,
+            exclude=body.exclude,
+        )
+        record = COLLECTOR_GROUPS.create(
+            name=body.name,
+            definition=body.definition,
+            include=body.include,
+            exclude=body.exclude,
+            description=body.description,
+            owner=body.owner,
+            source="api",
+            created_by=principal.name,
+        )
+    except GroupError as exc:
+        raise _group_error(exc)
+    _publish_group_metrics()
+    return groups.view(record, AGENT_REGISTRY.list_all())
+
+
+@app.get("/groups/{group_id}", tags=["groups"], summary="One group: definition, members, history (viewer)")
+def get_group(group_id: str, request: Request):
+    """Definition, current members and resolution history. Requires `viewer`.
+
+    `sources` shows which members came from the definition and which from
+    `include`/`exclude`, `unknown_pins` names pins for agents that have never
+    reported (a typo'd id would otherwise look like a working pin forever), and
+    `membership_changes` counts how often the resolved set moved — the drift signal
+    behind "resolution changed 3 times since".
+    """
+    require_roles(request, ROLE_VIEWER)
+    record = _require_group(group_id, include_archived=True)
+    view = groups.view(record, AGENT_REGISTRY.list_all())
+    _publish_group_metrics()
+    return view
+
+
+@app.put("/groups/{group_id}", tags=["groups"], summary="Edit a group (operator)")
+def update_group(
+    group_id: str,
+    body: GroupUpdateRequest,
+    request: Request,
+    _audit=Depends(require_audit("group.update")),
+):
+    """Edit a definition, its pins or its metadata. Requires `operator`.
+
+    The audit row carries the **definition diff** (`added` / `removed` / `changed`
+    with both values), not "changed": an edit silently changes the blast radius of
+    every future push that names the group, and the diff is the only part of that an
+    auditor can act on.
+
+    Editing changes future pushes only. A revision approved against the old
+    definition keeps its `group_snapshot` and its resolved agent list, and
+    `GET /config/revisions` reports `group_definition_changed: true` for it — which
+    is exactly why the snapshot is stored rather than the group id alone.
+    """
+    principal = require_roles(request, ROLE_OPERATOR)
+    current = _require_group(group_id)
+    try:
+        # #97 ordering: the diff is computed (and audited) before the write, so a
+        # write that cannot be recorded does not happen.
+        _, changes = COLLECTOR_GROUPS.compute_changes(
+            current,
+            name=body.name,
+            definition=body.definition,
+            include=body.include,
+            exclude=body.exclude,
+            description=body.description,
+            owner=body.owner,
+        )
+        if changes:
+            audit_action(
+                principal,
+                "group.update",
+                target_kind="group",
+                target_id=current["group_id"],
+                group_name=current.get("name"),
+                changes=changes,
+            )
+        record, changes = COLLECTOR_GROUPS.update(
+            current["group_id"],
+            actor=principal.name,
+            name=body.name,
+            definition=body.definition,
+            include=body.include,
+            exclude=body.exclude,
+            description=body.description,
+            owner=body.owner,
+        )
+    except GroupError as exc:
+        raise _group_error(exc)
+    _publish_group_metrics()
+    view = groups.view(record, AGENT_REGISTRY.list_all())
+    view["changes"] = changes
+    return view
+
+
+@app.delete("/groups/{group_id}", tags=["groups"], summary="Archive a group (operator)")
+def archive_group(
+    group_id: str,
+    request: Request,
+    _audit=Depends(require_audit("group.archive")),
+):
+    """**Archive** a group. Requires `operator`. There is no delete.
+
+    Revisions, rollouts and the audit log all reference `group_id`, so a hard delete
+    would leave history pointing at nothing. An archived group is absent from
+    pickers, refuses edits and pushes, and can be restored.
+
+    A **live rollout** that was approved against this group refuses with 409 first:
+    archiving it mid-flight would hide the definition from the operator who has to
+    explain what is being delivered.
+    """
+    principal = require_roles(request, ROLE_OPERATOR)
+    current = _require_group(group_id, include_archived=True)
+    if current.get("archived_at"):
+        return groups.view(current, AGENT_REGISTRY.list_all())
+    live = rollout.live_rollouts_for_group(current["group_id"])
+    if live:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": f"group {current['name']!r} is in use by a live rollout",
+                "rollouts": live,
+                "hint": "let the rollout finish, abort it, or (for a stuck rollout) "
+                "cancel it, then archive",
+            },
+        )
+    audit_action(
+        principal,
+        "group.archive",
+        target_kind="group",
+        target_id=current["group_id"],
+        group_name=current.get("name"),
+    )
+    record = COLLECTOR_GROUPS.archive(current["group_id"], actor=principal.name)
+    _publish_group_metrics()
+    return groups.view(record, AGENT_REGISTRY.list_all())
+
+
+@app.post("/groups/{group_id}/restore", tags=["groups"], summary="Restore an archived group (operator)")
+def restore_group(
+    group_id: str,
+    request: Request,
+    _audit=Depends(require_audit("group.restore")),
+):
+    """Clear `archived_at`. Requires `operator`. The definition comes back unchanged."""
+    principal = require_roles(request, ROLE_OPERATOR)
+    current = _require_group(group_id, include_archived=True)
+    audit_action(
+        principal,
+        "group.restore",
+        target_kind="group",
+        target_id=current["group_id"],
+        group_name=current.get("name"),
+    )
+    record = COLLECTOR_GROUPS.restore(current["group_id"], actor=principal.name)
+    _publish_group_metrics()
+    return groups.view(record, AGENT_REGISTRY.list_all())
+
+
+@app.post("/groups/{group_id}/preview", tags=["groups"], summary="Preview a group's membership (viewer)")
+def preview_group(group_id: str, request: Request):
+    """Members now, versus the last recorded resolution. Requires `viewer`, no side effects.
+
+    `added` / `dropped` / `unchanged` compare against the group's last resolution and
+    the evaluation is recorded as the next baseline (that is what makes the diff, and
+    the shrink guard, mean anything). Nothing is pushed, no revision is created.
+
+    A definition built on `healthy`/`status` is legal to preview and is exactly how
+    `use_stored_resolution` gets a membership to push to.
+    """
+    principal = require_roles(request, ROLE_VIEWER)
+    record = _require_group(group_id, include_archived=True)
+    result = groups.preview(record, AGENT_REGISTRY.list_all(), actor=principal.name)
+    PROM_GROUP_MEMBERSHIP_CHANGES.labels(reason=groups.REASON_PREVIEW).inc()
+    _publish_group_metrics()
+    return result
+
+
 # ------------------------------------------------------ config control plane (#99)
 
 
@@ -3390,7 +3781,13 @@ def propose_config_revision(
     """
     principal = require_roles(request, ROLE_OPERATOR)
     try:
-        scope = config_control.parse_scope(body.scope.model_dump())
+        scope = config_control.parse_scope(
+            body.scope.model_dump(),
+            agents=AGENT_REGISTRY.list_all(),
+            actor=principal.name,
+            use_stored_resolution=body.scope.use_stored_resolution,
+            confirm_scope_change=body.confirm_scope_change,
+        )
         prepared = config_control.prepare(
             body.config_map,
             scope=scope,
@@ -3413,10 +3810,22 @@ def propose_config_revision(
         scope_kind=prepared["scope_kind"],
         override_reason=body.override_reason,
         note=body.note,
+        # #111: the group is part of what the approval covers, so the audit row names
+        # it and how many agents it resolved to at propose time.
+        group_id=prepared["scope"].get("group_id"),
+        group_name=prepared["scope"].get("group_name"),
     )
     result = config_control.propose(
         prepared, author=principal.name, proposal_id=proposal_id, note=body.note
     )
+    if prepared["scope"].get("group_id"):
+        groups.record_push_resolution(
+            prepared["scope"],
+            prepared["targets"],
+            actor=principal.name,
+            reason=groups.REASON_PROPOSE,
+        )
+        PROM_GROUP_MEMBERSHIP_CHANGES.labels(reason=groups.REASON_PROPOSE).inc()
     PROM_CONFIG_PUSHES.labels(result="proposed").inc()
     return result
 
@@ -3555,6 +3964,17 @@ def approve_config_revision(
             reason=body.override_reason,
         )
     PROM_CONFIG_PUSHES.labels(result="approved").inc()
+    # #111: record what the group meant at the moment it was approved. That is the
+    # baseline the shrink guard and the preview diff compare against from now on.
+    scope = config_control.proposal_view(proposal_id).get("scope") or {}
+    if scope.get("group_id"):
+        groups.record_push_resolution(
+            scope,
+            [revision["agent_id"] for revision in result.get("revisions", [])],
+            actor=principal.name,
+            reason=groups.REASON_APPROVE,
+        )
+        PROM_GROUP_MEMBERSHIP_CHANGES.labels(reason=groups.REASON_APPROVE).inc()
     # #102: approval is what makes a revision active, so this is the first moment it
     # may be delivered. Agents with a live connection get it now; the rest get it on
     # their next report, and `delivery.state` says which happened.

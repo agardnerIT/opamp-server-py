@@ -381,6 +381,8 @@ class DesiredConfigRegistry:
         verdict: Optional[config_validation.Verdict] = None,
         make_current: bool = True,
         held: bool = False,
+        group_id: Optional[str] = None,
+        group_snapshot: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Store a new revision, optionally making it current. Returns the record.
 
@@ -405,6 +407,10 @@ class DesiredConfigRegistry:
             note=note,
             parent_revision_id=parent_revision_id,
             verdict_json=json.dumps(verdict.to_dict(), sort_keys=True) if verdict else None,
+            group_id=group_id,
+            group_snapshot_json=(
+                json.dumps(group_snapshot, sort_keys=True) if group_snapshot else None
+            ),
             make_current=make_current,
             held=held,
         )

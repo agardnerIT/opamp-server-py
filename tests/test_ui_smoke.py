@@ -65,6 +65,9 @@ class FakeServer:
         self.validation_fails = False
         self.rollout_refused = False
         self.agents = []
+        # #111 knobs
+        self.groups = []
+        self.health_defined = []
         self.login_status = 201
         self.login_headers = {}
         self.token_valid = True
@@ -114,6 +117,66 @@ class FakeServer:
             return FakeResponse(200 if authed else 401, {"success": authed})
         if "/compliance/check/" in url:
             return FakeResponse(200 if authed else 401, {"compliant": authed})
+        # #111: groups. The API shape matters here: the page reads `member_count`,
+        # `sources` and `health_defined`, all resolved server-side.
+        if url.endswith("/groups/attribute-keys"):
+            return FakeResponse(
+                200,
+                {
+                    "keys": [
+                        {
+                            "key": "environment",
+                            "agent_count": 1,
+                            "values": ["production"],
+                            "value_count": 1,
+                        }
+                    ],
+                    "count": 1,
+                    "reserved": ["healthy", "remote_config_status", "status"],
+                    "matching": "exact, case-insensitive equality",
+                },
+            )
+        if method == "POST" and "/groups/" in url and url.endswith("/preview"):
+            name = url.split("/groups/")[1].rsplit("/", 1)[0]
+            return FakeResponse(
+                200,
+                {
+                    "group_id": "grp-1",
+                    "name": name,
+                    "count": len(self.agents),
+                    "members": [agent["id"] for agent in self.agents],
+                    "previous_count": 3,
+                    "added": [],
+                    "dropped": ["ab" * 16],
+                    "unchanged": [],
+                    "sources": {
+                        "definition": [agent["id"] for agent in self.agents],
+                        "included": [],
+                        "excluded": ["ab" * 16],
+                    },
+                    "unknown_pins": [],
+                },
+            )
+        if method == "POST" and url.endswith("/restore"):
+            return FakeResponse(200, {"group_id": "grp-1", "name": "prod"})
+        if "/groups" in url:
+            if method == "POST" and url.rstrip("/").endswith("/groups"):
+                body = kwargs.get("json") or {}
+                return FakeResponse(
+                    200,
+                    {
+                        "group_id": "grp-2",
+                        "name": body.get("name"),
+                        "definition": body.get("definition") or {},
+                        "member_count": 0,
+                        "members": [],
+                        "sources": {"definition": [], "included": [], "excluded": []},
+                        "health_defined": [],
+                    },
+                )
+            if method == "DELETE":
+                return FakeResponse(200, {"group_id": "grp-1", "archived_at": "2026-01-01"})
+            return FakeResponse(200, {"groups": self.groups, "count": len(self.groups)})
         # #104: the Remote Config page. Deliberately dumb, like the rest of the fake.
         if url.endswith("/config/posture"):
             return FakeResponse(
@@ -746,3 +809,73 @@ def test_an_unreachable_server_is_not_reported_as_a_configuration_problem(server
     assert "unreachable" in body
     assert "connection refused" in body
     assert not app.code, "a snippet would send a new user looking in the wrong place"
+
+
+# ------------------------------------------------- collector groups in the UI (#111)
+
+
+def group_row(**overrides):
+    row = {
+        "group_id": "grp-1",
+        "name": "prod-emea",
+        "definition": {"environment": "production"},
+        "include": [],
+        "exclude": ["ab" * 16],
+        "member_count": 1,
+        "members": ["cd" * 16],
+        "sources": {"definition": ["cd" * 16], "included": [], "excluded": ["ab" * 16]},
+        "health_defined": [],
+        "unknown_pins": [],
+        "archived_at": None,
+        "updated_at": "2026-01-01T00:00:00+00:00",
+        "last_resolution": None,
+        "membership_changes": 0,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_the_target_step_can_target_a_saved_group(server):
+    """#111: a group is a visible choice with its live count, not a hidden CLI flag."""
+    server.agents = [fake_agent("cd" * 16)]
+    server.groups = [group_row()]
+    app = signed_in(REMOTE_CONFIG_PAGE)
+    app.run()
+    app.radio(key="rc_target_mode").set_value("Saved group").run()
+    assert not app.exception, app.exception
+    picker = app.selectbox(key="rc_group")
+    # The count is in the option label: the operator sees the blast radius before
+    # committing to a target, not after a push.
+    assert picker.options == ["prod-emea — 1 member(s)"]
+    body = texts(app)
+    # The definition is shown, because "what does this name mean?" is the whole point.
+    assert "production" in "\n".join(element.value for element in app.code)
+    assert "1 pinned out" in body
+
+
+def test_a_health_defined_group_is_called_out_and_not_offered_as_a_push(server):
+    server.agents = [fake_agent("cd" * 16)]
+    server.groups = [group_row(health_defined=["healthy"])]
+    app = signed_in(REMOTE_CONFIG_PAGE)
+    app.run()
+    app.radio(key="rc_target_mode").set_value("Saved group").run()
+    assert not app.exception, app.exception
+    assert "defined on **healthy**" in texts(app)
+
+
+def test_the_groups_section_lists_previews_and_creates_groups(server):
+    server.agents = [fake_agent("cd" * 16)]
+    server.groups = [group_row()]
+    app = signed_in(REMOTE_CONFIG_PAGE)
+    app.run()
+    app.toggle(key="rc_manage_groups").set_value(True).run()
+    assert not app.exception, app.exception
+    labels = [column.label for column in app.selectbox]
+    assert "Preview a group" in labels
+    # The builder offers keys harvested from live agents, not a free-text box.
+    assert "Definition attribute" in labels
+    assert "Value" in labels
+
+    [button for button in app.button if button.label == "Preview membership"][0].click().run()
+    assert not app.exception, app.exception
+    assert "Dropped" in texts(app)

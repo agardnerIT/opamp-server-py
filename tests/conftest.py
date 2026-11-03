@@ -20,6 +20,7 @@ import pytest
 from server import agent_auth, alerts, audit, auth, crypto, remote_config, rollout, updates
 from server.state import (
     AGENT_REGISTRY,
+    COLLECTOR_GROUPS,
     SQLiteAgentStore,
     SQLiteAuditStore,
     SQLiteCredentialStore,
@@ -57,6 +58,9 @@ def isolated_global_stores(monkeypatch, tmp_path):
     # #101: the staged rollout store is process-wide too - a developer's live rollout
     # must not become a test's "running" rollout (or vice versa).
     monkeypatch.setattr(rollout, "STORE", SQLiteRolloutStore(tmp_path / "rollouts.db"))
+    # #111: groups are a module-level store bound into default arguments (groups.py,
+    # config_control.py), so the *path* moves rather than the object.
+    COLLECTOR_GROUPS.reopen(tmp_path / "groups.db")
     # The agent registry and the metrics cache also default to the repository's
     # `data/opamp.db`. Swap the *store* (not the registry object — every module and
     # test already holds a reference to it) and drop whatever the import loaded, so

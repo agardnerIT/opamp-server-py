@@ -1454,6 +1454,32 @@ def view(rollout_id: str) -> Dict[str, Any]:
     }
 
 
+def live_rollouts_for_group(group_id: str) -> List[Dict[str, Any]]:
+    """Open rollouts whose proposal was approved against this group (#111 archive guard).
+
+    Answered from the revisions' `group_id` rather than from a copy on the rollout:
+    the revision is the immutable record of what the approval covered, so "is a live
+    rollout still using this name?" is a fact about history, not about the group row.
+    """
+    store = _store()
+    hits: List[Dict[str, Any]] = []
+    for row in store.list(statuses=list(SQLiteRolloutStore.OPEN_STATUSES)):
+        proposal_id = row.get("proposal_id")
+        if not proposal_id:
+            continue
+        revisions = remote_config.REGISTRY.store.by_proposal(proposal_id)
+        if any(revision.get("group_id") == group_id for revision in revisions):
+            hits.append(
+                {
+                    "rollout_id": row["rollout_id"],
+                    "status": row.get("status"),
+                    "proposal_id": proposal_id,
+                    "created_at": row.get("created_at"),
+                }
+            )
+    return hits
+
+
 def list_rollouts(
     *, status: Optional[str] = None, limit: int = 100
 ) -> Dict[str, Any]:

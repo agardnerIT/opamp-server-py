@@ -65,6 +65,15 @@ ROUTE_TO_CLIENT = {
     ("POST", "/config/revisions/{proposal_id}/reject"): "reject_config",
     ("POST", "/config/revisions/{proposal_id}/reactivate"): "reactivate_config",
     ("POST", "/config/revisions/{proposal_id}/validate"): "revalidate_config",
+    # #111: collector groups — a saved selector, not a member list.
+    ("GET", "/groups"): "groups",
+    ("POST", "/groups"): "create_group",
+    ("GET", "/groups/attribute-keys"): "attribute_keys",
+    ("GET", "/groups/{group_id}"): "group",
+    ("PUT", "/groups/{group_id}"): "update_group",
+    ("DELETE", "/groups/{group_id}"): "archive_group",
+    ("POST", "/groups/{group_id}/restore"): "restore_group",
+    ("POST", "/groups/{group_id}/preview"): "preview_group",
     ("POST", "/config/revisions/{proposal_id}/apply"): "create_config_rollout",
     ("POST", "/config/rollouts"): "create_config_rollout",
     ("GET", "/config/rollouts"): "list_config_rollouts",
@@ -93,6 +102,14 @@ CLI_COMMANDS = {
     "agents config restart": ("agents", "config", "restart"),
     "agents config withdraw": ("agents", "config", "withdraw"),
     "agents config deliver": ("agents", "config", "deliver"),
+    "groups list": ("groups", "list"),
+    "groups show": ("groups", "show"),
+    "groups create": ("groups", "create"),
+    "groups update": ("groups", "update"),
+    "groups archive": ("groups", "archive"),
+    "groups restore": ("groups", "restore"),
+    "groups preview": ("groups", "preview"),
+    "groups keys": ("groups", "keys"),
 }
 
 # MCP tools that must exist, and the write-shaped ones that must NEVER exist (D9).
@@ -102,6 +119,12 @@ MCP_READ_TOOLS = {
     "get_config_rollout",
     "agent_config",
     "validate_config",
+    # #111: groups are propose-side. Reading them is how an agent picks a target
+    # instead of inventing a filter; `create_group` is gated, never a read tool.
+    "list_groups",
+    "get_group",
+    "preview_group",
+    "attribute_keys",
 }
 MCP_FORBIDDEN_TOOLS = {
     "create_config_rollout",
@@ -157,7 +180,7 @@ def test_no_config_route_is_missing_from_the_parity_map():
     watched = {
         (method, path)
         for method, path in app_routes()
-        if path.startswith(("/config", "/agent", "/agents", "/v1/opamp"))
+        if path.startswith(("/config", "/agent", "/agents", "/groups", "/v1/opamp"))
     }
     # The OpAMP protocol endpoint is consumed by agents, not by `opamp_client`.
     watched = {entry for entry in watched if entry != ("POST", "/v1/opamp")}
@@ -246,4 +269,10 @@ def test_mcp_reads_rollouts_and_never_writes_them():
     forbidden = names & MCP_FORBIDDEN_TOOLS
     assert not forbidden, (
         f"MCP must never expose a write/approve/rollback/restart tool (D9): {forbidden}"
+    )
+    # #111: group creation is write-gated like `propose_config`, so it must not be
+    # visible in the read-only posture.
+    assert "create_group" not in names, (
+        "create_group is write-gated (OPAMP_MCP_ALLOW_WRITES); exposing it by default "
+        "would let an agent change the blast radius of every future push"
     )

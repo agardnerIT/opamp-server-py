@@ -614,6 +614,13 @@ AUDITED_ROUTES = {
     # #84: a restart is a privileged action against a live machine; the queue write
     # happens after the row, and a refusal records `result="error"`.
     ("POST", "/agent/{agent_id}/restart"): "agent.restart",
+    # #111: groups change the blast radius of every future push that names them, so
+    # every mutation is recorded — `group.update` carries the definition diff, because
+    # "changed" is not something an auditor can act on.
+    ("POST", "/groups"): "group.create",
+    ("PUT", "/groups/{group_id}"): "group.update",
+    ("DELETE", "/groups/{group_id}"): "group.archive",
+    ("POST", "/groups/{group_id}/restore"): "group.restore",
     # #46: both are admin actions. The check spends an outbound request; the
     # setting changes whether the server will ever spend one again.
     ("POST", "/updates/check"): "updates.check",
@@ -636,6 +643,10 @@ EXPLAINED_ROUTES = {
     # #103: re-running the pipeline reads a revision and parses it; it stores and moves
     # nothing, so it is the same class of question as /config/validate.
     ("POST", "/config/revisions/{proposal_id}/validate"): "pure validation, no state change",
+    # #111: a preview answers "who would this hit?" and stores no decision. It does
+    # record a *resolution* (the baseline the next diff compares against), which is
+    # membership history, not an action against a machine or a config.
+    ("POST", "/groups/{group_id}/preview"): "read-only preview; records a resolution only",
 }
 
 

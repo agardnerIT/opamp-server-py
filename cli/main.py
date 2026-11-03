@@ -70,6 +70,9 @@ audit_app = typer.Typer(
 updates_app = typer.Typer(
     help="Server update checks (#46)", no_args_is_help=True
 )
+groups_app = typer.Typer(
+    help="Collector groups: named selectors for config push (#111)", no_args_is_help=True
+)
 
 app.add_typer(agents_app, name="agents", help="Agent inspection commands")
 agents_app.add_typer(token_app, name="token", help="Agent credentials (admin)")
@@ -82,6 +85,7 @@ app.add_typer(config_app, name="config", help="Remote config control plane")
 config_app.add_typer(rollout_app, name="rollout", help="Staged rollouts (#101)")
 app.add_typer(audit_app, name="audit", help="Audit log: query, verify, export")
 app.add_typer(updates_app, name="updates", help="Server update checks (#46)")
+app.add_typer(groups_app, name="groups", help="Collector groups: named selectors (#111)")
 
 
 class _Settings:
@@ -244,6 +248,244 @@ def health() -> None:
     _run(lambda oc: oc.health())
 
 
+# ------------------------------------------------------------------ groups (#111)
+
+
+def _group_targets(agent: str, agents: Optional[str], attr: List[str], group: List[str], flags: str = "") -> Dict[str, Any]:
+    """Build a config scope from exactly one of --agent/--agents/--attr/--group.
+
+    Shared by `config propose` and `config apply` so the two can never disagree about
+    what a valid scope is, and so `--group` and `--attr` are refused together in one
+    place: they look interchangeable and are not (a group is exact-match equality over
+    a saved definition; an attr filter is an ad-hoc query).
+    """
+    resolved_agents = [item.strip() for item in (agents or "").split(",") if item.strip()]
+    filters: Dict[str, Any] = {}
+    for item in attr:
+        key, _, value = item.partition("=")
+        filters.setdefault(key, []).append(value)
+    if len(group) > 1:
+        _fail(
+            "one --group per command",
+            data={
+                "hint": "a group is one saved selector; to cover two, save a group whose "
+                "definition means both, or use --attr (matching is exact equality, so "
+                "there is no union operator)",
+            },
+        )
+    chosen = sum(1 for value in (agent or None, resolved_agents or None, filters or None, group or None) if value)
+    if chosen != 1:
+        _fail(
+            f"provide exactly one scope: --agent <id>, --agents a,b, --attr key=value or --group <name>{flags}",
+            data={"hint": "a missing scope is never \"all agents\""},
+        )
+    if agent:
+        return {"agent_id": agent}
+    if resolved_agents:
+        return {"agents": resolved_agents}
+    if group:
+        return {"group": group[0]}
+    return {"filter": filters}
+
+
+@groups_app.command("list")
+def groups_list(
+    include_archived: bool = typer.Option(False, "--all", help="Include archived groups"),
+) -> None:
+    """Saved selectors with their **live** member count (viewer).
+
+    A group is a name for a filter document, resolved on read — it cannot drift from
+    the fleet the way a stored member list would. `last_resolution` is what the group
+    meant the last time it was evaluated. Works offline (`--db`).
+    """
+    if _settings.offline:
+        from server import groups as groups_module
+        from server.state import SQLiteGroupStore
+
+        agents = _offline_states()
+        records = SQLiteGroupStore(_settings.db).list(include_archived=include_archived)
+        items = [
+            groups_module.view(record, agents, include_history=False) for record in records
+        ]
+        _emit(
+            {
+                "groups": items,
+                "count": len(items),
+                "note": "offline: membership resolved against the agents in this database",
+            }
+        )
+        return
+    _run(lambda oc: oc.groups(include_archived=include_archived))
+
+
+@groups_app.command("show")
+def groups_show(
+    group: str = typer.Argument(..., help="Group name or id (grp-…)"),
+) -> None:
+    """One group: definition, current members, pins and resolution history (viewer).
+
+    `sources` says which members came from the definition and which from
+    `include`/`exclude`; `unknown_pins` names pins for agents that have never
+    reported; `membership_changes` counts how often the resolved set moved. Bodies are
+    never involved — a group is metadata. Works offline (`--db`).
+    """
+    if _settings.offline:
+        from server import groups as groups_module
+        from server.state import SQLiteGroupStore
+
+        agents = _offline_states()
+        record = SQLiteGroupStore(_settings.db).find(group)
+        if record is None:
+            _fail(f"Group {group!r} not found in {_settings.db}")
+        _emit(groups_module.view(record, agents))
+        return
+    _run(lambda oc: oc.group(group))
+
+
+@groups_app.command("create")
+def groups_create(
+    name: str = typer.Option(..., "--name", "-n", help="Group name (lowercase, a-z0-9._-)"),
+    attr: List[str] = typer.Option([], "--attr",
+                                   help="Definition: --attr environment=prod (repeatable)"),
+    include: List[str] = typer.Option([], "--include",
+                                      help="Force an agent in, even if it fails the definition"),
+    exclude: List[str] = typer.Option([], "--exclude",
+                                      help="Force an agent out, even if it passes the definition"),
+    description: Optional[str] = typer.Option(None, "--description", "-d",
+                                              help="Why this group exists, and who owns it"),
+    owner: Optional[str] = typer.Option(None, "--owner", help="Team or person accountable"),
+) -> None:
+    """Create a named selector (operator). Creating one pushes nothing.
+
+    The definition is `--attr` pairs, matched with **exact, case-insensitive
+    equality** — no globs, no regex, no prefix (`prod-*` matches nothing). Names are
+    unique regardless of case and may not be a reserved filter key (`healthy`,
+    `status`, `remote_config_status`). A group with zero members is valid; a push to
+    one is not. `opampctl groups keys` lists what live agents actually report.
+    """
+    definition: Dict[str, Any] = {}
+    for item in attr:
+        key, _, value = item.partition("=")
+        if not key:
+            _fail(f"invalid --attr {item!r}: expected key=value")
+        existing = definition.get(key)
+        if existing is None:
+            definition[key] = value
+        elif isinstance(existing, list):
+            existing.append(value)
+        else:
+            definition[key] = [existing, value]
+    if not definition:
+        _fail(
+            "at least one --attr is required",
+            data={"hint": "an empty definition would mean the whole fleet"},
+        )
+    _run(
+        lambda oc: oc.create_group(
+            name,
+            definition=definition,
+            include=include or None,
+            exclude=exclude or None,
+            description=description,
+            owner=owner,
+        )
+    )
+
+
+@groups_app.command("update")
+def groups_update(
+    group: str = typer.Argument(..., help="Group name or id (grp-…)"),
+    name: Optional[str] = typer.Option(None, "--name", "-n", help="New name"),
+    attr: List[str] = typer.Option([], "--attr", help="Replace the definition: key=value"),
+    include: List[str] = typer.Option([], "--include", help="Replace the include pins"),
+    exclude: List[str] = typer.Option([], "--exclude", help="Replace the exclude pins"),
+    description: Optional[str] = typer.Option(None, "--description", "-d"),
+    owner: Optional[str] = typer.Option(None, "--owner"),
+) -> None:
+    """Edit a group (operator). The output includes the definition diff, which is also
+    what the audit row recorded: an edit changes the blast radius of every future push
+    that names the group, so "changed" is not enough.
+
+    Only the flags you pass change. Editing changes **future** pushes only — a
+    revision approved against the old definition keeps its snapshot and its resolved
+    agent list.
+    """
+    body: Dict[str, Any] = {}
+    if name is not None:
+        body["name"] = name
+    if attr:
+        definition: Dict[str, Any] = {}
+        for item in attr:
+            key, _, value = item.partition("=")
+            if not key:
+                _fail(f"invalid --attr {item!r}: expected key=value")
+            existing = definition.get(key)
+            if existing is None:
+                definition[key] = value
+            elif isinstance(existing, list):
+                existing.append(value)
+            else:
+                definition[key] = [existing, value]
+        body["definition"] = definition
+    if include:
+        body["include"] = include
+    if exclude:
+        body["exclude"] = exclude
+    if description is not None:
+        body["description"] = description
+    if owner is not None:
+        body["owner"] = owner
+    if not body:
+        _fail("nothing to change: pass at least one of --name/--attr/--include/--exclude/--description/--owner")
+    _run(lambda oc: oc.update_group(group, **body))
+
+
+@groups_app.command("archive")
+def groups_archive(
+    group: str = typer.Argument(..., help="Group name or id (grp-…)"),
+) -> None:
+    """Archive a group (operator) — there is no delete.
+
+    Revisions, rollouts and the audit log reference the id, so history stays readable.
+    A live rollout approved against the group refuses with 409. An archived group is
+    absent from pickers, refuses edits and pushes, and `groups restore` brings it back.
+    """
+    _run(lambda oc: oc.archive_group(group))
+
+
+@groups_app.command("restore")
+def groups_restore(
+    group: str = typer.Argument(..., help="Group name or id (grp-…)"),
+) -> None:
+    """Un-archive a group (operator). The definition comes back unchanged."""
+    _run(lambda oc: oc.restore_group(group))
+
+
+@groups_app.command("preview")
+def groups_preview(
+    group: str = typer.Argument(..., help="Group name or id (grp-…)"),
+) -> None:
+    """Who would a push to this group hit, versus last time? (viewer)
+
+    `added`/`dropped`/`unchanged` compare against the group's last recorded
+    resolution, and `sources` separates definition members from pins. Nothing is
+    pushed. Run this before a group push, and run it for a **health-defined** group to
+    create the stored membership that `--use-stored-resolution` needs.
+    """
+    _run(lambda oc: oc.preview_group(group))
+
+
+@groups_app.command("keys")
+def groups_keys() -> None:
+    """Attribute keys and sample values reported by the live fleet (viewer).
+
+    This is how a definition gets written without a typo: the keys here are the ones
+    agents actually report, and matching is exact equality, so `env` never matches
+    `environment`. Descriptions only — never an effective config.
+    """
+    _run(lambda oc: oc.attribute_keys())
+
+
 def _read_config_file(path: Path, role: str = "") -> Dict[str, Any]:
     """Build a one-object config map from a file on disk.
 
@@ -302,9 +544,19 @@ def config_propose(
                                          help="Comma-separated target agent ids"),
     attr: List[str] = typer.Option([], "--attr",
                                    help="Selector: --attr environment=prod (repeatable)"),
+    group: List[str] = typer.Option([], "--group", "-g",
+                                    help="Target a saved selector instead (see `groups list`)"),
     include_future: bool = typer.Option(
         False, "--include-future",
-        help="With a selector: also apply to agents that match it later",
+        help="With a selector or group: also apply to agents that match it later",
+    ),
+    use_stored_resolution: bool = typer.Option(
+        False, "--use-stored-resolution",
+        help="With a health-defined group: push to the last recorded membership",
+    ),
+    confirm_scope_change: bool = typer.Option(
+        False, "--confirm-scope-change",
+        help="With a group that resolved smaller than last time: acknowledge the dropped list",
     ),
     allow_endpoint_change: bool = typer.Option(
         False, "--allow-endpoint-change",
@@ -329,25 +581,13 @@ def config_propose(
     config_map = _read_config_file(file, role=role)
     config_map[""]["content_type"] = content_type
 
-    resolved_agents = [item.strip() for item in (agents or "").split(",") if item.strip()]
-    filters: Dict[str, Any] = {}
-    for item in attr:
-        key, _, value = item.partition("=")
-        filters.setdefault(key, []).append(value)
-
-    chosen = sum(1 for value in (agent, resolved_agents or None, filters or None) if value)
-    if chosen != 1:
-        _fail(
-            "provide exactly one scope: --agent <id>, --agents a,b or --attr key=value",
-            data={"hint": "a missing scope is never \"all agents\""},
-        )
-
-    if agent:
-        scope: Dict[str, Any] = {"agent_id": agent}
-    elif resolved_agents:
-        scope = {"agents": resolved_agents}
-    else:
-        scope = {"filter": filters, "include_future": include_future}
+    scope = _group_targets(agent, agents, attr, group)
+    if scope.get("filter") or scope.get("group"):
+        scope["include_future"] = include_future
+    if use_stored_resolution:
+        if not scope.get("group"):
+            _fail("--use-stored-resolution only applies with --group")
+        scope["use_stored_resolution"] = True
 
     _run(
         lambda oc: oc.propose_config(
@@ -356,6 +596,7 @@ def config_propose(
             note=note,
             allow_endpoint_change=allow_endpoint_change,
             override_reason=override_reason,
+            confirm_scope_change=confirm_scope_change,
         )
     )
 
@@ -495,6 +736,16 @@ def config_apply(
                                     help="Target agent id, repeatable"),
     attr: List[str] = typer.Option([], "--attr",
                                    help="Filter by metadata, repeatable: --attr environment=prod"),
+    group: List[str] = typer.Option([], "--group", "-g",
+                                    help="Target a saved selector instead (see `groups list`)"),
+    use_stored_resolution: bool = typer.Option(
+        False, "--use-stored-resolution",
+        help="With a health-defined group: push to the last recorded membership",
+    ),
+    confirm_scope_change: bool = typer.Option(
+        False, "--confirm-scope-change",
+        help="With a group that resolved smaller than last time: acknowledge the dropped list",
+    ),
     confirm: bool = typer.Option(False, "--confirm", "--yes", "-y",
                                  help="Required: acknowledge the blast radius (--yes is the "
                                       "#106 spelling, --confirm the legacy one)"),
@@ -523,14 +774,34 @@ def config_apply(
     for item in attr:
         key, _, value = item.partition("=")
         filters.setdefault(key, []).append(value)
+    if len(group) > 1:
+        _fail("one --group per command")
+    if group and (filters or agent):
+        _fail(
+            "a --group push cannot be combined with --attr or --agent",
+            data={"hint": "the point of a saved selector is that one definition decides "
+                          "the targets"},
+        )
+    if use_stored_resolution and not group:
+        _fail("--use-stored-resolution only applies with --group")
     if dry_run:
-        _emit(_resolve_targets_preview(filters, agent, config_map))
+        _emit(
+            _resolve_targets_preview(
+                filters,
+                agent,
+                config_map,
+                group=group[0] if group else None,
+            )
+        )
         return
     _run(
         lambda oc: oc.apply_agent_config(
             config_map,
             agents=agent or None,
             filter=filters or None,
+            group=group[0] if group else None,
+            use_stored_resolution=use_stored_resolution,
+            confirm_scope_change=confirm_scope_change,
             confirm=confirm,
             note=note,
         )
@@ -538,14 +809,48 @@ def config_apply(
 
 
 def _resolve_targets_preview(
-    filters: Dict[str, Any], agents: List[str], config_map: Dict[str, Any]
+    filters: Dict[str, Any],
+    agents: List[str],
+    config_map: Dict[str, Any],
+    group: Optional[str] = None,
 ) -> Dict[str, Any]:
     """`config apply --dry-run`: the resolved targets, from the server's own filter.
 
     Read-only. It asks `GET /agents` with the same selector the push would use, so the
     list printed is the list that would be hit — resolving it client-side is how a
     dry run ends up disagreeing with the real thing.
+
+    With `--group` it reads `GET /groups/{id}`: the live members, which came from the
+    definition and which from pins, **and the definition snapshot** that would be
+    recorded on every revision. `GET` rather than `POST .../preview` on purpose — a
+    dry run must not record a resolution, or checking the blast radius twice would
+    change the baseline the shrink guard compares against.
     """
+    if group:
+        record = _client_call(lambda oc: oc.group(group))
+        return {
+            "dry_run": True,
+            "matched_by": "group",
+            "group": {
+                "group_id": record.get("group_id"),
+                "name": record.get("name"),
+                "definition": record.get("definition"),
+                "include": record.get("include") or [],
+                "exclude": record.get("exclude") or [],
+                "health_defined": record.get("health_defined") or [],
+                "archived": bool(record.get("archived_at")),
+            },
+            "agents": record.get("member_count", len(record.get("members") or [])),
+            "targets": record.get("members") or [],
+            "sources": record.get("sources") or {},
+            "unknown_pins": record.get("unknown_pins") or [],
+            "objects": len(config_map),
+            "delivery": {
+                "state": "unchanged",
+                "reason": "dry_run",
+                "detail": "nothing was stored or delivered",
+            },
+        }
     targets = agents
     matched_by = "agents"
     if not targets and filters:

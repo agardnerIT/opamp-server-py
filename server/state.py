@@ -1,13 +1,14 @@
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Mapping, Sequence
 from loguru import logger
 
 from server import crypto, redaction
@@ -19,6 +20,13 @@ from server.effective_config import parse_effective_config
 
 def utcnow():
     return datetime.now(timezone.utc)
+
+
+# #111: keys a filter document may use that are *not* description attributes.
+# `status` is the older spelling of `remote_config_status`. Kept next to the one
+# implementation that splits them so a group definition and `GET /agents` can never
+# disagree about what `healthy` means.
+RESERVED_FILTER_KEYS = frozenset({"healthy", "status", "remote_config_status"})
 
 
 def _stringify_any_value(value: Optional[Dict]) -> Optional[str]:
@@ -791,6 +799,12 @@ class SQLiteDesiredConfigStore:
         "parent_revision_id": "TEXT",
         "verdict_json": "TEXT",
         "superseded_at": "TEXT",
+        # #111: a group-scoped revision records *which group* and *what that group
+        # meant* when it was approved. The snapshot is what makes "pushed to
+        # prod-emea as defined on 2026-03-04; the definition has since changed"
+        # answerable without rewriting history every time somebody edits a group.
+        "group_id": "TEXT",
+        "group_snapshot_json": "TEXT",
     }
     _ASSIGNMENT_COLUMNS = {
         "delivered_hash": "TEXT",
@@ -905,6 +919,8 @@ class SQLiteDesiredConfigStore:
         note: Optional[str] = None,
         parent_revision_id: Optional[str] = None,
         verdict_json: Optional[str] = None,
+        group_id: Optional[str] = None,
+        group_snapshot_json: Optional[str] = None,
         make_current: bool = True,
         held: bool = False,
     ) -> Dict[str, Any]:
@@ -927,8 +943,9 @@ class SQLiteDesiredConfigStore:
             conn.execute(
                 "INSERT INTO config_revisions (revision_id, agent_id, config_blob, "
                 "config_hash, author, created_at, withdrawn, status, proposal_id, "
-                "scope_kind, scope_json, note, parent_revision_id, verdict_json) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "scope_kind, scope_json, note, parent_revision_id, verdict_json, "
+                "group_id, group_snapshot_json) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     revision_id,
                     agent_id,
@@ -944,6 +961,8 @@ class SQLiteDesiredConfigStore:
                     note,
                     parent_revision_id,
                     verdict_json,
+                    group_id,
+                    group_snapshot_json,
                 ),
             )
             if make_current:
@@ -1636,6 +1655,560 @@ def _normalise_audit_ts(value: Optional[str]) -> Optional[str]:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc).isoformat()
+
+
+class GroupError(ValueError):
+    """A refused group operation, carrying the HTTP status the route should use."""
+
+    def __init__(self, status_code: int, detail: Any):
+        self.status_code = status_code
+        self.detail = detail
+        super().__init__(str(detail))
+
+
+class SQLiteGroupStore:
+    """Named collector groups (#111): a **saved selector**, never a member list.
+
+    Membership is resolved at use time by `AgentState.matches_scope()`, the same
+    implementation `GET /agents` and a config `filter` scope use. Storing members
+    would be a second source of truth that goes stale the moment an agent's
+    attributes change, which is exactly the drift a named selector is supposed to
+    remove.
+
+    Two tables:
+
+    ``collector_groups``
+        The definition (filters + `include`/`exclude` pins), its owner and the
+        lifecycle. Groups are **archived, never deleted**: revisions and rollouts
+        reference `group_id`, and the audit log is append-only, so a hard delete
+        would leave history pointing at nothing.
+
+    ``collector_group_resolutions``
+        What the group meant, when — `preview`, `push` and `propose` evaluations.
+        This is what makes "it used to be 12 agents" checkable, and it is the
+        baseline the shrink guard compares against (`preview`'s `dropped` diff).
+
+    Validation lives here, not in the routes: a name, a definition or a pin that
+    the store would not accept must fail the same way whether it arrived from the
+    API, the CLI, MCP or a file.
+    """
+
+    NAME_MIN = 2
+    NAME_MAX = 63
+    # Exact-match semantics, stated in the UI: no globs, no regex, no prefix. `prod-*`
+    # is the first thing a human types, so the allowed characters are deliberately
+    # narrow enough that it cannot be mistaken for a pattern.
+    NAME_PATTERN = r"^[a-z0-9][a-z0-9._-]{1,62}$"
+    RESERVED_NAMES = frozenset({"healthy", "status", "remote_config_status"})
+    SOURCES = ("api", "file")
+    REASONS = ("preview", "propose", "push", "approve")
+
+    def __init__(self, db_path: Path = DB_PATH):
+        self.db_path = db_path
+        self._create_schema()
+
+    def reopen(self, db_path) -> None:
+        """Point this (module-level) store at another database and create the schema.
+
+        The singleton is bound into default arguments across `groups`/`config_control`,
+        so a test cannot swap the object; it has to move the path. Creating the schema
+        here keeps every other store's `__init__` contract intact.
+        """
+        self.db_path = Path(db_path)
+        self._create_schema()
+
+    def _create_schema(self) -> None:
+        db_path = self.db_path
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        with self._connect() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS collector_groups (
+                    group_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    name_key TEXT NOT NULL UNIQUE,
+                    definition_json TEXT NOT NULL,
+                    include_json TEXT NOT NULL DEFAULT '[]',
+                    exclude_json TEXT NOT NULL DEFAULT '[]',
+                    description TEXT,
+                    owner TEXT,
+                    source TEXT NOT NULL DEFAULT 'api',
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_by TEXT,
+                    updated_at TEXT NOT NULL,
+                    archived_at TEXT,
+                    archived_by TEXT
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS collector_group_resolutions (
+                    group_id TEXT NOT NULL,
+                    evaluated_at TEXT NOT NULL,
+                    agent_ids_json TEXT NOT NULL,
+                    agent_count INTEGER NOT NULL,
+                    reason TEXT NOT NULL,
+                    actor TEXT,
+                    PRIMARY KEY (group_id, evaluated_at)
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS collector_group_resolutions_idx "
+                "ON collector_group_resolutions(group_id, evaluated_at DESC)"
+            )
+            conn.execute("PRAGMA journal_mode=WAL")
+
+    def _connect(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(self.db_path, timeout=5.0)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA busy_timeout=5000")
+        return conn
+
+    # ------------------------------------------------------------- validation
+
+    @classmethod
+    def validate_name(cls, name: str) -> str:
+        # Lowercased before validation: a name is an identifier, and
+        # `Prod-EMEA` vs `prod-emea` must collide as a duplicate (409) rather than
+        # read as two different groups. The stored form is canonical lowercase.
+        candidate = (name or "").strip().lower()
+        if not re.fullmatch(cls.NAME_PATTERN, candidate):
+            raise GroupError(
+                422,
+                f"invalid group name {candidate!r}: use {cls.NAME_MIN}-{cls.NAME_MAX} "
+                "lowercase characters from a-z, 0-9, '.', '_' and '-', starting with a "
+                "letter or digit (globs and spaces are not names)",
+            )
+        if candidate.lower() in cls.RESERVED_NAMES:
+            raise GroupError(
+                422,
+                f"{candidate!r} is a reserved filter key, not a group name; a group must "
+                "stay visibly different from an attribute filter",
+            )
+        return candidate
+
+    @staticmethod
+    def validate_definition(definition: Any) -> Dict[str, Any]:
+        """A definition is a filter document, and it may not be empty.
+
+        `{}` would match every agent, so a group would be "the whole fleet" without
+        anyone typing that. That is the one selector this project never lets anybody
+        write by accident (a missing scope is never "all agents" either).
+        """
+        if not isinstance(definition, dict):
+            raise GroupError(422, "definition must be an object of filter keys and values")
+        cleaned: Dict[str, Any] = {}
+        for key, value in definition.items():
+            name = str(key).strip()
+            if not name:
+                raise GroupError(422, "definition keys must not be empty")
+            if isinstance(value, (dict, list)):
+                if isinstance(value, list) and value and not all(
+                    isinstance(item, (str, int, float, bool)) for item in value
+                ):
+                    raise GroupError(
+                        422,
+                        f"definition[{name!r}] must be a scalar or a list of scalars; "
+                        "matching is exact equality against the agent's attributes",
+                    )
+                if isinstance(value, list) and not value:
+                    raise GroupError(422, f"definition[{name!r}] must not be an empty list")
+                if isinstance(value, dict):
+                    raise GroupError(
+                        422,
+                        f"definition[{name!r}] must be a scalar or a list of scalars",
+                    )
+            if value is None:
+                raise GroupError(422, f"definition[{name!r}] must not be null")
+            cleaned[name] = value
+        if not cleaned:
+            raise GroupError(
+                422,
+                "a group definition needs at least one filter; an empty definition "
+                "would mean the whole fleet",
+            )
+        return cleaned
+
+    @classmethod
+    def validate_pins(cls, pins: Any, *, label: str) -> List[str]:
+        if pins is None:
+            return []
+        if not isinstance(pins, (list, tuple)):
+            raise GroupError(422, f"{label} must be a list of agent ids")
+        out: List[str] = []
+        for raw in pins:
+            value = str(raw).strip()
+            if not value:
+                raise GroupError(422, f"{label} must not contain an empty agent id")
+            if value not in out:
+                out.append(value)
+        return out
+
+    # ------------------------------------------------------------- decoding
+
+    @staticmethod
+    def _row(row) -> Optional[Dict[str, Any]]:
+        if row is None:
+            return None
+        record = {key: row[key] for key in row.keys()}
+        for field_name in ("definition_json", "include_json", "exclude_json"):
+            raw = record.pop(field_name, None)
+            key = field_name[: -len("_json")]
+            try:
+                parsed = json.loads(raw) if raw else ({} if key == "definition" else [])
+            except (TypeError, ValueError):
+                parsed = {} if key == "definition" else []
+            record[key] = parsed
+        return record
+
+    # --------------------------------------------------------------- writes
+
+    def create(
+        self,
+        *,
+        name: str,
+        definition: Dict[str, Any],
+        include: Optional[Sequence[str]] = None,
+        exclude: Optional[Sequence[str]] = None,
+        description: Optional[str] = None,
+        owner: Optional[str] = None,
+        source: str = "api",
+        created_by: str = "system",
+    ) -> Dict[str, Any]:
+        """Create a group. Duplicate names are refused case-insensitively."""
+        name = self.validate_name(name)
+        definition = self.validate_definition(definition)
+        include_list = self.validate_pins(include, label="include")
+        exclude_list = self.validate_pins(exclude, label="exclude")
+        if set(include_list) & set(exclude_list):
+            raise GroupError(
+                422,
+                "an agent cannot be both pinned in and pinned out of the same group",
+            )
+        if source not in self.SOURCES:
+            raise GroupError(422, f"source must be one of {', '.join(self.SOURCES)}")
+        now = utcnow().isoformat()
+        group_id = self.new_group_id()
+        with self._connect() as conn:
+            existing = conn.execute(
+                "SELECT group_id FROM collector_groups WHERE name_key=?", (name.lower(),)
+            ).fetchone()
+            if existing is not None:
+                raise GroupError(
+                    409,
+                    {
+                        "message": f"a group named {name!r} already exists",
+                        "group_id": existing["group_id"],
+                        "hint": "names are unique regardless of case; update that group "
+                        "or choose another name",
+                    },
+                )
+            conn.execute(
+                "INSERT INTO collector_groups (group_id, name, name_key, "
+                "definition_json, include_json, exclude_json, description, owner, "
+                "source, created_by, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    group_id,
+                    name,
+                    name.lower(),
+                    json.dumps(definition, sort_keys=True),
+                    json.dumps(include_list),
+                    json.dumps(exclude_list),
+                    description,
+                    owner,
+                    source,
+                    created_by,
+                    now,
+                    now,
+                ),
+            )
+        return self.get(group_id) or {}
+
+    def compute_changes(
+        self,
+        current: Mapping[str, Any],
+        *,
+        name: Optional[str] = None,
+        definition: Optional[Dict[str, Any]] = None,
+        include: Optional[Sequence[str]] = None,
+        exclude: Optional[Sequence[str]] = None,
+        description: Optional[str] = None,
+        owner: Optional[str] = None,
+    ) -> tuple:
+        """Validate an edit and compute `(updates, diff)` **without writing**.
+
+        Split out of :meth:`update` so a route can write its audit row — carrying the
+        definition diff — *before* the mutation (#97's pre-write ordering). A diff
+        computed after the fact cannot be attached to the row that authorises it.
+        """
+        changes: Dict[str, Any] = {}
+        updates: Dict[str, Any] = {}
+        if name is not None and name != current["name"]:
+            validated = self.validate_name(name)
+            updates["name"] = validated
+            updates["name_key"] = validated.lower()
+            changes["name"] = {"from": current["name"], "to": validated}
+        if definition is not None:
+            validated = self.validate_definition(definition)
+            if validated != current["definition"]:
+                updates["definition_json"] = json.dumps(validated, sort_keys=True)
+                changes["definition"] = diff_definitions(current["definition"], validated)
+        if include is not None:
+            validated_pins = self.validate_pins(include, label="include")
+            if validated_pins != current["include"]:
+                updates["include_json"] = json.dumps(validated_pins)
+                changes["include"] = {
+                    "added": [pin for pin in validated_pins if pin not in current["include"]],
+                    "dropped": [pin for pin in current["include"] if pin not in validated_pins],
+                }
+        if exclude is not None:
+            validated_pins = self.validate_pins(exclude, label="exclude")
+            if validated_pins != current["exclude"]:
+                updates["exclude_json"] = json.dumps(validated_pins)
+                changes["exclude"] = {
+                    "added": [pin for pin in validated_pins if pin not in current["exclude"]],
+                    "dropped": [pin for pin in current["exclude"] if pin not in validated_pins],
+                }
+        if description is not None and description != current.get("description"):
+            updates["description"] = description
+            changes["description"] = {"from": current.get("description"), "to": description}
+        if owner is not None and owner != current.get("owner"):
+            updates["owner"] = owner
+            changes["owner"] = {"from": current.get("owner"), "to": owner}
+
+        include_final = current["include"] if include is None else (
+            json.loads(updates.get("include_json") or "[]")
+        )
+        exclude_final = current["exclude"] if exclude is None else (
+            json.loads(updates.get("exclude_json") or "[]")
+        )
+        if set(include_final) & set(exclude_final):
+            raise GroupError(
+                422, "an agent cannot be both pinned in and pinned out of the same group"
+            )
+        return updates, changes
+
+    def update(
+        self,
+        group_id: str,
+        *,
+        actor: str,
+        name: Optional[str] = None,
+        definition: Optional[Dict[str, Any]] = None,
+        include: Optional[Sequence[str]] = None,
+        exclude: Optional[Sequence[str]] = None,
+        description: Optional[str] = None,
+        owner: Optional[str] = None,
+    ) -> tuple:
+        """Edit a group, returning `(record, diff)`.
+
+        The diff is the point: an edit silently changes the blast radius of every
+        future push that names this group, so the audit row carries what changed
+        rather than "changed". The previous definition is *not* mutable history —
+        revisions keep their own `group_snapshot_json`.
+        """
+        current = self.get(group_id)
+        if current is None:
+            raise GroupError(404, f"group {group_id} not found")
+        if current.get("archived_at"):
+            raise GroupError(
+                409,
+                {
+                    "message": f"group {current['name']!r} is archived",
+                    "hint": "restore it first: an archived group is history, not a target",
+                },
+            )
+        updates, changes = self.compute_changes(
+            current,
+            name=name,
+            definition=definition,
+            include=include,
+            exclude=exclude,
+            description=description,
+            owner=owner,
+        )
+        if not updates:
+            return current, {}
+        updates["updated_by"] = actor
+        updates["updated_at"] = utcnow().isoformat()
+        assignments = ", ".join(f"{column}=?" for column in updates)
+        try:
+            with self._connect() as conn:
+                conn.execute(
+                    f"UPDATE collector_groups SET {assignments} WHERE group_id=?",
+                    (*updates.values(), group_id),
+                )
+        except sqlite3.IntegrityError as exc:  # the name_key unique index
+            raise GroupError(
+                409, f"a group named {updates.get('name')!r} already exists"
+            ) from exc
+        return self.get(group_id) or {}, changes
+
+    def archive(self, group_id: str, *, actor: str) -> Dict[str, Any]:
+        """Archive, never delete: revisions and rollouts still reference the id."""
+        current = self.get(group_id)
+        if current is None:
+            raise GroupError(404, f"group {group_id} not found")
+        if current.get("archived_at"):
+            return current
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE collector_groups SET archived_at=?, archived_by=?, "
+                "updated_at=? WHERE group_id=?",
+                (utcnow().isoformat(), actor, utcnow().isoformat(), group_id),
+            )
+        return self.get(group_id) or {}
+
+    def restore(self, group_id: str, *, actor: str) -> Dict[str, Any]:
+        current = self.get(group_id)
+        if current is None:
+            raise GroupError(404, f"group {group_id} not found")
+        if not current.get("archived_at"):
+            return current
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE collector_groups SET archived_at=NULL, archived_by=NULL, "
+                "updated_by=?, updated_at=? WHERE group_id=?",
+                (actor, utcnow().isoformat(), group_id),
+            )
+        return self.get(group_id) or {}
+
+    @staticmethod
+    def new_group_id() -> str:
+        import secrets
+
+        return f"grp-{secrets.token_hex(4)}"
+
+    # ---------------------------------------------------------------- reads
+
+    def get(self, group_id: str) -> Optional[Dict[str, Any]]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM collector_groups WHERE group_id=?", (group_id,)
+            ).fetchone()
+        return self._row(row)
+
+    def find(self, name_or_id: str) -> Optional[Dict[str, Any]]:
+        """Resolve a group by id or by name, case-insensitively (CLI convenience)."""
+        candidate = (name_or_id or "").strip()
+        if not candidate:
+            return None
+        return self.get(candidate) or self.by_name(candidate)
+
+    def by_name(self, name: str) -> Optional[Dict[str, Any]]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM collector_groups WHERE name_key=?", (name.strip().lower(),)
+            ).fetchone()
+        return self._row(row)
+
+    def list(self, *, include_archived: bool = False) -> List[Dict[str, Any]]:
+        query = "SELECT * FROM collector_groups"
+        if not include_archived:
+            query += " WHERE archived_at IS NULL"
+        query += " ORDER BY name"
+        with self._connect() as conn:
+            rows = conn.execute(query).fetchall()
+        return [record for record in (self._row(row) for row in rows) if record]
+
+    def record_resolution(
+        self,
+        group_id: str,
+        agent_ids: Sequence[str],
+        *,
+        reason: str,
+        actor: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Record what this group meant at this moment.
+
+        Membership is never *stored as state* — this is a log of past evaluations, so
+        that "it used to be 12 agents" and the shrink guard have something to compare
+        against. A drift signal needs a baseline; without one every push looks normal.
+        """
+        if reason not in self.REASONS:
+            raise GroupError(422, f"reason must be one of {', '.join(self.REASONS)}")
+        if self.get(group_id) is None:
+            raise GroupError(404, f"group {group_id} not found")
+        ids = list(dict.fromkeys(str(agent_id) for agent_id in agent_ids))
+        now = utcnow().isoformat()
+        with self._connect() as conn:
+            # `evaluated_at` is the primary key half, so two evaluations in the same
+            # microsecond must not collide (a preview loop in a UI does exactly that).
+            conn.execute(
+                "INSERT OR REPLACE INTO collector_group_resolutions "
+                "(group_id, evaluated_at, agent_ids_json, agent_count, reason, actor) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (group_id, now, json.dumps(ids), len(ids), reason, actor),
+            )
+        return {
+            "group_id": group_id,
+            "evaluated_at": now,
+            "agent_ids": ids,
+            "agent_count": len(ids),
+            "reason": reason,
+            "actor": actor,
+        }
+
+    def resolutions(self, group_id: str, *, limit: int = 20) -> List[Dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM collector_group_resolutions WHERE group_id=? "
+                "ORDER BY evaluated_at DESC LIMIT ?",
+                (group_id, limit),
+            ).fetchall()
+        out = []
+        for row in rows:
+            record = {key: row[key] for key in row.keys()}
+            try:
+                record["agent_ids"] = json.loads(record.pop("agent_ids_json") or "[]")
+            except (TypeError, ValueError):
+                record["agent_ids"] = []
+            out.append(record)
+        return out
+
+    def last_resolution(self, group_id: str, *, before: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """The most recent evaluation, optionally one strictly older than `before`.
+
+        `before` is what makes a preview stable: the comparison baseline must not be
+        the resolution the preview itself just recorded.
+        """
+        query = (
+            "SELECT * FROM collector_group_resolutions WHERE group_id=?"
+        )
+        params: List[Any] = [group_id]
+        if before:
+            query += " AND evaluated_at < ?"
+            params.append(before)
+        query += " ORDER BY evaluated_at DESC LIMIT 1"
+        with self._connect() as conn:
+            row = conn.execute(query, params).fetchone()
+        if row is None:
+            return None
+        record = {key: row[key] for key in row.keys()}
+        try:
+            record["agent_ids"] = json.loads(record.pop("agent_ids_json") or "[]")
+        except (TypeError, ValueError):
+            record["agent_ids"] = []
+        return record
+
+
+def diff_definitions(old: Dict[str, Any], new: Dict[str, Any]) -> Dict[str, Any]:
+    """Filter-document diff: added / removed / changed keys, with both values.
+
+    Shape is asserted in tests (#111 acceptance: "assert the diff content, not just
+    the action name") because the diff is what makes an audit row answer "what did
+    this edit change about the blast radius?".
+    """
+    old = old or {}
+    new = new or {}
+    added = {key: new[key] for key in new if key not in old}
+    removed = {key: old[key] for key in old if key not in new}
+    changed = {
+        key: {"from": old[key], "to": new[key]}
+        for key in new
+        if key in old and old[key] != new[key]
+    }
+    return {"added": added, "removed": removed, "changed": changed}
 
 
 class SQLiteAuditStore:
@@ -2340,6 +2913,32 @@ class AgentState:
 
         return True
 
+    def matches_scope(self, filters: Optional[Dict[str, Any]]) -> bool:
+        """`matches_filters` for a raw filter document (#111).
+
+        This is the **one** filter implementation: `GET /agents`, config selector
+        scopes and collector groups all arrive as a document like
+        ``{"healthy": "true", "environment": "prod"}`` and every one of them has to
+        answer the same way. Groups exist because a saved selector must mean exactly
+        what the ad-hoc filter it replaces meant, so the split between reserved keys
+        (`healthy`, `status`, `remote_config_status`) and description attributes
+        lives here rather than in each caller.
+        """
+        filters = filters or {}
+        healthy = filters.get("healthy")
+        remote_status = filters.get("remote_config_status") or filters.get("status")
+        attributes: Dict[str, List[str]] = {}
+        for key, value in filters.items():
+            if key in RESERVED_FILTER_KEYS:
+                continue
+            values = value if isinstance(value, (list, tuple)) else [value]
+            attributes[str(key)] = [str(item) for item in values]
+        return self.matches_filters(
+            healthy=None if healthy is None else str(healthy),
+            remote_config_status=None if remote_status is None else str(remote_status),
+            attributes=attributes,
+        )
+
     def redacted_effective_config(self) -> tuple:
         """`(json, redacted_paths)` for the effective config, cached per raw body.
 
@@ -2513,3 +3112,6 @@ class AgentRegistry:
 
 
 AGENT_REGISTRY = AgentRegistry()
+# #111: named collector groups. Module-level like AGENT_REGISTRY so the config control
+# plane and the routes read the same store.
+COLLECTOR_GROUPS = SQLiteGroupStore()

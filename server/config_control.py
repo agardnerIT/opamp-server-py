@@ -43,8 +43,14 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from loguru import logger
 
-from server import alerts, audit, config_validation, posture, remote_config
-from server.state import AgentState, SQLiteDesiredConfigStore, utcnow
+from server import alerts, audit, config_validation, groups, posture, remote_config
+from server.state import (
+    COLLECTOR_GROUPS,
+    AgentState,
+    GroupError,
+    SQLiteDesiredConfigStore,
+    utcnow,
+)
 
 SCOPE_AGENT = "agent"
 SCOPE_AGENTS = "agents"
@@ -78,22 +84,46 @@ class ConfigControlError(Exception):
 # ------------------------------------------------------------------------ scopes
 
 
-def parse_scope(scope: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
-    """Validate a requested scope. A missing scope is never "all agents" (#99)."""
+def parse_scope(
+    scope: Optional[Mapping[str, Any]],
+    *,
+    agents: Sequence[AgentState] = (),
+    actor: Optional[str] = None,
+    use_stored_resolution: bool = False,
+    confirm_scope_change: bool = False,
+) -> Dict[str, Any]:
+    """Validate a requested scope. A missing scope is never "all agents" (#99).
+
+    #111: a **group** scope is expanded here, into a `selector` scope plus the group's
+    definition snapshot. Expanding at the one gate every entry point uses (propose,
+    approve, apply, rollout) is what keeps the health guard and the shrink guard
+    unbypassable: a new caller cannot forget to ask, because it never sees a group id.
+    """
     if not scope:
         raise ConfigControlError(
             400,
-            "a scope is required: {\"agent_id\": ...}, {\"agents\": [...]} or "
-            "{\"filter\": {...}}. A missing scope is never \"the whole fleet\".",
+            "a scope is required: {\"agent_id\": ...}, {\"agents\": [...]}, "
+            "{\"filter\": {...}} or {\"group\": \"<name>\"}. A missing scope is "
+            "never \"the whole fleet\".",
         )
     include_future = bool(scope.get("include_future"))
     agent_id = scope.get("agent_id")
-    agents = scope.get("agents")
+    # NOT `agents`: that is the *fleet* this scope resolves against (#111). Shadowing
+    # it made every group scope resolve against `None`.
+    scope_agents = scope.get("agents")
     selector = scope.get("filter")
+    group = scope.get("group") or scope.get("group_id") or scope.get("group_name")
 
-    if agent_id and (agents or selector):
+    if group and (agent_id or scope_agents or selector):
+        raise ConfigControlError(
+            400,
+            "a group scope cannot be combined with agent_id, agents or filter: the "
+            "point of a named selector is that one definition decides the targets",
+        )
+
+    if agent_id and (scope_agents or selector):
         raise ConfigControlError(400, "provide exactly one of agent_id, agents or filter")
-    if agents and selector:
+    if scope_agents and selector:
         raise ConfigControlError(400, "provide exactly one of agent_id, agents or filter")
 
     if agent_id:
@@ -109,11 +139,11 @@ def parse_scope(scope: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
             )
         return {"kind": SCOPE_AGENT, "agent_id": resolved[0], "include_future": False}
 
-    if agents:
-        if not isinstance(agents, (list, tuple)):
+    if scope_agents:
+        if not isinstance(scope_agents, (list, tuple)):
             raise ConfigControlError(400, "agents must be a list of agent ids")
         resolved = []
-        for raw in agents:
+        for raw in scope_agents:
             try:
                 resolved.append(remote_config.normalize_agent_id(str(raw)))
             except ValueError as exc:
@@ -128,11 +158,28 @@ def parse_scope(scope: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
             )
         return {"kind": SCOPE_AGENTS, "agents": resolved, "include_future": False}
 
+    if group:
+        try:
+            expanded = groups.expand_scope(
+                scope,
+                agents=agents,
+                actor=actor,
+                use_stored_resolution=use_stored_resolution,
+                confirm_scope_change=confirm_scope_change,
+            )
+        except GroupError as exc:
+            # One error vocabulary upwards: the routes already translate
+            # `ConfigControlError` into an HTTP answer, and a group refusal is a
+            # config refusal (same guards, same surface).
+            raise ConfigControlError(exc.status_code, exc.detail)
+        return expanded
+
     if selector is None:
         raise ConfigControlError(
             400,
-            "a scope is required: {\"agent_id\": ...}, {\"agents\": [...]} or "
-            "{\"filter\": {...}}. A missing scope is never \"the whole fleet\".",
+            "a scope is required: {\"agent_id\": ...}, {\"agents\": [...]}, "
+            "{\"filter\": {...}} or {\"group\": \"<name>\"}. A missing scope is "
+            "never \"the whole fleet\".",
         )
     if not isinstance(selector, Mapping):
         raise ConfigControlError(
@@ -148,20 +195,14 @@ def parse_scope(scope: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
 
 
 def _matches(agent: AgentState, filters: Mapping[str, Any]) -> bool:
-    """Resolve a selector with the same logic as `GET /agents` (one implementation)."""
-    healthy = filters.get("healthy")
-    remote_status = filters.get("remote_config_status") or filters.get("status")
-    attributes: Dict[str, List[str]] = {}
-    for key, value in filters.items():
-        if key in _RESERVED_FILTERS:
-            continue
-        values = value if isinstance(value, (list, tuple)) else [value]
-        attributes[str(key)] = [str(item) for item in values]
-    return agent.matches_filters(
-        healthy=None if healthy is None else str(healthy),
-        remote_config_status=None if remote_status is None else str(remote_status),
-        attributes=attributes,
-    )
+    """Resolve a selector with the same logic as `GET /agents` (one implementation).
+
+    The splitting of reserved keys vs description attributes lives in
+    `AgentState.matches_scope` (#111) because collector groups must resolve through
+    exactly this code path — a saved selector that disagreed with the ad-hoc filter it
+    replaces would be worse than typing the filter every time.
+    """
+    return agent.matches_scope(filters)
 
 
 def resolve_targets(
@@ -174,7 +215,12 @@ def resolve_targets(
         return [scope["agent_id"]]
     if kind == SCOPE_AGENTS:
         return list(scope["agents"])
-    matched = [agent.agent_id for agent in agents if _matches(agent, scope.get("filter") or {})]
+    if scope.get("group_id"):
+        # A group scope carries its pins: `include` forces an agent in even when it
+        # fails the definition, `exclude` forces one out even when it passes.
+        matched = groups.resolve_group_scope(scope, agents)
+    else:
+        matched = [agent.agent_id for agent in agents if _matches(agent, scope.get("filter") or {})]
     if not matched:
         raise ConfigControlError(
             404,
@@ -279,6 +325,21 @@ def _require_approvable(
 # ---------------------------------------------------------------------- mutations
 
 
+def _group_args(scope: Mapping[str, Any]) -> Dict[str, Any]:
+    """Revision columns for a group-scoped revision (#111 invariant 1).
+
+    The **snapshot** goes on every revision the group creates, not just the first: a
+    rollout attaches revisions later, at approve time, and those must record the same
+    meaning the operator approved.
+    """
+    if not scope.get("group_id"):
+        return {}
+    return {
+        "group_id": scope.get("group_id"),
+        "group_snapshot": scope.get("group_snapshot"),
+    }
+
+
 def prepare(
     config_map: Dict[str, Dict[str, Any]],
     *,
@@ -369,6 +430,7 @@ def propose(
             note=note,
             verdict=verdict,
             make_current=False,
+            **_group_args(scope),
         )
         revisions.append({"agent_id": agent_id, "revision_id": revision_id})
 
@@ -495,9 +557,15 @@ def approve(
 
     matched: Optional[set] = None
     if scope.get("kind") == SCOPE_SELECTOR and scope.get("filter"):
-        matched = {
-            agent.agent_id for agent in agents if _matches(agent, scope["filter"])
-        }
+        if scope.get("group_id"):
+            # Group pins are part of the meaning of the name, so they apply to the
+            # approve-time re-resolution as well; a stored-resolution push has no
+            # definition left to re-resolve against.
+            matched = set(groups.resolve_group_scope(scope, agents))
+        else:
+            matched = {
+                agent.agent_id for agent in agents if _matches(agent, scope["filter"])
+            }
     target_ids = sorted(matched) if matched is not None else [row["agent_id"] for row in pending]
     if not target_ids:
         raise ConfigControlError(
@@ -562,6 +630,7 @@ def approve(
                 note="matched the selector at approval time",
                 verdict=verdicts[agent_id],
                 make_current=False,
+                **_group_args(scope),
             )
         _supersede(store, agent_id, revision_id)
         store.set_status(
@@ -845,7 +914,12 @@ def reconcile_future(agents: Sequence[AgentState]) -> int:
         # resolution is immutable (D4), so the rows are the truth and a second sweep
         # cannot re-attach the same agent.
         resolved = {row["agent_id"] for row in store.by_proposal(proposal_id)}
-        matched = [agent.agent_id for agent in agents if _matches(agent, scope["filter"])]
+        excluded = set(scope.get("exclude") or [])
+        matched = [
+            agent.agent_id
+            for agent in agents
+            if agent.agent_id not in excluded and _matches(agent, scope["filter"])
+        ]
         newcomers = [agent_id for agent_id in matched if agent_id not in resolved]
         if not newcomers:
             continue
@@ -865,6 +939,7 @@ def reconcile_future(agents: Sequence[AgentState]) -> int:
                     scope_json=json.dumps(scope, sort_keys=True),
                     note=f"apply_to_future: matched proposal {proposal_id}",
                     verdict=None,
+                    **_group_args(scope),
                 )
             except Exception as exc:  # pragma: no cover - one agent must not stop the sweep
                 logger.warning(f"include_future: could not attach {agent_id}: {exc}")
@@ -1045,6 +1120,36 @@ def reset_drift_alerts() -> None:
 # ----------------------------------------------------------------------- views
 
 
+def _group_view(record: Mapping[str, Any]) -> Dict[str, Any]:
+    """A revision's group facts, including whether the definition has moved since.
+
+    `group_definition_changed` is the whole point of storing a snapshot: editing a
+    group must not retroactively change what a past revision meant, but the operator
+    reading that revision still needs to know the name no longer means what it did.
+    """
+    group_id = record.get("group_id")
+    if not group_id:
+        return {"group_id": None}
+    snapshot = None
+    raw = record.get("group_snapshot_json")
+    if raw:
+        try:
+            snapshot = json.loads(raw)
+        except (TypeError, ValueError):
+            snapshot = None
+    current = COLLECTOR_GROUPS.get(group_id)
+    changed = None
+    if snapshot is not None and current is not None:
+        changed = (snapshot.get("definition") or {}) != (current.get("definition") or {})
+    return {
+        "group_id": group_id,
+        "group_name": (snapshot or {}).get("name") or (current or {}).get("name"),
+        "group_snapshot": snapshot,
+        "group_definition_changed": changed,
+        "group_archived": bool(current and current.get("archived_at")) if current else None,
+    }
+
+
 def revision_view(record: Mapping[str, Any]) -> Dict[str, Any]:
     """Revision metadata for an admin listing. **Never** the config body (D8)."""
     verdict = _verdict_of(record)
@@ -1068,6 +1173,7 @@ def revision_view(record: Mapping[str, Any]) -> Dict[str, Any]:
         "scope_kind": record.get("scope_kind"),
         "scope": _scope_of(record),
         "verdict": verdict or None,
+        **_group_view(record),
     }
 
 

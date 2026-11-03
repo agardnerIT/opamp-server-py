@@ -21,7 +21,7 @@ Control plane for OpenTelemetry collectors speaking the
 | Layer | When |
 |-------|------|
 | **`opampctl` CLI** | Default choice for shell agents. JSON output by default; `--raw` prints markdown/YAML. |
-| **MCP server** (`opamp-mcp`) | When running as an MCP client (Claude Desktop/Code, etc.). 29 typed tools, stdio by default. |
+| **MCP server** (`opamp-mcp`) | When running as an MCP client (Claude Desktop/Code, etc.). 35 typed tools by default (40 with `OPAMP_MCP_ALLOW_WRITES=true`), stdio by default. |
 | **`opamp_client` Python lib** | Inside Python code. One client for all HTTP/auth/error handling. |
 | **Raw REST API** | Only when the above don't cover it. Self-documenting: `GET /openapi.json`, `/docs`. |
 
@@ -106,6 +106,12 @@ opampctl agents compliance <agent-id>
 | Withdraw a config (approver) | `agents config withdraw <id>` | — | `DELETE /agent/{id}/config` |
 | Validate a config (safe) | `config validate --file f.yaml` | `validate_config` | `POST /config/validate` |
 | Propose a revision (draft) | `config propose --file f.yaml --attr env=prod` | `propose_config` (write-gated) | `POST /config/revisions` |
+| Propose to a saved selector | `config propose --file f.yaml --group prod-emea` | `propose_config` with `scope={"group": …}` | `POST /config/revisions` (`scope.group`) |
+| List/save groups | `groups list` / `groups create -n prod-emea --attr environment=prod` | `list_groups` / `create_group` (write-gated) | `GET /groups` / `POST /groups` |
+| One group, its members and history | `groups show prod-emea` | `get_group` | `GET /groups/{id}` |
+| Edit / archive / restore a group (operator) | `groups update` / `groups archive` / `groups restore` | — | `PUT`/`DELETE`/`POST …/restore` |
+| Who would a group hit now? | `groups preview prod-emea` | `preview_group` | `POST /groups/{id}/preview` |
+| Attribute keys the fleet reports | `groups keys` | `attribute_keys` | `GET /groups/attribute-keys` |
 | Revision history (metadata) | `config revisions [--agent] [--status]` | `list_config_revisions` | `GET /config/revisions` |
 | One proposal | `config show prop-…` | — | `GET /config/revisions/{id}` |
 | Approve (approver) | `config approve prop-…` | — (never exposed) | `POST /config/revisions/{id}/approve` |
@@ -334,6 +340,41 @@ opampctl --password "$ADMIN_PASSWORD" config rollout rollback ro-… # undo, sta
   skipped with a log line, never silently "restarted".
 - **MCP can read rollouts, never create, abort or roll back one** (`get_config_rollout`,
   `list_config_rollouts`). Creating a rollout is an approval (D9).
+
+### Collector groups — named selectors (#111)
+
+A group is a **name for a filter document**, plus `include` (force in) / `exclude`
+(force out) pins. Membership is resolved at use time by the same code as
+`GET /agents`, so `--group prod-emea` hits exactly what
+`--attr environment=prod --attr region=emea` would. Prefer a group when the same
+selector is used more than once, or when someone else will run it: the point is that
+"prod" is written down and reviewable, not retyped.
+
+```bash
+opampctl groups keys                                  # what live agents actually report
+opampctl --password "$ADMIN_PASSWORD" groups create -n prod-emea \
+    --attr environment=prod --attr region=emea -d "EMEA prod. Owner: platform-oncall."
+opampctl groups preview prod-emea                     # members now vs last resolution
+opampctl --password "$ADMIN_PASSWORD" config propose --file c.yaml --group prod-emea
+opampctl --password "$ADMIN_PASSWORD" config apply --file c.yaml --group prod-emea --dry-run
+```
+
+Four things that will otherwise bite you:
+
+- **Matching is exact, case-insensitive equality.** No globs, no regex, no prefix:
+  `--attr environment=prod-*` matches nothing. `groups keys` exists so a definition
+  cannot be written against `env` when the fleet says `environment`.
+- **A group defined on `healthy`/`status` is refused as a push target** (400). The
+  moment an agent breaks it leaves the group, so the push that would fix it skips it.
+  `use_stored_resolution: true` sends to the membership recorded by a `preview`
+  instead — that is the only way to push to a health-based group, deliberately.
+- **Shrinkage is loud.** If the group resolves smaller than its last recorded
+  resolution, the push returns the `dropped` diff and needs `confirm_scope_change`.
+  Read the list; a renamed attribute looks exactly like this.
+- **Editing a group changes future pushes only.** Revisions keep their
+  `group_snapshot`, and `config show` reports `group_definition_changed: true` when the
+  name no longer means what it did. Groups are archived, never deleted, and a live
+  rollout blocks the archive.
 
 ### What validation checks (#100)
 

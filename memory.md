@@ -335,3 +335,88 @@
 - **Verified, not just written.** Running `otelcol-contrib` 0.140.0 against a local server found a real documentation trap: **`server.ws` rejects `polling_interval`** (`'server.ws' has invalid keys: polling_interval`) — it takes `endpoint` and `headers` only, because a socket is server-push. Also confirmed the `Authorization: Bearer ${env:OPAMP_AGENT_TOKEN}` block authenticates over WS (`credential.enrolled = true`) once the token is minted for the agent that has already registered (tokens are bound to one uid).
 - **The docs now have a test.** `collector/e2e-ws.yaml` + a second collector in `.github/workflows/collector-e2e.yml` (server started with `OPAMP_WS_ENABLED=true`) run the README's WebSocket block in CI, so a rejected config key fails the build instead of a reader's afternoon. Locally both transports registered with full component lists and produced the 582-byte slim manifest.
 - Open list now: #114 closed; remaining are #111 (phase-2 groups), #85 (deferred upstream), #46 (new-version notice), epic #87.
+
+## #116 + #111 — empty-fleet onboarding and named collector groups, 2026-11-03
+
+- **#116 (small, first).** `ui.shared.collector_config_snippet()` is the one copy of the
+  "smallest config that actually reports" — extension block, `polling_interval`, the
+  three `reports_*` flags, one debug pipeline (a config with no pipeline is rejected by
+  a real collector, so "copy, paste, run" would otherwise be a lie) and
+  `service.extensions: [opamp]`, the line people forget. Agents page empty state renders
+  it with a download button and a **Docker toggle** that rewrites the endpoint host to
+  `host.docker.internal` (the one thing that genuinely differs per deployment); the Help
+  page uses the same helper so the two cannot drift. `st.stop()` after the empty state
+  removed the second, worse "No agents connected" info at the bottom. An **unreachable
+  server** is reported as such — the snippet would send a new user hunting a config
+  problem that does not exist.
+- **#111 backend.** `SQLiteGroupStore` (state.py) + `COLLECTOR_GROUPS` singleton;
+  `server/groups.py` owns resolution/guards (no FastAPI, no `config_control` import —
+  `config_control` imports *it*), `config_control.parse_scope` expands
+  `{"group": name}` into a **selector** scope + snapshot, so propose/approve/apply/
+  rollout all inherit the guards rather than re-implementing them.
+- **The trap that cost an hour:** `parse_scope(scope, *, agents=...)` had a local
+  `agents = scope.get("agents")`, so the fleet parameter was shadowed and every group
+  scope resolved against `None`. Locals are now `scope_agents`. Worth remembering for
+  any future parameter named after a scope key.
+- **`AgentState.matches_scope(filters)`** is now the one filter implementation (reserved
+  keys vs description attributes) used by `GET /agents`, selector scopes and groups;
+  `config_control._matches` delegates. A saved selector that disagreed with the ad-hoc
+  filter it replaces would be worse than not having groups.
+- **Names are lowercased before validation** (`Prod-EMEA` → `prod-emea`), so a
+  case-collision is a 409 duplicate rather than a 422 "invalid name" — the issue's
+  acceptance criterion is about *duplicates*, and a name is an identifier.
+- **Snapshot, not group id, on every revision** (`group_id` + `group_snapshot_json`),
+  written by propose, by approve-time newcomers and by `include_future` attaches: a
+  rollout attaches revisions later and they must record the same meaning the operator
+  approved. `revision_view` exposes `group_definition_changed` / `group_archived`, so a
+  past revision can say "this name no longer means what it did".
+- **Guards, and why each is where it is:** health-defined refusal +
+  `use_stored_resolution` (needs a recorded resolution, else 409 — pushing to nothing
+  silently is the failure), shrink refusal with `added`/`dropped`/`unchanged` vs the last
+  resolution, empty group = valid to save, 404 to push, archived = 409 + still readable,
+  archive blocked by a live rollout (answered from the revisions' `group_id`, i.e. from
+  history, not from a copy on the rollout). `confirm_scope_change` is a scope-level
+  acknowledgement like approve's, and `/config/apply` obeys the same guards because a
+  guard a second route can skip is advisory.
+- **`resolution_base` vs `group_resolved_agents`**: the second is the group's own
+  evaluation at parse time; `resolved_agents` is written later by
+  `config_control.prepare()` with the final target list. Two meanings under one key is
+  how "why did this push skip my agent?" becomes unanswerable. A stored-resolution push
+  carries `resolution_base: "stored"` and never re-matches.
+- **Membership is never stored**, so `GET /groups.member_count` is resolved per read;
+  `collector_group_resolutions` is a *log* (baseline for diffs and the shrink guard),
+  which is why preview writes one. A preview from `config apply --dry-run` deliberately
+  uses `GET /groups/{id}` instead, so checking the blast radius twice does not move the
+  baseline.
+- **Observability:** `opamp_groups_total{state}` (active/archived),
+  `opamp_group_members{group}` (live), `opamp_group_membership_changes_total{reason}`
+  (preview/propose/push/approve). A swing of `>= OPAMP_GROUP_MEMBERSHIP_SWING` (default
+  5, read per call) logs one structured `opamp.group.membership_swing` warning — an
+  *alert* on silent enrolment is the `include_future` issue's job, an explicit non-goal.
+  Asserted through a loguru sink, not `capsys`/`capfd` (the sink is bound at import).
+- **Audit** `group.create|update|archive|restore`, and `config.propose` rows now carry
+  `group_id`/`group_name`. `group.update` computes the diff *before* writing
+  (`SQLiteGroupStore.compute_changes`) so the row that authorises the edit carries the
+  change; the diff shape is `{added, removed, changed}` and the test asserts its content.
+- **Layers:** client `groups/group/create_group/update_group/archive_group/
+  restore_group/preview_group/attribute_keys` (+ `group`/`use_stored_resolution`/
+  `confirm_scope_change` on apply and propose); `opampctl groups list|show|create|
+  update|archive|restore|preview|keys`, `--group` on `config propose`/`config apply`
+  (mutually exclusive with `--attr`/`--agents`, one group per command — a union of two
+  selectors would be a new scope kind), `config apply --dry-run --group` prints members
+  + the definition snapshot; MCP `list_groups`/`get_group`/`preview_group`/
+  `attribute_keys` always, `create_group` **only** with `OPAMP_MCP_ALLOW_WRITES=true`.
+  MCP tool count is now **35** (40 with writes) — updated in README/AGENTS/CLAUDE/skill.
+- **UI** (`5_Remote_Config.py`): Target-by radio (Ad-hoc filter | Saved group) showing the
+  definition, live count, definition/pin/excluded breakdown, unknown pins and a hard
+  warning for health-defined groups; `confirm_scope_change` checkbox at propose; a
+  Groups section with the list, preview diff, a builder whose keys/values come from
+  `GET /groups/attribute-keys` (typo class removed) and archive/restore.
+- **Not done, recorded on the issue rather than silently skipped:** `groups.yaml`
+  (issue item 10, first-to-cut), `include_future` as a group property (non-goal), and
+  the Agents page "Save as group…" button (nice-to-have migration path; the CLI/API
+  cover it).
+- Verified end to end against a **live uvicorn** (secure posture + insecure-push
+  escape hatch): group create → preview → propose → approve → `group_definition_changed`
+  after an edit → shrink/empty refusal → archive blocked/unblocked. Suite: **1332
+  passed** (was 1304; +19 groups, +4 CLI, +2 MCP, +3 UI).

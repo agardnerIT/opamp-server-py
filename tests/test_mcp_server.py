@@ -96,6 +96,9 @@ class TestRegistry:
             "audit_log", "audit_verify", "audit_export",
             # #103: rollouts are readable from MCP, never creatable/abortable here.
             "list_config_rollouts", "get_config_rollout",
+            # #111: groups are propose-side. Reading them is how an agent picks a
+            # target instead of inventing a filter; creating one is write-gated.
+            "list_groups", "get_group", "preview_group", "attribute_keys",
         }
         assert expected <= tools
 
@@ -316,13 +319,16 @@ class TestCredentialTools:
         tools = {t.name for t in mcp._tool_manager.list_tools()}
         assert "create_agent_token" not in tools
         assert "revoke_agent_token" not in tools
+        # #111: creating a group decides the blast radius of every future push that
+        # names it, so it sits behind the same gate as proposing a config.
+        assert "create_group" not in tools
 
     def test_register_when_writes_allowed(self, monkeypatch):
         monkeypatch.setenv("OPAMP_MCP_ALLOW_WRITES", "true")
         mcp_srv._register_write_tools()
         try:
             tools = {t.name for t in mcp._tool_manager.list_tools()}
-            assert {"create_agent_token", "revoke_agent_token"} <= tools
+            assert {"create_agent_token", "revoke_agent_token", "create_group"} <= tools
 
             self._wire(monkeypatch)
             created = call(mcp_srv.create_agent_token, "abcd" * 8, label="mcp")
@@ -482,3 +488,76 @@ def test_update_tools(wired, monkeypatch):
     assert "current_version" in call(mcp_srv.check_for_updates)
     assert call(mcp_srv.set_update_check, False)["enabled"] is False
     assert call(mcp_srv.set_update_check, None)["admin_override"] is None
+
+
+# ------------------------------------------------------------------ groups (#111)
+
+
+class TestGroupTools:
+    """Read tools are always present; group creation is write-gated like a proposal."""
+
+    @pytest.fixture(autouse=True)
+    def _admin(self, monkeypatch):
+        from server import admin_auth
+
+        monkeypatch.setattr(admin_auth, "ADMIN_PASSWORD", "mcp-pw-123456")
+        monkeypatch.setattr(admin_auth, "PASSWORD_SOURCE", "env")
+
+    def _wire(self, monkeypatch):
+        from client.opamp_client import OpampClient
+
+        transport = InProcessASGITransport(server_app)
+        monkeypatch.setattr(
+            mcp_srv,
+            "_client",
+            lambda: OpampClient(
+                base_url="http://testserver",
+                transport=transport,
+                password="mcp-pw-123456",
+            ),
+        )
+
+    def test_list_get_preview_and_keys(self, wired, monkeypatch):
+        from proto import anyvalue_pb2, opamp_pb2
+        from server.main import _handle_agent_message
+
+        msg = opamp_pb2.AgentToServer()
+        msg.instance_uid = bytes.fromhex("ab" * 16)
+        msg.capabilities = opamp_pb2.AgentCapabilities.AgentCapabilities_ReportsStatus
+        msg.agent_description.non_identifying_attributes.add(
+            key="environment", value=anyvalue_pb2.AnyValue(string_value="prod")
+        )
+        _handle_agent_message(msg.SerializeToString())
+
+        keys = call(mcp_srv.attribute_keys)
+        assert any(bucket["key"] == "environment" for bucket in keys["keys"])
+
+        # Group creation needs the write gate, so create one directly in the store.
+        from server.state import COLLECTOR_GROUPS
+
+        COLLECTOR_GROUPS.create(
+            name="prod",
+            definition={"environment": "prod"},
+            created_by="test",
+        )
+        listing = call(mcp_srv.list_groups)
+        assert listing["count"] == 1
+        assert listing["groups"][0]["member_count"] == 1
+
+        shown = call(mcp_srv.get_group, "prod")
+        assert shown["definition"] == {"environment": "prod"}
+        previewed = call(mcp_srv.preview_group, "prod")
+        assert previewed["count"] == 1
+
+    def test_create_group_pushes_nothing_and_is_audited(self, monkeypatch):
+        monkeypatch.setenv("OPAMP_MCP_ALLOW_WRITES", "true")
+        mcp_srv._register_write_tools()
+        self._wire(monkeypatch)
+        created = call(
+            mcp_srv.create_group,
+            "prod-emea",
+            {"environment": "prod"},
+        )
+        assert created["name"] == "prod-emea"
+        assert created["member_count"] == 0, "creating a group targets nothing"
+

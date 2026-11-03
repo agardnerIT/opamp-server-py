@@ -493,19 +493,32 @@ class OpampClient:
         filter: Optional[Dict[str, Any]] = None,
         confirm: bool = False,
         note: Optional[str] = None,
+        group: Optional[str] = None,
+        use_stored_resolution: bool = False,
+        confirm_scope_change: bool = False,
     ) -> Dict[str, Any]:
         """``POST /config/apply`` — push one config to many agents (admin).
 
-        Blast radius is explicit: pass ``agents=[...]`` or ``filter={...}`` (the
-        ``GET /agents`` filter keys). A missing selector is a 400 — never "all".
-        ``confirm=True`` is required, which is the deliberate speed bump before a
-        fleet-wide change.
+        Blast radius is explicit: pass ``agents=[...]``, ``filter={...}`` (the
+        ``GET /agents`` filter keys) or ``group="prod-emea"`` (a saved selector,
+        #111). A missing selector is a 400 — never "all". ``confirm=True`` is
+        required, which is the deliberate speed bump before a fleet-wide change.
+
+        A group target obeys the same guards as a proposal: a health-based definition
+        needs ``use_stored_resolution=True``, a group that resolved smaller than last
+        time needs ``confirm_scope_change=True``, and an empty group is a 404.
         """
         body: Dict[str, Any] = {"config_map": config_map, "confirm": confirm}
         if agents is not None:
             body["agents"] = agents
         if filter is not None:
             body["filter"] = filter
+        if group is not None:
+            body["group"] = group
+        if use_stored_resolution:
+            body["use_stored_resolution"] = True
+        if confirm_scope_change:
+            body["confirm_scope_change"] = True
         if note:
             body["note"] = note
         return self._post("/config/apply", json=body)
@@ -544,13 +557,18 @@ class OpampClient:
         note: Optional[str] = None,
         allow_endpoint_change: bool = False,
         override_reason: Optional[str] = None,
+        confirm_scope_change: bool = False,
     ) -> Dict[str, Any]:
         """``POST /config/revisions`` — draft a revision (operator). **Delivers nothing.**
 
-        ``scope`` is exactly one of ``{"agent_id": id}``, ``{"agents": [ids]}`` or
-        ``{"filter": {...}}`` (the ``GET /agents`` filter keys), plus an optional
-        ``include_future: true`` on a filter scope. A missing scope is a 400: it is
-        never "the whole fleet".
+        ``scope`` is exactly one of ``{"agent_id": id}``, ``{"agents": [ids]}``,
+        ``{"filter": {...}}`` (the ``GET /agents`` filter keys) or
+        ``{"group": "prod-emea"}`` (#111), plus an optional ``include_future: true``
+        on a selector or group scope. A group expands server-side into its definition
+        plus pins and is snapshotted onto every revision. A health-based group needs
+        ``use_stored_resolution: true``; a group that resolved smaller than its last
+        resolution needs ``confirm_scope_change: true``. A missing scope is a 400: it
+        is never "the whole fleet".
 
         Returns the ``proposal_id``, the per-agent revisions and the structured
         validation verdict. An approver must call :meth:`approve_config` before any
@@ -563,6 +581,8 @@ class OpampClient:
             body["allow_endpoint_change"] = True
         if override_reason:
             body["override_reason"] = override_reason
+        if confirm_scope_change:
+            body["confirm_scope_change"] = True
         return self._post("/config/revisions", json=body)
 
     def list_config_revisions(
@@ -850,6 +870,118 @@ class OpampClient:
         if note:
             body["note"] = note
         return self._post(f"/agent/{agent_id}/config/rollback", json=body)
+
+    # ------------------------------------------------- collector groups (#111)
+
+    def groups(self, include_archived: bool = False) -> Dict[str, Any]:
+        """``GET /groups`` — saved selectors with **live** member counts (viewer).
+
+        A group is a name for a filter document plus ``include``/``exclude`` pins;
+        membership is resolved on read, never stored. ``last_resolution`` is what the
+        group meant when it was last evaluated, which is the baseline
+        :meth:`preview_group` compares against.
+        """
+        params = {"include_archived": True} if include_archived else None
+        return self._get("/groups", params=params)
+
+    def group(self, group_id: str) -> Dict[str, Any]:
+        """``GET /groups/{id}`` — definition, current members, resolution history (viewer).
+
+        ``sources`` separates members that came from the definition from pins,
+        ``unknown_pins`` names pins for agents that have never reported, and
+        ``membership_changes`` counts how often the resolved set moved.
+        """
+        return self._get(f"/groups/{group_id}")
+
+    def create_group(
+        self,
+        name: str,
+        definition: Dict[str, Any],
+        include: Optional[List[str]] = None,
+        exclude: Optional[List[str]] = None,
+        description: Optional[str] = None,
+        owner: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """``POST /groups`` — create a named selector (operator).
+
+        Names are unique regardless of case, may not collide with the reserved filter
+        keys (``healthy``, ``status``, ``remote_config_status``), and a definition may
+        not be empty (``{}`` would mean the whole fleet). A newly created group with
+        zero members is valid; pushing to it is not.
+        """
+        body: Dict[str, Any] = {"name": name, "definition": definition}
+        if include:
+            body["include"] = include
+        if exclude:
+            body["exclude"] = exclude
+        if description:
+            body["description"] = description
+        if owner:
+            body["owner"] = owner
+        return self._post("/groups", json=body)
+
+    def update_group(
+        self,
+        group_id: str,
+        name: Optional[str] = None,
+        definition: Optional[Dict[str, Any]] = None,
+        include: Optional[List[str]] = None,
+        exclude: Optional[List[str]] = None,
+        description: Optional[str] = None,
+        owner: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """``PUT /groups/{id}`` — edit a group (operator). Returns the definition diff.
+
+        Editing changes **future** pushes only: a revision approved against the old
+        definition keeps its ``group_snapshot``. ``changes`` carries the
+        ``added``/``removed``/``changed`` diff that the audit row recorded.
+        """
+        body: Dict[str, Any] = {}
+        for key, value in (
+            ("name", name),
+            ("definition", definition),
+            ("include", include),
+            ("exclude", exclude),
+            ("description", description),
+            ("owner", owner),
+        ):
+            if value is not None:
+                body[key] = value
+        return self._put(f"/groups/{group_id}", json=body)
+
+    def archive_group(self, group_id: str) -> Dict[str, Any]:
+        """``DELETE /groups/{id}`` — **archive** a group (operator). There is no delete.
+
+        Revisions and rollouts reference the id, so history stays readable. A live
+        rollout approved against the group refuses with 409 first. Archived groups
+        cannot be pushed to or edited; :meth:`restore_group` brings one back.
+        """
+        return self._request("DELETE", f"/groups/{group_id}")
+
+    def restore_group(self, group_id: str) -> Dict[str, Any]:
+        """``POST /groups/{id}/restore`` — un-archive a group (operator)."""
+        return self._post(f"/groups/{group_id}/restore", json={})
+
+    def preview_group(self, group_id: str) -> Dict[str, Any]:
+        """``POST /groups/{id}/preview`` — members now vs last resolution (viewer).
+
+        ``added`` / ``dropped`` / ``unchanged`` against the last recorded resolution,
+        with ``sources`` naming which members came from the definition and which from
+        pins. No side effects beyond recording the resolution as the next baseline.
+        This is also how a **health-defined** group gets a membership for
+        ``use_stored_resolution``.
+        """
+        return self._post(f"/groups/{group_id}/preview", json={})
+
+    def attribute_keys(self) -> Dict[str, Any]:
+        """``GET /groups/attribute-keys`` — keys and sample values from live agents (viewer).
+
+        Built for typo-proof authoring: ``environment`` and its observed values come
+        from the fleet, so a definition cannot be written against ``env`` or
+        ``prod-*`` (matching is exact, case-insensitive equality). Reads agent
+        descriptions only, never an effective config.
+        """
+        return self._get("/groups/attribute-keys")
 
     # ------------------------------------------------------------- credentials
 

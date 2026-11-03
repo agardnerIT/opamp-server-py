@@ -854,6 +854,45 @@ Lifecycle: `proposed → active → superseded | rolled_back | poisoned`, plus
   missing YAML paths) and fires **one** `config_drift` alert per (agent, revision),
   never one per poll.
 
+### Named collector groups (#111)
+
+A filter you retype every push is a filter you eventually mistype. A **group** saves
+the selector under a name:
+
+```bash
+opampctl groups keys                                   # keys/values live agents report
+opampctl --password "$ADMIN_PASSWORD" groups create -n prod-emea \
+    --attr environment=prod --attr region=emea -d "EMEA prod. Owner: platform-oncall."
+opampctl groups preview prod-emea                      # members now vs last resolution
+opampctl --password "$ADMIN_PASSWORD" config propose --file c.yaml --group prod-emea
+```
+
+A group is a **named selector**, not a member list: membership is resolved at use
+time by the same code as `GET /agents`, so `--group prod-emea` hits exactly what
+`--attr environment=prod --attr region=emea` would, and cannot go stale. `include`
+forces one agent in, `exclude` forces one out (both audited); there is no nesting.
+
+Four deliberate refusals, each closing a way a "saved filter" feature turns into an
+outage:
+
+- **Matching is exact, case-insensitive equality** — no globs, regex or prefixes
+  (`prod-*` matches nothing). `groups keys` exists so a definition cannot be written
+  against `env` when the fleet reports `environment`.
+- **A group defined on `healthy`/`status` is refused as a push target** (400): the
+  moment an agent breaks it leaves the group, so the push that would fix it skips
+  exactly the agents that need it. `use_stored_resolution: true` sends to the
+  membership recorded by a `preview` instead.
+- **Silent shrinkage is loud.** Resolving smaller than the last recorded resolution
+  returns the `dropped` diff and requires `confirm_scope_change: true`.
+- **An empty group can be saved but not pushed to** (404), and an **archived** group
+  is absent from pickers, refuses edits and pushes (409), and stays readable because
+  revisions and the audit log still reference it. Archive is the only delete, and a
+  live rollout blocks it.
+
+Edits change **future** pushes only: every revision records a `group_snapshot`, and
+`GET /config/revisions` reports `group_definition_changed: true` once the name no
+longer means what it did.
+
 ### Staged rollouts (#101)
 
 The failure this engine exists for: one typo, four hundred collectors down, and
@@ -1318,7 +1357,7 @@ role below it:
 | Role | May | Why it exists |
 |---|---|---|
 | `viewer` | read everything (alert webhooks redacted) | a dashboard user should not need write access |
-| `operator` | propose changes, apply *approved* revisions, start a staged rollout of an approved one, abort a rollout, deliver a config, ask an agent to restart, edit alerts, force compliance checks | the person who runs the fleet |
+| `operator` | propose changes, save/edit collector groups, apply *approved* revisions, start a staged rollout of an approved one, abort a rollout, deliver a config, ask an agent to restart, edit alerts, force compliance checks | the person who runs the fleet |
 | `approver` | approve / reject / reactivate, create a staged rollout (which *is* the approval), roll a rollout back | the person who signs off — **deliberately not the same role** as `operator`, so two-phase config push (#99, #103) is an approval and not a formality |
 | `admin` | everything, plus identity (principals, sessions) and fleet-wide actions | onboarding and break-glass |
 
@@ -1458,8 +1497,16 @@ The UI signs in the same way the CLI does — `POST /auth/session` — and then 
 | DELETE | `/agent/{id}/config` | approver | Withdraw by pushing an **empty** config map (agent falls back to its local config). Delivered once |
 | POST | `/agent/{id}/config/deliver` | operator | Deliver the active revision over the agent's live WebSocket now. Idempotent: always 200 with `delivery.state` = `delivered` \| `queued` \| `unchanged` (+ `reason`). Moves no pointer, creates no revision, so it needs no approval. Audited as `config.deliver`; a refusal on principal grounds adds a second row with `result: "error"` |
 | POST | `/agent/{id}/config/rollback` | approver | Return to the previous revision as a **new** revision with `parent_revision_id` set. 409 when there is nothing to roll back to |
-| POST | `/config/apply` | admin | Push one config to many agents: `{"config_map", "agents": [...] \| "filter": {...}, "confirm": true}`. No selector is a 400 — never "all agents" |
-| POST | `/config/revisions` | operator | **Propose** a revision — validates and drafts it, delivers nothing: `{"config_map", "scope": {"agent_id" \| "agents" \| "filter", "include_future"}, "note"}`. Returns `proposal_id`, per-agent revisions and the full verdict. 422 with every structured error |
+| POST | `/config/apply` | admin | Push one config to many agents: `{"config_map", "agents": [...] \| "filter": {...} \| "group": "prod-emea", "confirm": true}`. No selector is a 400 — never "all agents". A group target obeys the same guards as a proposal (`use_stored_resolution`, `confirm_scope_change`) |
+| POST | `/config/revisions` | operator | **Propose** a revision — validates and drafts it, delivers nothing: `{"config_map", "scope": {"agent_id" \| "agents" \| "filter" \| "group", "include_future", "use_stored_resolution"}, "confirm_scope_change", "note"}`. Returns `proposal_id`, per-agent revisions and the full verdict. 422 with every structured error |
+| GET | `/groups` | viewer | Saved selectors with a **live** member count and `last_resolution`. Membership is resolved on read, never stored |
+| POST | `/groups` | operator | Create a group: `{"name", "definition": {"environment": "prod"}, "include"?, "exclude"?, "description"?, "owner"?}`. Names are unique case-insensitively and may not be a reserved filter key; an empty definition is refused (it would mean the whole fleet) |
+| GET | `/groups/{id}` | viewer | Definition, current members, `sources` (definition vs pins), `unknown_pins`, `membership_changes` and the resolution history |
+| PUT | `/groups/{id}` | operator | Edit a group. The audit row carries the **definition diff**, and `changes` is returned. Affects future pushes only: a revision keeps its `group_snapshot` |
+| DELETE | `/groups/{id}` | operator | **Archive** (there is no delete — revisions and rollouts reference the id). 409 while a live rollout uses it. Restorable |
+| POST | `/groups/{id}/restore` | operator | Un-archive |
+| POST | `/groups/{id}/preview` | viewer | `added`/`dropped`/`unchanged` versus the last recorded resolution; records the new baseline. This is how a health-defined group gets a membership for `use_stored_resolution` |
+| GET | `/groups/attribute-keys` | viewer | Attribute keys and observed values from live agents (typo-proof authoring; descriptions only, never a config body) |
 | GET | `/config/revisions` | viewer | Revision metadata (no bodies): `?agent=`, `?status=proposed\|active\|superseded\|rolled_back\|poisoned\|rejected`, `?limit=` |
 | GET | `/config/revisions/{proposal_id}` | viewer | One proposal: each revision's status, stored verdict and delivery record (`attempts`, `last_status`, `poisoned`) |
 | POST | `/config/revisions/{id}/approve` | approver | Re-resolve the selector, **re-run validation**, supersede and activate. 409 `re-validate: …` when the config no longer passes, and 409 when the selector now matches *more* agents (repeat with `confirm_scope_change: true`); `override_reason` overrides a policy violation (audited as `config.override`) |
@@ -1616,7 +1663,8 @@ opampctl --show-completion      # show the install command/instructions
 ## MCP Server (for AI agents)
 
 An [MCP](https://modelcontextprotocol.io) server (`opamp-mcp` / `python -m mcp_server`)
-exposes 29 typed tools mirroring the API: `list_agents`, `get_agent`,
+exposes 35 typed tools mirroring the API (40 with `OPAMP_MCP_ALLOW_WRITES=true`):
+`list_agents`, `get_agent`,
 `get_agent_metrics`, `generate_manifest`, `fleet_report`, `heavy_collectors_report`,
 `outdated_collectors_report`, `get_compliance`, `check_compliance`,
 `compliance_summary`, `list_policies`, `validate_policies`, `reload_policies`,

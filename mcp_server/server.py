@@ -338,6 +338,83 @@ def get_config_rollout(rollout_id: str) -> str:
     return _tool(lambda oc: oc.get_config_rollout(rollout_id))
 
 
+# ------------------------------------------------------------------ groups (#111)
+
+
+@mcp.tool()
+def list_groups(include_archived: bool = False) -> str:
+    """Saved selectors ("collector groups") with their live member count.
+
+    A group is a **name for a filter document**, plus explicit `include`/`exclude`
+    pins; membership is resolved on read, so it cannot drift from the fleet.
+    `last_resolution` is what the group meant when it was last evaluated. Prefer a
+    group over a hand-typed filter when proposing: it is the same selector, spelled
+    once.
+    """
+    return _tool(lambda oc: oc.groups(include_archived=include_archived))
+
+
+@mcp.tool()
+def get_group(group: str) -> str:
+    """One group by name or id: definition, live members, pins and resolution history.
+
+    `sources` says which members came from the definition and which from pins;
+    `health_defined` is non-empty when the definition filters on `healthy`/`status`,
+    which makes the group unsuitable as a push target (agents drop out exactly when
+    they break).
+    """
+    return _tool(lambda oc: oc.group(group))
+
+
+@mcp.tool()
+def preview_group(group: str) -> str:
+    """Who a push to this group would hit now, versus its last resolution. Read-only.
+
+    `added`/`dropped`/`unchanged` against the last recorded resolution. Use it before
+    proposing a group-scoped config, and to see a membership swing (a renamed
+    attribute looks exactly like this) before it becomes a push.
+    """
+    return _tool(lambda oc: oc.preview_group(group))
+
+
+@mcp.tool()
+def attribute_keys() -> str:
+    """Attribute keys and sample values reported by the live fleet.
+
+    Use these to write a group definition or a proposal filter: matching is exact,
+    case-insensitive equality, so `env` never matches `environment`. Descriptions
+    only — never an effective config.
+    """
+    return _tool(lambda oc: oc.attribute_keys())
+
+
+def create_group(
+    name: str,
+    definition: Dict[str, Any],
+    include: Optional[list] = None,
+    exclude: Optional[list] = None,
+    description: Optional[str] = None,
+    owner: Optional[str] = None,
+) -> str:
+    """Create a named selector (operator; write-gated). Pushes nothing.
+
+    Only present when OPAMP_MCP_ALLOW_WRITES=true: a group changes the blast radius
+    of every future push that names it, which is exactly the sort of decision a human
+    should be making. Approving, applying and archiving stay unavailable at any
+    setting (D9).
+    """
+    return _tool(
+        lambda oc: oc.create_group(
+            name,
+            definition=definition,
+            include=include,
+            exclude=exclude,
+            description=description,
+            owner=owner,
+        )
+    )
+
+
 def propose_config(
     config_map: Dict[str, Any],
     scope: Dict[str, Any],
@@ -348,10 +425,11 @@ def propose_config(
     Args:
         config_map: {"<object name>": {"body": "...", "content_type": "text/yaml",
             "role": "<optional, agent-defined>"}}.
-        scope: Exactly one of {"agent_id": id}, {"agents": [ids]} or
-            {"filter": {...}} (the GET /agents filter keys), plus an optional
-            "include_future": true on a filter scope. A missing scope is refused —
-            it is never "the whole fleet".
+        scope: Exactly one of {"agent_id": id}, {"agents": [ids]},
+            {"filter": {...}} (the GET /agents filter keys) or {"group": "prod-emea"}
+            (a saved selector, #111), plus an optional "include_future": true on a
+            filter/group scope. A missing scope is refused — it is never "the whole
+            fleet".
         note: Why, recorded in the audit log.
 
     Returns the proposal id, the per-agent revisions and the validation verdict. A
@@ -402,6 +480,9 @@ def _register_write_tools() -> None:
     # tools here, at any setting — approval is a human role, and a client that can
     # approve its own proposal has no separation of duties to speak of.
     mcp.tool()(propose_config)
+    # #111: creating a group is propose-side intent (it pushes nothing) but it decides
+    # the blast radius of every future push, so it sits behind the same gate.
+    mcp.tool()(create_group)
     mcp.tool()(set_update_check)
 
 

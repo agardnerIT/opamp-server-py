@@ -446,10 +446,11 @@ def test_the_reply_advertises_only_classified_capabilities(opamp):
 def test_a_legal_message_with_unimplemented_shapes_does_not_break_the_reply(opamp):
     """§Ensuring Interoperability: a legal message is never rejected for being new.
 
-    `ConnectionSettingsRequest` (#83) and package statuses (#82) are not implemented
-    here yet. The server must still accept the message, store what it understands
-    (package statuses, custom capabilities) and reply normally — a client must never be
-    punished for using a part of the spec this server has not got to.
+    `ConnectionSettingsRequest` (#83) is not implemented here yet, and package statuses
+    (#82) will never be offered — but a `PackageStatuses` report stays legal input. The
+    server must still accept the message, store what it understands (package statuses,
+    custom capabilities) and reply normally — a client must never be punished for using
+    a part of the spec this server has not got to, or has declined to implement.
 
     Detail: `tests/test_proto_sync.py` (the wire schema itself).
     """

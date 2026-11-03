@@ -305,10 +305,11 @@ def remote_config_status(
 def unsupported_optional_message(uid: bytes, *, sequence_num: int = 2):
     """One message carrying every optional shape this server does not implement.
 
-    #82 (packages) and #83 (connection settings) are open, so the requirement this pins
-    is forward compatibility: a server MUST NOT break on a legal message it does not
-    understand. #85 (custom capabilities/messages) is implemented, so this message also
-    checks that the parts we *do* understand are still stored.
+    #82 (packages) was closed as not planned and #83 (connection settings) is still
+    open, so the requirement this pins is forward compatibility: a server MUST NOT
+    break on a legal message it does not understand. #85 (custom capabilities/messages)
+    is implemented, so this message also checks that the parts we *do* understand are
+    still stored.
     """
     message = agent_message(uid, sequence_num=sequence_num)
     message.package_statuses.packages["collector"].name = "collector"

@@ -634,7 +634,12 @@ CONDITIONAL_CAPABILITIES = {
 # No implementation yet. Each bit names the issue that turns it on, so re-adding
 # one is a deliberate, reviewable change rather than a drive-by bitmask edit.
 UNIMPLEMENTED_CAPABILITIES = {
-    ServerCapabilities.ServerCapabilities_OffersPackages: "#82",
+    # #82 closed as not planned, so this one is not coming (docs/spec-conformance.md,
+    # §Packages): upstream's `opampextension` registers no package callbacks, so no
+    # stock agent would act on the offer, and serving binaries is deploy tooling's
+    # job - we ship the OCB manifest instead. Kept in this bucket rather than
+    # deleted because the bit still exists in the proto.
+    ServerCapabilities.ServerCapabilities_OffersPackages: "#82 (closed, not planned)",
     ServerCapabilities.ServerCapabilities_OffersConnectionSettings: "#83",
     ServerCapabilities.ServerCapabilities_AcceptsConnectionSettingsRequest: "#83",
 }

@@ -375,7 +375,7 @@ Transports: **HTTP** (poll/reply) and **WebSocket** (`OPAMP_WS_ENABLED`, upgrade
 | Server | `AcceptsEffectiveConfig` | ✅ always advertised (stored, redacted on read) |
 | Server | `AcceptsPackagesStatus` | ✅ always advertised (stored/reported only) |
 | Server | `OffersRemoteConfig` | ✅ advertised while the posture allows push (#81, #96) |
-| Server | `OffersPackages` | ❌ [#82](https://github.com/agardnerIT/opamp-server-py/issues/82) — stays off: a set bit is a promise |
+| Server | `OffersPackages` | ❌ [#82](https://github.com/agardnerIT/opamp-server-py/issues/82) closed as not planned — no stock agent consumes it and shipping binaries is deploy tooling's job (see [spec conformance](docs/spec-conformance.md)). We ship the OCB manifest instead |
 | Server | `OffersConnectionSettings` | ❌ [#83](https://github.com/agardnerIT/opamp-server-py/issues/83) |
 | Server | `AcceptsConnectionSettingsRequest` | ❌ [#83](https://github.com/agardnerIT/opamp-server-py/issues/83) |
 | Agent | `ReportsStatus`, `ReportsHealth`, `ReportsEffectiveConfig` | ✅ understood (health is optional; its absence is not unhealth) |

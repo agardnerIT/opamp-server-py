@@ -105,11 +105,31 @@ agent interoperate?" is answerable without reading source (#79).
 
 ## §Packages (Beta)
 
+**Decision: not implemented and not planned** ([#82](https://github.com/agardnerIT/opamp-server-py/issues/82),
+closed). Two reasons, in order of weight:
+
+1. **Nothing consumes it.** The most common agent — upstream's `opampextension` in
+   `otelcol-contrib` — registers no package support at all: no `AcceptsPackages`
+   capability, no `OnPackagesAvailable` callback. A `PackagesAvailable` offer would
+   be silently ignored by the agent this server exists to manage, so the acceptance
+   criterion "assign a version → agent installs it" cannot be demonstrated outside
+   our own test harness.
+2. **It is a different product.** Serving binaries means an artifact store, a
+   hash/signature authority, a downloadable URL reachable by the agent, and per
+   platform artifacts for a mixed-arch fleet — all to duplicate what the operator's
+   deploy tooling already does.
+
+So binaries stay with deploy tooling, and the server's contribution to a custom
+build is the **OCB manifest, not the binary**: `POST /agent/{id}/manifest` and the
+UI's slim-distro builder hand the operator a `manifest.yaml` plus the `ocb build`
+command (`server/manifest.py`). Behaviour changes go through config push (§Remote
+Config); the binary is theirs to ship.
+
 | Clause | Status | Pinned by | Notes |
 |---|---|---|---|
-| `OffersPackages`, `PackagesAvailable` | ❌ not implemented | [#82](https://github.com/agardnerIT/opamp-server-py/issues/82) | Bit stays off: a set bit is a promise |
-| `AcceptsPackagesStatus` | ✅ (stored only) | `test_a_legal_message_with_unimplemented_shapes_does_not_break_the_reply` | Stored, displayed, reported; nothing is acted on. Delivered once #82 lands |
-| Package signatures (§Code Signing) | — n/a | — | Verification is the agent's job; this server distributes nothing yet |
+| `OffersPackages`, `PackagesAvailable` | ❌ not implemented, not planned | `tests/test_capabilities.py` | Bit stays off permanently: a set bit is a promise, and this one would be a lie |
+| `AcceptsPackagesStatus` | ✅ (stored only) | `test_a_legal_message_with_unimplemented_shapes_does_not_break_the_reply` | Stored, displayed, reported (fleet version skew); nothing is acted on, and nothing will be |
+| Package signatures (§Code Signing) | — n/a | — | Verification is the agent's job; this server distributes no artifacts |
 
 ## §Connection Settings (Beta)
 

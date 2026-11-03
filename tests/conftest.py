@@ -17,7 +17,7 @@ import copy
 
 import pytest
 
-from server import agent_auth, alerts, audit, auth, crypto, remote_config, rollout
+from server import agent_auth, alerts, audit, auth, crypto, remote_config, rollout, updates
 from server.state import (
     AGENT_REGISTRY,
     SQLiteAgentStore,
@@ -76,6 +76,11 @@ def isolated_global_stores(monkeypatch, tmp_path):
     monkeypatch.setattr(
         alerts, "ALERT_CONFIG", copy.deepcopy(DEFAULT_ALERT_CONFIG)
     )
+    # #46: the update loop must never reach GitHub from a test. Individual update
+    # tests opt back in with their own fixture and a fake client.
+    monkeypatch.setenv("UPDATE_CHECK", "off")
+    monkeypatch.setattr(updates, "STATE_PATH", tmp_path / "update-check.json")
+    monkeypatch.setattr(updates, "SETTINGS_PATH", tmp_path / "update-settings.json")
     auth.reset_lockouts()
     audit.reset_circuit_breaker()
     audit.reset_prune_timer()

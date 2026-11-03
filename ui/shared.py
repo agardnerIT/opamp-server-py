@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import json as json_module
 import yaml
@@ -486,6 +487,55 @@ def render_identity_panel():
     _render_flash(SIDEBAR_FLASH_KEY)
 
 
+UPDATE_TAG_RE = re.compile(r"^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$")
+RELEASES_URL = "https://github.com/agardnerIT/opamp-server-py/releases"
+
+
+def update_commands(latest_tag):
+    """Copyable commands for a validated release tag. Never trust the feed blindly."""
+    if not isinstance(latest_tag, str):
+        return []
+    tag = latest_tag.strip()
+    if not UPDATE_TAG_RE.fullmatch(tag):
+        return []
+    version = tag.lstrip("v")
+    checkout = tag if tag.startswith("v") else f"v{tag}"
+    return [
+        f"docker pull ghcr.io/agardnerit/opamp-server-py-server:{version}",
+        f"pip install --upgrade opamp-server-py=={version}",
+        f"git fetch --tags && git checkout {checkout}",
+    ]
+
+
+@st.cache_data(ttl=60)
+def get_updates():
+    """Cached `GET /updates`. No network from the browser; one read per minute."""
+    try:
+        response = requests.get(f"{SERVER_URL}/updates", timeout=5)
+        return response.json() if response.status_code == 200 else {}
+    except Exception:
+        return {}
+
+
+def render_update_notice():
+    """Sidebar notice: current version, and an update banner when one exists."""
+    state = get_updates()
+    current = state.get("current_version")
+    if not current:
+        return
+    latest_tag = state.get("latest_tag")
+    if state.get("update_available") and latest_tag:
+        st.warning(f"Update available: **{latest_tag}** (you are on {current})")
+        with st.expander("How to upgrade"):
+            for command in update_commands(latest_tag):
+                st.code(command, language="bash")
+            st.markdown(f"[Release notes]({RELEASES_URL})")
+    elif state.get("enabled") is False:
+        st.caption(f"v{current} · update checks off")
+    else:
+        st.caption(f"v{current}")
+
+
 def get_agents():
     try:
         response = requests.get(f"{SERVER_URL}/agents", timeout=5)
@@ -675,6 +725,9 @@ def render_sidebar():
         
         st.markdown("**Agents Connected**")
         st.caption(f"{data.get('count', 0)}")
+
+        st.markdown("**Version**")
+        render_update_notice()
 
     render_posture_banner(health_data)
 

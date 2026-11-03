@@ -67,6 +67,9 @@ rollout_app = typer.Typer(
 audit_app = typer.Typer(
     help="Audit log: query, verify, export (#97)", no_args_is_help=True
 )
+updates_app = typer.Typer(
+    help="Server update checks (#46)", no_args_is_help=True
+)
 
 app.add_typer(agents_app, name="agents", help="Agent inspection commands")
 agents_app.add_typer(token_app, name="token", help="Agent credentials (admin)")
@@ -78,6 +81,7 @@ app.add_typer(auth_app, name="auth", help="Admin auth: mode, sessions, identitie
 app.add_typer(config_app, name="config", help="Remote config control plane")
 config_app.add_typer(rollout_app, name="rollout", help="Staged rollouts (#101)")
 app.add_typer(audit_app, name="audit", help="Audit log: query, verify, export")
+app.add_typer(updates_app, name="updates", help="Server update checks (#46)")
 
 
 class _Settings:
@@ -1519,3 +1523,35 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+# -------------------------------------------------------------------- updates
+
+@updates_app.command("status")
+def updates_status() -> None:
+    """Cached update-check state. Never triggers a network call."""
+    _run(lambda oc: oc.get_updates())
+
+
+@updates_app.command("check")
+def updates_check() -> None:
+    """Run one update check now (admin). This contacts GitHub once."""
+    _run(lambda oc: oc.check_updates())
+
+
+@updates_app.command("enable")
+def updates_enable() -> None:
+    """Turn automatic update checks on (admin override)."""
+    _run(lambda oc: oc.set_update_check(True))
+
+
+@updates_app.command("disable")
+def updates_disable() -> None:
+    """Turn automatic update checks off (admin override)."""
+    _run(lambda oc: oc.set_update_check(False))
+
+
+@updates_app.command("default")
+def updates_default() -> None:
+    """Clear the admin override and use the deployment default."""
+    _run(lambda oc: oc.set_update_check(None))

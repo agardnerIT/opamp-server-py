@@ -690,3 +690,18 @@ class TestConfigControlPlane:
         assert verdict["valid"] is True
         assert verdict["policy"]["status"] in ("skipped", "pass")
         assert len(verdict["fingerprint"]) == 64
+
+
+def test_update_methods(monkeypatch):
+    """#46: cached read, explicit check, and the admin toggle."""
+    from server import admin_auth, updates
+
+    monkeypatch.setattr(admin_auth, "ADMIN_PASSWORD", "client-pw-123456")
+    monkeypatch.setenv("UPDATE_CHECK", "on")
+    monkeypatch.setattr(updates, "check_once", lambda: updates.state_dict())
+
+    with make_client(password="client-pw-123456") as oc:
+        assert "current_version" in oc.get_updates()
+        assert oc.set_update_check(False)["enabled"] is False
+        assert oc.set_update_check(None)["admin_override"] is None
+        assert "current_version" in oc.check_updates()

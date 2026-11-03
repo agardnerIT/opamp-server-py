@@ -33,6 +33,8 @@ the project becomes the data controller for a list of email addresses.
 - The Worker URL is the default in `ui/shared.py`; `UPDATE_SUBSCRIBE_URL`
   overrides it, and `off` hides the box. No `.env` is required for the default.
 - 38 offline Worker tests pass; CI runs `npm test` and `npm run typecheck`.
+- The in-product update check is now implemented (`docs/updates-available.md`);
+  this email list remains optional and independent.
 - Still needed: a physical postal address for the CAN-SPAM footer, published
   server/UI images (the `0.0.5-test` images predate admin auth and the box; local
   images were rebuilt for testing), and a decision on whether to move

@@ -221,6 +221,38 @@ def test_pages_add_the_repository_root_to_sys_path():
         )
 
 
+def test_update_notice_and_admin_toggle_are_wired():
+    """#46: the sidebar reads /updates, and the Admin page owns the toggle."""
+    shared = source(SHARED)
+    assert 'requests.get(f"{SERVER_URL}/updates"' in shared
+    assert "def update_commands(" in shared
+    assert "def render_update_notice(" in shared
+    assert "render_update_notice()" in shared
+
+    admin = source(ADMIN_PAGE)
+    assert 'tab_names.append("Updates")' in admin
+    assert 'admin_tabs[tab_names.index("Updates")]' in admin
+    assert "Check for updates automatically" in admin
+    assert '"/updates/settings"' in admin
+    assert '"/updates/check"' in admin
+    assert "deployment_enabled" in admin
+
+
+def test_update_commands_are_generated_only_from_a_valid_tag():
+    pytest.importorskip("streamlit")
+    from ui.shared import update_commands
+
+    assert update_commands("v0.2.0") == [
+        "docker pull ghcr.io/agardnerit/opamp-server-py-server:0.2.0",
+        "pip install --upgrade opamp-server-py==0.2.0",
+        "git fetch --tags && git checkout v0.2.0",
+    ]
+    assert update_commands("0.2.0")[2] == "git fetch --tags && git checkout v0.2.0"
+    assert update_commands("v0.2.0-rc.1")[0].endswith(":0.2.0-rc.1")
+    for bad in ("latest", "", "<script>", None, "v1.2"):
+        assert update_commands(bad) == []
+
+
 def test_release_email_box_is_config_gated():
     """#46: the Worker URL is opt-in, and the box is an iframe, not a server POST."""
     text = source(ADMIN_PAGE)

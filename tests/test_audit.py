@@ -614,6 +614,10 @@ AUDITED_ROUTES = {
     # #84: a restart is a privileged action against a live machine; the queue write
     # happens after the row, and a refusal records `result="error"`.
     ("POST", "/agent/{agent_id}/restart"): "agent.restart",
+    # #46: both are admin actions. The check spends an outbound request; the
+    # setting changes whether the server will ever spend one again.
+    ("POST", "/updates/check"): "updates.check",
+    ("PUT", "/updates/settings"): "updates.settings",
 }
 
 EXPLAINED_ROUTES = {

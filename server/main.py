@@ -78,6 +78,7 @@ from server import (
     sequence,
     throttle,
     tracing,
+    updates,
 )
 from server.http_body import BodyTooLarge, UnsupportedEncoding, read_body
 from server.redaction import redact_document
@@ -113,6 +114,7 @@ AGENT_TIMEOUT_INTERVAL_MARGIN = float(os.environ.get("AGENT_TIMEOUT_INTERVAL_MAR
 AGENT_FIRST_CONTACT_SECONDS = float(os.environ.get("AGENT_FIRST_CONTACT_SECONDS", 900))
 _cleanup_task = None
 _rollout_task = None
+_updates_task = None
 
 
 def _log_audit_startup() -> None:
@@ -199,9 +201,32 @@ async def rollout_loop():
             )
 
 
+async def updates_loop():
+    """#46: one anonymous release check per interval, never on the request path.
+
+    `UPDATE_CHECK=off` (or the admin toggle) makes this a cheap 60 s wake-up, so
+    flipping the toggle does not need a restart. The HTTP call runs in a worker
+    thread; a slow GitHub must not stall heartbeats.
+    """
+    while True:
+        await asyncio.sleep(updates.seconds_until_check())
+        if not updates.enabled() or not updates.due():
+            continue
+        try:
+            await asyncio.to_thread(updates.check_once)
+        except updates.TooSoon:
+            continue
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # pragma: no cover - the loop must never die
+            logger.bind(event="updates.loop_failed").warning(
+                f"update loop failed: {exc}"
+            )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _cleanup_task, _rollout_task
+    global _cleanup_task, _rollout_task, _updates_task
     # Credential first: the posture check needs to know whether admin auth exists.
     admin_auth.ensure()
     # #95: no credential at all means read-open / write-closed; a shared password
@@ -236,11 +261,15 @@ async def lifespan(app: FastAPI):
     # #101: the staged rollout engine. Separate from the 15s cleanup tick on purpose:
     # promotion latency and stale-agent reaping are unrelated knobs.
     _rollout_task = asyncio.create_task(rollout_loop())
+    # #46: the update check. It is a no-op when UPDATE_CHECK=off.
+    _updates_task = asyncio.create_task(updates_loop())
     yield
     if _cleanup_task:
         _cleanup_task.cancel()
     if _rollout_task:
         _rollout_task.cancel()
+    if _updates_task:
+        _updates_task.cancel()
     throttle.stop()
     tracing.shutdown_tracing()
 
@@ -3726,6 +3755,74 @@ def health_check():
         # are "what is this server doing right now", not secrets.
         "throttle": throttle.status(),
     }
+
+
+class UpdateSettingsRequest(BaseModel):
+    """Body for `PUT /updates/settings`."""
+
+    enabled: Optional[bool] = None
+
+
+@app.get("/updates", tags=["ops"], summary="Cached update-check state")
+def get_updates():
+    """Cached update status. **Never performs network I/O.**
+
+    Unauthenticated, like `/health`. Returns `{"current_version",
+    "latest_version", "latest_tag", "update_available", "checked_at",
+    "next_check_at", "enabled", "deployment_enabled", "admin_override",
+    "source", "error", "releases_url"}`. `enabled` is the effective state;
+    `deployment_enabled` is the `UPDATE_CHECK` env switch, which wins over the
+    admin toggle. No feed URL, version, or instance identifier is sent
+    anywhere by this endpoint — it only reads the local result.
+    """
+    return updates.state_dict()
+
+
+@app.post("/updates/check", tags=["ops"], summary="Run an update check now (admin)")
+def check_updates(
+    request: Request,
+    _audit=Depends(require_audit("updates.check")),
+):
+    """Run one check immediately. Requires `admin`.
+
+    Refused with 409 when checks are disabled, and 429 with `Retry-After` when
+    a check ran less than a minute ago. The request goes to GitHub without the
+    current version or any instance identifier; the comparison is local.
+    """
+    require_roles(request, ROLE_ADMIN)
+    if not updates.enabled():
+        raise HTTPException(status_code=409, detail="update checks are disabled")
+    try:
+        return updates.check_once()
+    except updates.TooSoon as exc:
+        raise HTTPException(
+            status_code=429,
+            detail=str(exc),
+            headers={"Retry-After": str(exc.retry_after)},
+        )
+
+
+@app.put("/updates/settings", tags=["ops"], summary="Enable/disable automatic update checks (admin)")
+def put_update_settings(
+    body: UpdateSettingsRequest,
+    request: Request,
+    _audit=Depends(require_audit("updates.settings")),
+):
+    """Persist the admin override. Requires `admin`.
+
+    `{"enabled": false}` turns automatic checks off; `{"enabled": true}` turns
+    them back on; `{"enabled": null}` clears the override and uses the
+    deployer's `UPDATE_CHECK` default. The deployer's `off` always wins: the
+    response reports `enabled: false` and `deployment_enabled: false`.
+    """
+    require_roles(request, ROLE_ADMIN)
+    updates.set_admin_override(body.enabled)
+    if body.enabled is True and updates.enabled():
+        try:
+            return updates.check_once()
+        except updates.TooSoon:
+            pass
+    return updates.state_dict()
 
 
 @app.post(

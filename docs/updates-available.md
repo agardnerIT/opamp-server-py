@@ -1,24 +1,37 @@
-# #46 — "Update available"
+# #46 — In-product update check
 
-**Design v2 (simplified).** Two modes. Checking is **on by default**. Optional
-email notification through the instance's **own** Resend account. No telemetry,
-no installation ID, no central subscriber list.
+**Status:** implemented 2026-11-03. The optional release-email list is a
+separate feature; see [`release-emails.md`](release-emails.md).
+
+The server checks GitHub for a newer release once every 24 hours and the UI
+shows the current version plus an "update available" banner with copyable
+upgrade commands. Nothing is ever downloaded, installed, restarted, or
+reconfigured automatically.
 
 ---
 
-## 1. Two modes
+## 1. Modes and precedence
 
-| `UPDATE_CHECK` | Behaviour |
+`UPDATE_CHECK` is the deployer switch:
+
+| Value | Behaviour |
 |---|---|
-| `on` **(default)** | Once every 24 h the server asks GitHub for the latest release. The UI shows a banner when a newer one exists. |
-| `off` | No requests at all. The UI shows a persistent warning. |
+| `on` **(default)** | One anonymous GitHub release check per interval. The admin may turn it off from the UI. |
+| `off` | No requests at all. The admin toggle cannot override this. |
 
-**`off` is supported but not recommended.** It is a security risk: an operator
-who never sees the notice runs outdated software, including security fixes. The
-check is anonymous and GitHub already sees the deployment when the container
-image is pulled, so `off` buys very little privacy and costs patch latency.
-`off` exists for air-gapped and policy-bound deployments, and the docs say
-exactly that rather than presenting it as the "private" choice.
+`off` is supported but **not recommended**: an operator who never sees the
+notice runs outdated software, including security fixes. It exists for
+air-gapped or policy-bound deployments.
+
+The admin toggle (Admin → Updates) is persisted in
+`data/update-settings.json`. Precedence is:
+
+1. `UPDATE_CHECK=off` → disabled, whatever the admin chose.
+2. admin override (`true` / `false`) → wins over the default.
+3. otherwise → enabled.
+
+The background loop reads the effective state on every wake-up, so a toggle
+needs no restart.
 
 ## 2. The request
 
@@ -28,149 +41,113 @@ Accept: application/vnd.github+json
 User-Agent: opamp-server-py-update-check
 ```
 
-- no current version, no instance ID, no hostname, no query string;
-- no cookies, no `Authorization`, no `.netrc`, no proxy auth;
-- no W3C `traceparent` (this must not join the operator's tracing pipeline);
-- no body; constant User-Agent with no version, so every install looks identical.
+- no current version, instance ID, hostname, or query string;
+- no cookies, `Authorization`, `.netrc`, `HTTP(S)_PROXY`, or `traceparent`;
+- a constant User-Agent, so every install looks identical;
+- 5 s timeout, one attempt, 64 KiB cap, no redirects, HTTPS only;
+- `UPDATE_HTTP_PROXY` is the only explicit egress-proxy hook.
 
-**Use the API, not a release asset.** GitHub counts release-asset downloads and
-shows them to the repository owner. That is installation telemetry by another
-name. The `/releases/latest` API request is not exposed to the maintainer, so
-the project learns nothing while GitHub sees only the traffic it already sees
-when the image is pulled.
+The comparison happens locally against `server/version.py`. The tag is not
+trusted beyond a strict semver check.
 
-GitHub (and the DNS resolver) see the source IP and the time. That is the
-accepted cost of a working, default-on check. The request carries nothing else.
-
-The current version is compared **locally** against `tag_name`; it is never sent.
+`/releases/latest` is used instead of a release asset on purpose: asset
+downloads are counted and visible to the repository owner, while the API
+request is not. GitHub still sees the source IP and time; that is the accepted
+cost of a working default-on check.
 
 ## 3. Schedule and failure behaviour
 
-- One background task started in the FastAPI lifespan, not a thread per request.
-- First check ~60 s after startup, then every 24 h ± a small jitter (±10 %) so
-  restarts and fleets do not synchronise.
-- Persist `last_checked`; a restart inside the 24 h window waits out the
-  remainder instead of checking again. No restart storms.
-- 5 s timeout, **one attempt, no retries**, 64 KiB cap, HTTPS only, redirects
-  refused.
-- Validate `tag_name` as semver (`v` optional, prerelease allowed). Ignore the
-  release body, assets, author, and every other field. A 404 means "no stable
-  release yet", not an error.
-- Any failure is quiet: keep the last known state, log one sanitised line
-  (`update check failed: timeout`), never the URL or response body.
+- Started in the FastAPI lifespan as one task.
+- First check ~60 s after startup, then every `UPDATE_CHECK_INTERVAL_HOURS`
+  (default 24 h) ± `UPDATE_CHECK_JITTER` (default 10%). The jitter stops
+  installs synchronising.
+- `next_check_at` is persisted, so a restart inside the window waits instead of
+  checking again.
+- On failure, keep the last known tag, record a short reason (`timeout`,
+  `http:403`, ...), and retry in an hour.
+- No retry loop, no backoff storm, no logging of the URL, headers, or body.
 
-## 4. In-product
-
-- Sidebar (all pages): current version, and if newer:
-  "Update available: v0.2.0 (you are on v0.1.0)", a fixed link to the releases
-  page, and copyable commands generated locally from the validated version:
-  - Docker: `docker pull ghcr.io/agardnerit/opamp-server-py-server:0.2.0`
-  - pip: `pip install --upgrade opamp-server-py==0.2.0`
-  - source: `git fetch --tags && git checkout v0.2.0`
-- When `off`: "Update checks are off. **Not recommended** — you may miss
-  security fixes. [Why] [Turn on]".
-- Only the validated version string is rendered; no remote HTML, markdown, notes
-  or shell text. The feed URL is never shown.
-
-Endpoints:
+## 4. API
 
 | Method | Path | Auth | Behaviour |
 |---|---|---|---|
-| `GET` | `/updates` | none, like `/health` | Cached state; **never** network |
-| `POST` | `/updates/check` | admin | One immediate check, min-interval 60 s, audited |
+| `GET` | `/updates` | none | Cached state; **never** network |
+| `POST` | `/updates/check` | admin | One immediate check; 409 if disabled, 429 + `Retry-After` within 60 s |
+| `PUT` | `/updates/settings` | admin | `{"enabled": true/false/null}`; `null` clears the override back to the deployer default |
 
-`GET` has no side effects, so crawlers, uptime probes and prefetchers cannot
-cause egress. `POST` is the only path that can trigger a check on demand.
+`GET /updates` returns:
 
-## 5. Release emails (central, opt-in)
+```json
+{
+  "current_version": "0.1.0",
+  "latest_version": "0.2.0",
+  "latest_tag": "v0.2.0",
+  "update_available": true,
+  "checked_at": "2026-11-03T...",
+  "next_check_at": "2026-11-04T...",
+  "enabled": true,
+  "deployment_enabled": true,
+  "admin_override": null,
+  "source": "github",
+  "error": null,
+  "releases_url": "https://github.com/agardnerIT/opamp-server-py/releases"
+}
+```
 
-The project runs a consent-based announcement list; the instance does not. The
-dashboard embeds a Cloudflare Worker form, and the address goes browser → Worker
-→ Resend. The instance stores nothing. Double opt-in, unsubscribe, deletion and
-the privacy policy are part of the Worker design.
+No feed URL, credentials, or per-install identifier is returned.
 
-See [`release-emails.md`](release-emails.md) for the Worker + Resend
-architecture, the abuse controls, and the setup checklist.
+## 5. UI
 
-This is a conscious trade. The project now learns which addresses subscribed and
-when — exactly the install data the update check avoids. It is acceptable
-because the address is volunteered, double-confirmed, used only for release
-announcements, and deletable on request. It is not a usage ping, and the
-self-hosted server never sends it.
+- **Sidebar (every page):** the current version. When a newer release exists, a
+  warning links to the release page and an expander contains locally generated
+  commands:
+  - Docker: `docker pull ghcr.io/agardnerit/opamp-server-py-server:<version>`
+  - pip: `pip install --upgrade opamp-server-py==<version>`
+  - source: `git fetch --tags && git checkout v<version>`
+- **Admin → Updates:** current/latest/last checked, the automatic-check toggle,
+  "Check now", and "Use deployment default". The toggle is disabled when the
+  deployment has `UPDATE_CHECK=off` or the signed-in role is not `admin`.
+- Only the validated version string is rendered; no remote HTML or notes.
 
-## 6. Privacy accounting
+## 6. CLI and MCP
 
-Leaves the instance:
+- `opampctl updates status|check|enable|disable|default`
+- MCP: `get_update_status` (read-only), `check_for_updates` (explicit action),
+  and `set_update_check` (only when MCP writes are enabled).
 
-| Destination | What it sees | When |
+## 7. What is stored
+
+| Path | Contents | Retention |
 |---|---|---|
-| GitHub | source IP, time, repo path | once per 24 h, only when `on` |
-| Cloudflare Worker | the email, browser IP, Turnstile token | only when an admin submits the form |
-| Resend | recipient email, sender, content, delivery events | on confirmation and on each broadcast |
+| `data/update-check.json` | `checked_at`, `next_check_at`, `latest_tag`, `last_error` | overwritten every check |
+| `data/update-settings.json` | `{"enabled": bool}` admin override | until cleared |
 
-Never leaves the instance automatically: current version, instance ID, fleet
-size, agent data, configs, or credentials. The update check is anonymous, and
-the email is voluntary and sent by the browser, not by the server.
+No history of checks, no IP addresses, no hostnames, no fleet data. The only
+per-install record is the timestamp of the last check, which is local.
 
-## 7. Configuration (server side)
+## 8. Tests
 
-| Variable | Default | Notes |
-|---|---|---|
-| `UPDATE_CHECK` | `on` | `on` / `off`; off is documented as not recommended |
-| `UPDATE_CHECK_INTERVAL_HOURS` | `24` | |
-| `UPDATE_CHECK_TIMEOUT_SECONDS` | `5` | single attempt, no retries |
-| `UPDATE_SUBSCRIBE_URL` | unset | public Worker signup URL; unset hides the email box |
+`tests/test_updates.py` (offline, fake HTTP client and temporary state):
 
-Resend and Cloudflare credentials belong to the Worker, never to the
-self-hosted server.
+- exact request shape and constant User-Agent; no version in the request;
+- newer/older/prerelease tags; 404 = no stable release; invalid JSON/tag;
+- failure keeps the last tag and schedules a retry;
+- one check per minute unless forced;
+- deployer `off` wins over the admin override; the admin toggle persists and can
+  be cleared;
+- `GET /updates` never calls the network; `POST` requires admin; 409 when
+  disabled; `PUT` toggles.
+- Client, CLI, MCP and UI tests cover the new surface.
 
-## 8. Remove the existing second beacon
+## 9. Deliberately not built
 
-`ui/shared.py::get_collector_versions()` fetches GitHub tags hourly with a 1-hour
-`st.cache_data` TTL, and the Reports page calls it on load. With a default-on
-daily check this is a second, more frequent outbound path. Fold it into
-`server/updates.py` (same 24 h cache, same sanitised request) or drop the remote
-lookup and let the operator type the reference collector version. One egress
-path, one interval, one privacy story.
+- no automatic upgrade, download, restart, or subprocess;
+- no telemetry, usage ping, install count, or anonymous identifier;
+- no version or fleet data in the request;
+- no background request while `UPDATE_CHECK=off`;
+- no browser-to-GitHub request (the banner is server-side; links are human
+  clicks);
+- no project-operated update service.
 
-## 9. Tests
-
-- default `on`: exactly one request per interval, not per restart or page load;
-- `off`: zero requests, warning visible;
-- request assertions: method, host, path, constant UA, no query/cookie/auth/
-  trace headers, no body;
-- semver: `v` prefix, prerelease ordering, older/equal, bad strings, 404, drafts;
-- failure: timeout, oversized body, bad JSON, no partial state;
-- dashboard: the email box is hidden when `UPDATE_SUBSCRIBE_URL` is unset and
-  renders the configured Worker URL when set;
-- an autouse fixture sets `UPDATE_CHECK=off` and replaces the transport, so the
-  suite can never make a real request;
-- UI: banner, off warning, upgrade commands contain only the validated version;
-- the Worker has its own Miniflare/Vitest suite (subscribe, confirm, release,
-  signatures, idempotency, rate limits, Turnstile, no PII in logs) — see
-  `release-emails.md`.
-
-## 10. Task list
-
-| # | Task |
-|---|---|
-| 1 | `server/version.py` — runtime version from package metadata |
-| 2 | `server/updates.py` — fetch, validate, semver compare, cache, state file |
-| 3 | daily loop in lifespan + `GET /updates` + `POST /updates/check` |
-| 4 | sidebar banner, off warning, copyable commands |
-| 5 | Cloudflare Worker + Resend list (see `release-emails.md`) |
-| 6 | dashboard iframe/box, gated on `UPDATE_SUBSCRIBE_URL` |
-| 7 | client / `opampctl updates` / MCP tools |
-| 8 | fold `get_collector_versions()` into the same path |
-| 9 | tests, docs, `.env.sample`, README privacy section |
-
-## 11. Decision locked
-
-The email list is **central**: a Cloudflare Worker adds confirmed addresses to
-the project's Resend segment, and a GitHub release webhook sends the broadcast.
-The self-hosted server stores no address and holds no Resend key. The privacy
-cost (the project learns who subscribed) is accepted and written down in
-`release-emails.md`.
-
-Open setup questions — Cloudflare hostname/token, Resend segment/domain/key,
-GitHub webhook, consent text — are listed in §14 of that document.
+The release-email list is optional and independent: see
+[`release-emails.md`](release-emails.md).

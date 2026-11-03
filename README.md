@@ -472,6 +472,27 @@ an in-band "here is your token" reply is ignored. The supervisor can consume
 connection settings; the collector extension cannot. Registration-on-first-use
 and CSR/TOFU stay in #83.
 
+## Update checks (#46)
+
+Once per 24 h the server asks GitHub for the latest release. The UI shows the
+current version, a banner when a newer one exists, and copyable upgrade commands.
+Nothing is ever upgraded automatically.
+
+- **On by default.** `UPDATE_CHECK=off` disables it for the deployment and wins
+  over the admin toggle. Off is not recommended: you may miss security fixes.
+- **Admin → Updates** has the toggle, "Check now", and "Use deployment default".
+  The admin override is stored in `data/update-settings.json`; the deployer's
+  `off` always wins.
+- **The request is anonymous.** One `GET` to GitHub's releases API, with no
+  current version, instance ID, hostname, fleet data, cookies, `.netrc`, or
+  proxy environment. The comparison is local. `UPDATE_HTTP_PROXY` is the only
+  explicit proxy hook.
+- `GET /updates` is a cached read and never performs network I/O.
+  `POST /updates/check` is admin-only and rate-limited to one check a minute.
+- `opampctl updates status|check|enable|disable|default`; MCP tools
+  `get_update_status`, `check_for_updates`, and (with writes enabled)
+  `set_update_check`.
+
 ## Release emails (optional)
 
 The Admin page can show a signup box for project release announcements. It is an
@@ -1146,6 +1167,11 @@ this project's own fixtures name their agents.
 | `ADMIN_LOGIN_MAX_BACKOFF_SECONDS` | `900` | Cap on the exponential lockout backoff |
 | `TRUST_PROXY_HEADERS` | `false` | Believe `X-Forwarded-For` for the lockout key and audit client. Only behind a proxy you control — otherwise it is forgeable |
 | `UPDATE_SUBSCRIBE_URL` | *(empty)* | Public URL of the release-email Worker. When set, the Admin page shows a signup box; the server stores no address. Empty hides it (#46) |
+| `UPDATE_CHECK` | `on` | Automatic release check (#46). `on` or `off`; `off` wins over the admin toggle and is not recommended |
+| `UPDATE_CHECK_INTERVAL_HOURS` | `24` | Minimum time between automatic checks |
+| `UPDATE_CHECK_JITTER` | `0.1` | Fractional jitter added to the interval so installs do not synchronise |
+| `UPDATE_CHECK_TIMEOUT_SECONDS` | `5` | GitHub request timeout; one attempt, no retries |
+| `UPDATE_HTTP_PROXY` | *(empty)* | Explicit proxy for the check. The check does not use `HTTP(S)_PROXY` or `.netrc` |
 | `CORS_ORIGINS` | `*` | Comma-separated list of allowed CORS origins (browser clients) |
 | `OPAMP_WS_ENABLED` | `false` | Enable the WebSocket transport on `/v1/opamp` (see [Transports](#transports)) |
 | `OPAMP_MAX_MESSAGE_BYTES` | `67108864` | Max OpAMP message size (64 MiB) on both transports; varint header included. HTTP request bodies are capped after gzip decompression. `/v1/metrics` (OTLP) is not affected |

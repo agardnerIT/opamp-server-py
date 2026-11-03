@@ -184,6 +184,20 @@ class OpampClient:
         """``GET /health`` — status, agent count, OPA availability, posture."""
         return self._get("/health")
 
+    # ------------------------------------------------------------- updates
+
+    def get_updates(self) -> Dict[str, Any]:
+        """``GET /updates`` — cached update-check state. Never triggers a check."""
+        return self._get("/updates")
+
+    def check_updates(self) -> Dict[str, Any]:
+        """``POST /updates/check`` — run one check now (admin; contacts GitHub)."""
+        return self._post("/updates/check")
+
+    def set_update_check(self, enabled: Optional[bool]) -> Dict[str, Any]:
+        """``PUT /updates/settings`` — admin override; ``None`` clears it."""
+        return self._put("/updates/settings", json={"enabled": enabled})
+
     def config_posture(self) -> Dict[str, Any]:
         """``GET /config/posture`` — config push security posture (viewer).
 

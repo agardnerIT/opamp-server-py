@@ -470,3 +470,15 @@ class TestRemoteConfigTools:
         register_agent(agent_id)
         verdict = call(mcp_srv.validate_config, CONFIG_MAP, agent_id)
         assert verdict["valid"] is True
+
+
+def test_update_tools(wired, monkeypatch):
+    """#46: cached status, explicit check, and the admin toggle."""
+    from server import updates
+
+    monkeypatch.setenv("UPDATE_CHECK", "on")
+    monkeypatch.setattr(updates, "check_once", lambda: updates.state_dict())
+    assert "current_version" in call(mcp_srv.get_update_status)
+    assert "current_version" in call(mcp_srv.check_for_updates)
+    assert call(mcp_srv.set_update_check, False)["enabled"] is False
+    assert call(mcp_srv.set_update_check, None)["admin_override"] is None

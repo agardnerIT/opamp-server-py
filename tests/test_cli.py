@@ -105,6 +105,17 @@ class TestLiveOps:
         data = parse(run("auth", "status"))
         assert "password_required" in data
 
+    def test_updates_status_and_toggle(self, live, monkeypatch):
+        from server import updates
+
+        monkeypatch.setenv("UPDATE_CHECK", "on")
+        monkeypatch.setattr(updates, "check_once", lambda: updates.state_dict())
+        assert "current_version" in parse(run("updates", "status"))
+        assert parse(run("--password", ADMIN_PW, "updates", "disable"))["enabled"] is False
+        assert parse(run("--password", ADMIN_PW, "updates", "enable"))["enabled"] is True
+        assert parse(run("--password", ADMIN_PW, "updates", "default"))["admin_override"] is None
+        assert "current_version" in parse(run("--password", ADMIN_PW, "updates", "check"))
+
     def test_config_posture(self, live):
         data = parse(run("--password", ADMIN_PW, "config", "posture"))
         assert data["config_push"]["enabled"] is False

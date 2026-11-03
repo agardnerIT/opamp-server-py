@@ -81,6 +81,18 @@ def health() -> str:
 
 
 @mcp.tool()
+def get_update_status() -> str:
+    """Cached update-check state (#46). Read-only; never contacts GitHub."""
+    return _tool(lambda oc: oc.get_updates())
+
+
+@mcp.tool()
+def check_for_updates() -> str:
+    """Run one update check now (admin). This makes one outbound GitHub request."""
+    return _tool(lambda oc: oc.check_updates())
+
+
+@mcp.tool()
 def auth_status() -> str:
     """How the server authenticates admin callers: mode, roles, live principals (#95).
 
@@ -375,6 +387,11 @@ def revoke_agent_token(agent_id: str) -> str:
     return _tool(lambda oc: oc.revoke_agent_token(agent_id))
 
 
+def set_update_check(enabled: Optional[bool] = None) -> str:
+    """Enable/disable automatic update checks (admin override); null clears it."""
+    return _tool(lambda oc: oc.set_update_check(enabled))
+
+
 def _register_write_tools() -> None:
     """Expose the write tools only with OPAMP_MCP_ALLOW_WRITES=true (#94, #106)."""
     if not writes_enabled():
@@ -385,6 +402,7 @@ def _register_write_tools() -> None:
     # tools here, at any setting — approval is a human role, and a client that can
     # approve its own proposal has no separation of duties to speak of.
     mcp.tool()(propose_config)
+    mcp.tool()(set_update_check)
 
 
 # ------------------------------------------------------------------ manifests

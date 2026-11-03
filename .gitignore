@@ -204,3 +204,7 @@ cloudflare/**/node_modules/
 cloudflare/**/.wrangler/
 cloudflare/**/dist/
 cloudflare/**/.dev.vars
+
+# Update-check runtime state (#46)
+data/update-check.json
+data/update-settings.json

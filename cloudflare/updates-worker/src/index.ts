@@ -215,6 +215,17 @@ async function handleSubscribe(request: Request, env: Env): Promise<Response> {
     // The address never got a link, so let it retry immediately.
     await env.UPDATES_KV.delete(pendingKey);
     await env.UPDATES_KV.delete(dedupeKey);
+    if (error instanceof ResendError) {
+      console.error(
+        JSON.stringify({ event: "subscribe.resend_failed", status: error.status }),
+      );
+      return errorResponse(
+        request,
+        env,
+        502,
+        "We could not send the confirmation email right now. Please try again later.",
+      );
+    }
     throw error;
   }
 
@@ -349,6 +360,17 @@ async function handleDelete(request: Request, env: Env): Promise<Response> {
   } catch (error) {
     await env.UPDATES_KV.delete(pendingKey);
     await env.UPDATES_KV.delete(dedupeKey);
+    if (error instanceof ResendError) {
+      console.error(
+        JSON.stringify({ event: "delete.resend_failed", status: error.status }),
+      );
+      return deleteErrorResponse(
+        request,
+        env,
+        502,
+        "We could not send the deletion email right now. Please try again later.",
+      );
+    }
     throw error;
   }
 

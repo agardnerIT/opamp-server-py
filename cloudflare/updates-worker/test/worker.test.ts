@@ -236,7 +236,7 @@ describe("subscribe", () => {
     expect(calls[0].url).toBe("https://api.resend.com/emails");
     expect(calls[0].body.to).toEqual(["user@example.com"]);
     expect(calls[0].body.idempotencyKey).toBeUndefined(); // header, not body
-    expect(calls[0].headers.get("idempotency-key")).toMatch(/^confirm-[0-9a-f]{64}$/);
+    expect(calls[0].headers.get("idempotency-key")).toMatch(/^confirm-[0-9a-f]{64}-[A-Za-z0-9_-]{43}$/);
     expect(calls[0].body.text).toContain("https://updates.test/confirm?token=");
     expect(calls[0].body.text).toContain("24 hours");
 
@@ -329,7 +329,7 @@ describe("subscribe", () => {
       subscribeRequest({ email: "user@example.com", consent: "on" }),
       env,
     );
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(502);
     expect((env.UPDATES_KV as unknown as FakeKV).store.size).toBe(0);
   });
 

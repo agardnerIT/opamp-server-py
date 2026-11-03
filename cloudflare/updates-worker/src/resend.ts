@@ -125,7 +125,10 @@ export async function sendConfirmation(
     subject,
     text,
     html,
-    idempotencyKey: `confirm-${await sha256Hex(email)}`,
+    // The token is part of the key: the email is stable, but the link changes.
+    // Reusing an email-only key makes Resend reject the new body as a modified
+    // request for the same idempotency key (409) for the next 24 h.
+    idempotencyKey: `confirm-${await sha256Hex(email)}-${token}`,
   });
 }
 

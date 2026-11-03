@@ -7,9 +7,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from ui.shared import (
     ROLE_OPERATOR,
     SERVER_URL,
+    collector_config_snippet,
     format_local_time,
     get_agents,
     get_agent,
+    get_server_url,
     _compliance_badge,
     admin_request,
     render_sidebar,
@@ -32,6 +34,56 @@ st.set_page_config(
 )
 
 render_sidebar()
+
+
+def _empty_fleet():
+    """#116: an empty fleet is a setup question, so answer it here.
+
+    "No agents connected" was a dead end for anyone who had never configured OpAMP:
+    the next step is always the same ~30 lines of YAML, and the two lines people
+    actually get wrong are `service.extensions: [opamp]` (without it the extension
+    never starts) and the endpoint host (a containerised collector cannot reach the
+    host's `localhost`). Both are called out next to the snippet instead of in docs a
+    new user has to find.
+    """
+    st.info("No agents connected yet — nothing is reporting to this server.")
+    data = st.session_state.get("agents_data", {}) or {}
+    if "error" in data:
+        # A server we cannot reach is not a configuration problem, and the snippet
+        # would send a new user looking in the wrong place.
+        st.error("The server is unreachable, so the agent list cannot be loaded.")
+        st.caption(f"`GET {get_server_url()}/agents` failed: {data['error']}")
+        return
+    st.markdown(
+        "Copy this into `config.yaml`, run `otelcol-contrib --config config.yaml`, "
+        "and this page fills in within a poll interval:"
+    )
+    in_container = st.toggle(
+        "My collector runs in Docker",
+        key="empty_fleet_in_container",
+        help="Rewrites the endpoint to host.docker.internal, the host as seen from a container.",
+    )
+    snippet = collector_config_snippet(get_server_url(), in_container=in_container)
+    st.code(snippet, language="yaml")
+    st.download_button(
+        "Download config.yaml",
+        snippet,
+        file_name="config.yaml",
+        mime="text/yaml",
+        key="empty_fleet_download",
+    )
+    if in_container:
+        st.caption(
+            "On Linux, start the container with "
+            "`--add-host=host.docker.internal:host-gateway` so that name resolves."
+        )
+    st.caption(
+        "Still nothing after a minute? Check that `service.extensions` lists `opamp` "
+        f"and that the collector can reach `{get_server_url()}` — the server sees "
+        "every request it receives, so a missing agent is almost always a config or "
+        "network question, not a server one."
+    )
+
 
 agent_id_param = st.query_params.get("agent_id")
 
@@ -393,7 +445,11 @@ else:
         st.header("Agent List")
         st.caption(f"Showing {len(agents)} agent(s)")
     else:
-        st.info("No agents connected")
+        _empty_fleet()
+        # Nothing below this line (view-mode radio, property grouping) means anything
+        # for an empty fleet, and the old trailing "No agents connected" info was a
+        # second, worse copy of the same message.
+        st.stop()
 
     view_mode_options = ["Table", "By Property"]
     saved_view_mode = st.query_params.get("view_mode", "Table")
@@ -501,8 +557,3 @@ else:
             for agent in group_agents:
                 health_icon = "✅" if agent.get("healthy") else "❌" if agent.get("healthy") is False else "⚪"
                 st.markdown(f"**{health_icon}** [{agent['id'][:16]}...](?agent_id={agent['id']})")
-    if not st.session_state.get("agents_data", {}).get("agents"):
-        if "error" in st.session_state.get("agents_data", {}):
-            st.error("Server offline — no agents")
-        else:
-            st.info("No agents connected. Start an OpenTelemetry Collector with OpAMP extension to see it here.")

@@ -5,6 +5,7 @@ import streamlit as st
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from ui.shared import (
     SERVER_URL,
+    collector_config_snippet,
     get_server_url,
     render_sidebar,
 )
@@ -17,26 +18,12 @@ st.set_page_config(
 
 render_sidebar()
 
-server_url = get_server_url()
-
 st.markdown("## Collector Configuration")
 st.markdown("Add this minimal config to your OpenTelemetry Collector to connect to this OpAMP server:")
 
-default_yaml = f"""extensions:
-  opamp:
-    server:
-      http:
-        endpoint: {server_url}/v1/opamp
-    agent_description:
-      non_identifying_attributes:
-        "deployment.environment": "development"
-    capabilities:
-      reports_health: true
-      reports_effective_config: true
-      reports_available_components: true
-service:
-  extensions: [opamp]
-"""
+# #116: one snippet for the Help page and the empty fleet view, so a fix to the config
+# can never land in only one of them.
+default_yaml = collector_config_snippet(get_server_url())
 
 st.code(default_yaml, language="yaml")
 

@@ -390,3 +390,66 @@ def test_compose_binds_the_ui_to_loopback_with_a_reason():
     assert ports, "the ui service must publish its port explicitly"
     assert all(str(port).startswith("127.0.0.1:") for port in ports), ports
     assert "loopback" in source(REPO_ROOT / "docker-compose.yml").lower()
+
+
+# ------------------------------------------------------ empty fleet onboarding (#116)
+
+
+def test_the_empty_fleet_shows_a_snippet_built_by_the_shared_helper():
+    """#116: the dead-end info is gone, and one snippet serves both pages.
+
+    Help and the Agents empty state must not each own a copy of the YAML — that is how
+    the Help page and the docs drifted apart before. Both call the helper, so a fix
+    lands once.
+    """
+    agents = source(AGENTS_PAGE)
+    help_page = source(UI_DIR / "pages" / "4_Help.py")
+    assert "collector_config_snippet(" in agents
+    assert "collector_config_snippet(" in help_page
+    assert "No agents connected. Start an OpenTelemetry Collector" not in agents
+    # The snippet is useless without the line people forget, so it is asserted below
+    # in the helper test rather than trusted to prose.
+
+
+def test_the_empty_fleet_snippet_is_runnable_yaml_for_this_server():
+    pytest.importorskip("streamlit")
+    yaml = pytest.importorskip("yaml")
+    from ui.shared import collector_config_snippet
+
+    document = yaml.safe_load(collector_config_snippet("http://opamp.example:4320/"))
+
+    assert document["extensions"]["opamp"]["server"]["http"]["endpoint"] == (
+        "http://opamp.example:4320/v1/opamp"
+    )
+    # Without this the extension never starts — the single most common setup mistake.
+    assert document["service"]["extensions"] == ["opamp"]
+    capabilities = document["extensions"]["opamp"]["capabilities"]
+    for flag in (
+        "reports_health",
+        "reports_effective_config",
+        "reports_available_components",
+    ):
+        assert capabilities[flag] is True
+    # A config with no pipeline is rejected by a real collector, so "copy, paste, run"
+    # would otherwise be a lie.
+    assert document["service"]["pipelines"]["traces"]["receivers"] == ["otlp"]
+
+
+def test_the_container_variant_rewrites_only_the_host():
+    pytest.importorskip("streamlit")
+    yaml = pytest.importorskip("yaml")
+    from ui.shared import collector_config_snippet
+
+    def endpoint(url, **kwargs):
+        return yaml.safe_load(collector_config_snippet(url, **kwargs))["extensions"][
+            "opamp"
+        ]["server"]["http"]["endpoint"]
+
+    for local in ("http://localhost:4320", "http://127.0.0.1:4320"):
+        assert endpoint(local, in_container=True) == (
+            "http://host.docker.internal:4320/v1/opamp"
+        )
+    # A collector that already points at a real hostname must not be rewritten.
+    assert endpoint("http://collector-host:4320", in_container=True) == (
+        "http://collector-host:4320/v1/opamp"
+    )

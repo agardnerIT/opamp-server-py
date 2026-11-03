@@ -59,6 +59,71 @@ def get_server_url():
     return SERVER_URL
 
 
+def collector_config_snippet(
+    server_url=None,
+    *,
+    agent_name="my-collector",
+    poll_interval="5s",
+    in_container=False,
+):
+    """#116: the copy-paste collector config, in one place.
+
+    The empty fleet is the first thing a new user sees, and "No agents connected. Start
+    an OpenTelemetry Collector with OpAMP extension" tells them nothing they can act on.
+    This is the smallest config that actually reports: the extension block, the
+    `service.extensions: [opamp]` line people forget, and one debug pipeline so the
+    file runs unchanged. Shared with the Help page so the two can never drift.
+
+    The endpoint host is the one thing that genuinely changes between deployments: a
+    collector on the same machine can use `localhost`, a containerised one cannot (it
+    resolves inside its own network namespace), so `in_container` swaps in the host
+    alias Docker Desktop provides and Linux can be told about.
+    """
+    base = (server_url or SERVER_URL).rstrip("/")
+    endpoint = f"{base}/v1/opamp"
+    if in_container:
+        for local in ("127.0.0.1", "localhost", "0.0.0.0"):
+            endpoint = endpoint.replace(f"//{local}", "//host.docker.internal")
+    return f"""extensions:
+  opamp:
+    server:
+      http:
+        endpoint: {endpoint}
+        polling_interval: {poll_interval}
+    agent_description:
+      non_identifying_attributes:
+        "agent.name": "{agent_name}"      # your label; the Agents page shows it
+        "deployment.environment": "development"
+    capabilities:
+      reports_health: true
+      reports_effective_config: true      # needed for config push and drift
+      reports_available_components: true  # needed for the component inventory
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 127.0.0.1:4317
+      http:
+        endpoint: 127.0.0.1:4318
+
+processors:
+  batch:
+
+exporters:
+  debug:
+    verbosity: normal
+
+service:
+  extensions: [opamp]        # without this the extension never starts
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]
+"""
+
+
 def format_local_time(utc_str):
     if not utc_str:
         return "N/A"

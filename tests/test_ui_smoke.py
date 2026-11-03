@@ -697,3 +697,52 @@ def test_a_reissued_uid_explains_itself():
 
     # An unknown reason is shown verbatim rather than swallowed.
     assert "something odd" in reissue_banner_text("ab" * 16, "something odd")
+
+
+# --------------------------------------------------- empty fleet onboarding (#116)
+
+
+def empty_agents_page(server):
+    server.agents = []
+    app = signed_in(REPO / "ui/pages/1_Agents.py")
+    app.run()
+    assert not app.exception, app.exception
+    return app
+
+
+def test_an_empty_fleet_offers_a_copy_paste_collector_config(server):
+    """#116: the first screen a new user sees must contain the next step."""
+    app = empty_agents_page(server)
+    snippet = "\n".join(element.value for element in app.code)
+    assert "extensions:" in snippet and "opamp:" in snippet
+    assert "/v1/opamp" in snippet
+    assert "service:" in snippet and "extensions: [opamp]" in snippet
+    assert "No agents connected yet" in texts(app)
+    # A download button means the file never has to be retyped from a screenshot.
+    assert any(button.label == "Download config.yaml" for button in app.download_button)
+
+
+def test_the_docker_toggle_rewrites_the_endpoint_for_a_containerised_collector(server):
+    app = empty_agents_page(server)
+    assert "localhost" in "\n".join(element.value for element in app.code)
+    app.toggle(key="empty_fleet_in_container").set_value(True).run()
+    assert not app.exception, app.exception
+    snippet = "\n".join(element.value for element in app.code)
+    assert "host.docker.internal" in snippet
+    assert "host-gateway" in texts(app)
+
+
+def test_an_unreachable_server_is_not_reported_as_a_configuration_problem(server, monkeypatch):
+    server.agents = []
+
+    def offline(url, *args, **kwargs):
+        raise requests.RequestException("connection refused")
+
+    monkeypatch.setattr(requests, "get", offline)
+    app = signed_in(REPO / "ui/pages/1_Agents.py")
+    app.run()
+    assert not app.exception, app.exception
+    body = texts(app)
+    assert "unreachable" in body
+    assert "connection refused" in body
+    assert not app.code, "a snippet would send a new user looking in the wrong place"

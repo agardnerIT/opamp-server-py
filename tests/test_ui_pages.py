@@ -203,6 +203,25 @@ def test_release_email_box_is_config_gated():
     assert "components.iframe(UPDATE_SUBSCRIBE_URL" in text
 
 
+def test_update_subscribe_url_defaults_and_can_be_overridden():
+    """#46: the project Worker is the default; env overrides or turns it off."""
+    pytest.importorskip("streamlit")
+    from ui.shared import (
+        DEFAULT_UPDATE_SUBSCRIBE_URL,
+        resolve_update_subscribe_url,
+    )
+
+    assert DEFAULT_UPDATE_SUBSCRIBE_URL.startswith("https://")
+    assert resolve_update_subscribe_url(None) == DEFAULT_UPDATE_SUBSCRIBE_URL
+    assert resolve_update_subscribe_url("") == DEFAULT_UPDATE_SUBSCRIBE_URL
+    assert (
+        resolve_update_subscribe_url(" https://example.test/updates ")
+        == "https://example.test/updates"
+    )
+    for disabled in ("off", "none", "false", "disabled", " OFF "):
+        assert resolve_update_subscribe_url(disabled) == ""
+
+
 def test_sidebar_shows_the_current_role():
     text = source(SHARED)
     assert "session.role" in text

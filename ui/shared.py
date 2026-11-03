@@ -36,8 +36,22 @@ SERVER_HTTP_SCHEME = os.environ.get("SERVER_HTTP_SCHEME", "http")
 SERVER_ADDRESS = os.environ.get("SERVER_ADDRESS", "localhost")
 SERVER_PORT = os.environ.get("SERVER_PORT", "4320")
 SERVER_URL = f"{SERVER_HTTP_SCHEME}://{SERVER_ADDRESS}:{SERVER_PORT}"
-# #46: public URL of the release-email Worker. Empty hides the signup box.
-UPDATE_SUBSCRIBE_URL = (os.environ.get("UPDATE_SUBSCRIBE_URL") or "").strip()
+# #46: the project's release-email Worker is the default because the project
+# controls it. `UPDATE_SUBSCRIBE_URL` overrides it for a fork or a self-hosted
+# list, and `off` (or `none` / `false` / `disabled`) hides the box.
+DEFAULT_UPDATE_SUBSCRIBE_URL = "https://opamp-updates.tame-lamp8409.workers.dev"
+
+
+def resolve_update_subscribe_url(raw):
+    value = (raw or "").strip()
+    if value.lower() in ("off", "none", "false", "disabled"):
+        return ""
+    return value or DEFAULT_UPDATE_SUBSCRIBE_URL
+
+
+UPDATE_SUBSCRIBE_URL = resolve_update_subscribe_url(
+    os.environ.get("UPDATE_SUBSCRIBE_URL")
+)
 
 
 def get_server_url():

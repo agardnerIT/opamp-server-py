@@ -479,10 +479,12 @@ iframe to a Cloudflare Worker; the address goes browser → Worker → the proje
 Resend segment. This server never receives or stores it, and the Worker has no
 endpoint to list subscribers.
 
-Set `UPDATE_SUBSCRIBE_URL` to the Worker's public URL:
+The project's Worker URL is the default, so the box appears without any
+configuration. Set `UPDATE_SUBSCRIBE_URL` to a different URL to use your own
+Worker, or to `off` to hide the box:
 
 ```bash
-UPDATE_SUBSCRIBE_URL=https://opamp-updates.tame-lamp8409.workers.dev
+UPDATE_SUBSCRIBE_URL=off
 ```
 
 Double opt-in is mandatory: nothing is added to Resend until the recipient clicks

@@ -30,11 +30,13 @@ the project becomes the data controller for a list of email addresses.
 - The GitHub release webhook is created and a ping returns `204`. A signed test
   `release` event produced a real Resend Broadcast to the test address, so the
   broadcast path is verified end-to-end, not just in unit tests.
-- `.env` (gitignored) sets `UPDATE_SUBSCRIBE_URL` for the dashboard.
+- The Worker URL is the default in `ui/shared.py`; `UPDATE_SUBSCRIBE_URL`
+  overrides it, and `off` hides the box. No `.env` is required for the default.
 - 38 offline Worker tests pass; CI runs `npm test` and `npm run typecheck`.
-- Still needed: a physical postal address for the CAN-SPAM footer, a rebuild of
-  the UI image (the published `0.0.5-test` predates the box), and a decision on
-  whether to move `agardner.net` to Cloudflare for a branded Worker hostname.
+- Still needed: a physical postal address for the CAN-SPAM footer, published
+  server/UI images (the `0.0.5-test` images predate admin auth and the box; local
+  images were rebuilt for testing), and a decision on whether to move
+  `agardner.net` to Cloudflare for a branded Worker hostname.
 
 ---
 

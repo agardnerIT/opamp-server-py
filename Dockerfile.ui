@@ -2,6 +2,11 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# The UI imports server helpers that create their SQLite stores at import. The
+# real data volume is mounted read-only, so keep those stores in a throwaway
+# writable directory. The UI reads fleet data from the API, not this database.
+ENV DATA_DIR=/tmp/opamp-ui-data
+
 # Install dependencies
 COPY requirements.txt requirements-ui.txt ./
 RUN pip install --no-cache-dir -r requirements.txt -r requirements-ui.txt

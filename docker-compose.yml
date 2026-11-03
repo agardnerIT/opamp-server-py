@@ -93,7 +93,11 @@ services:
       - SERVER_HTTP_SCHEME=http
       - SERVER_ADDRESS=server
       - SERVER_PORT=4320
-      # #46: public release-email Worker. Empty hides the Admin page box.
+      # The UI imports server helpers (posture, manifests, reports) that create
+      # their SQLite stores at import. The real data volume is read-only, so use
+      # a throwaway writable directory; the UI reads fleet data over HTTP.
+      - DATA_DIR=/tmp/opamp-ui-data
+      # #46: public release-email Worker. Empty means the built-in default.
       - UPDATE_SUBSCRIBE_URL=${UPDATE_SUBSCRIBE_URL:-}
     volumes:
       # Read-only: the UI imports server-side helpers (reports, manifests, posture)

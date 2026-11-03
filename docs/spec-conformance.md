@@ -123,7 +123,7 @@ agent interoperate?" is answerable without reading source (#79).
 
 | Clause | Status | Pinned by | Notes |
 |---|---|---|---|
-| `CustomCapabilities`, `CustomMessage` | ❌ not implemented | [#85](https://github.com/agardnerIT/opamp-server-py/issues/85) | Upstream marks them *Development*; the message shapes are accepted and ignored |
+| `CustomCapabilities`, `CustomMessage` | ✅ covered | `tests/test_custom_messages.py`, `tests/conformance/test_spec_conformance.py` | Upstream marks them *Development*. The capability list is **replaced** on every report; a `CustomMessage` is delivered **exactly once** on the next reply; the payload is opaque (base64 in, bytes out) and never interpreted, stored or audited |
 | Own telemetry (`ReportsOwnMetrics/Traces/Logs`) | ✅ (out of band) | `tests/test_metrics_persistence.py` | Agents send OTLP to `/v1/metrics`; OpAMP carries only the capability bits. The spec's own-telemetry endpoint is the collector's, not the server's |
 
 ## §Security Considerations

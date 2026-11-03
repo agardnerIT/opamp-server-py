@@ -89,7 +89,10 @@ class SQLiteAgentStore:
                     pending_command TEXT,
                     command_delivered_at TEXT,
                     last_requested_components_hash TEXT,
-                    components_request_ignored INTEGER DEFAULT 0
+                    components_request_ignored INTEGER DEFAULT 0,
+                    custom_capabilities TEXT,
+                    pending_custom_message TEXT,
+                    custom_message_delivered_at TEXT
                 )
             """)
 
@@ -120,6 +123,19 @@ class SQLiteAgentStore:
                 conn.execute("ALTER TABLE agents ADD COLUMN uid_reissued_from TEXT")
             if "uid_reissue_reason" not in columns:
                 conn.execute("ALTER TABLE agents ADD COLUMN uid_reissue_reason TEXT")
+            # #85: a custom capability list is *replaced*, never appended (the spec
+            # says the message carries the whole list), so one JSON column is the
+            # whole state. `pending_custom_message` is the outbound queue: persisted
+            # for the same reason `pending_command` is (HTTP has no push, and a
+            # message lost on restart is a silent no-op).
+            if "custom_capabilities" not in columns:
+                conn.execute("ALTER TABLE agents ADD COLUMN custom_capabilities TEXT")
+            if "pending_custom_message" not in columns:
+                conn.execute("ALTER TABLE agents ADD COLUMN pending_custom_message TEXT")
+            if "custom_message_delivered_at" not in columns:
+                conn.execute(
+                    "ALTER TABLE agents ADD COLUMN custom_message_delivered_at TEXT"
+                )
             # #77: the `AvailableComponents.hash` we last asked the agent to expand,
             # so the `ReportAvailableComponents` ask is one-shot per hash instead of a
             # request on every poll. Persisted because a restart must not re-ask a
@@ -152,8 +168,9 @@ class SQLiteAgentStore:
                                    remote_config_error, last_sequence_num, pending_command,
                                    command_delivered_at, uid_reissued_from,
                                    uid_reissue_reason, last_requested_components_hash,
-                                   components_request_ignored)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                   components_request_ignored, custom_capabilities,
+                                   pending_custom_message, custom_message_delivered_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(agent_id) DO UPDATE SET
                     last_heartbeat=excluded.last_heartbeat,
                     healthy=excluded.healthy,
@@ -174,7 +191,10 @@ class SQLiteAgentStore:
                     uid_reissued_from=excluded.uid_reissued_from,
                     uid_reissue_reason=excluded.uid_reissue_reason,
                     last_requested_components_hash=excluded.last_requested_components_hash,
-                    components_request_ignored=excluded.components_request_ignored
+                    components_request_ignored=excluded.components_request_ignored,
+                    custom_capabilities=excluded.custom_capabilities,
+                    pending_custom_message=excluded.pending_custom_message,
+                    custom_message_delivered_at=excluded.custom_message_delivered_at
                 WHERE excluded.updated_at > agents.updated_at
             """, self._state_to_row(state))
 
@@ -207,6 +227,11 @@ class SQLiteAgentStore:
             state.uid_reissue_reason,
             state.last_requested_components_hash,
             state.components_request_ignored,
+            json.dumps(state.custom_capabilities or []),
+            json.dumps(state.pending_custom_message)
+            if state.pending_custom_message
+            else None,
+            state.custom_message_delivered_at,
         )
 
     @staticmethod
@@ -263,6 +288,15 @@ class SQLiteAgentStore:
             ),
             components_request_ignored=(
                 _optional_column(row, "components_request_ignored") or 0
+            ),
+            custom_capabilities=json.loads(
+                _optional_column(row, "custom_capabilities") or "[]"
+            ),
+            pending_custom_message=json.loads(
+                _optional_column(row, "pending_custom_message") or "null"
+            ),
+            custom_message_delivered_at=_optional_column(
+                row, "custom_message_delivered_at"
             ),
             sealed_effective_config=sealed if config_error else None,
             config_error=config_error,
@@ -2681,6 +2715,15 @@ class AgentState:
     # crash loop.
     pending_command: Optional[Dict[str, Any]] = None
     command_delivered_at: Optional[str] = None
+    # #85: the agent's `CustomCapabilities.capabilities`, replaced wholesale on every
+    # report (the spec's message carries the whole list, so appending would resurrect
+    # capabilities the agent has dropped).
+    custom_capabilities: List[str] = field(default_factory=list)
+    # #85: a custom message waiting to ride the agent's next poll. Persisted like
+    # `pending_command` (a message lost on restart is a silent no-op) and cleared the
+    # moment it is delivered, so it is sent exactly once.
+    pending_custom_message: Optional[Dict[str, Any]] = None
+    custom_message_delivered_at: Optional[str] = None
     # #98: the sealed body this row was loaded from, kept only when it could not be
     # opened with the keys this process has (see SQLiteAgentStore._sealed_...).
     sealed_effective_config: Optional[str] = field(default=None, repr=False)
@@ -2989,6 +3032,11 @@ class AgentState:
             # fields means no command was ever queued.
             "pending_command": self.pending_command,
             "command_delivered_at": self.command_delivered_at,
+            # #85: "what does this collector support beyond the spec, and is a custom
+            # message queued for it?" belongs in the agent view, not only in a log.
+            "custom_capabilities": list(self.custom_capabilities or []),
+            "pending_custom_message": self.pending_custom_message,
+            "custom_message_delivered_at": self.custom_message_delivered_at,
             # #75: `None` for every agent whose uid was never re-issued; otherwise the
             # uid the agent presented and the signal that convicted it.
             "uid_reissued_from": self.uid_reissued_from,

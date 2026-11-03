@@ -126,6 +126,7 @@ opampctl agents compliance <agent-id>
 | Undo a rollout, staged (approver) | `config rollout rollback ro-…` | — | `POST /config/rollouts/{id}/rollback` |
 | Re-run validation for a proposal (read-only) | `config revalidate prop-…` | — | `POST /config/revisions/{id}/validate` |
 | Restart an agent (operator, needs the capability) | `agents config restart <id>` | — | `POST /agent/{id}/restart` |
+| Send a custom message (operator, needs the capability) | `agents custom send <id> -c io.opentelemetry.pause -t pause` | — | `POST /agent/{id}/custom-message` |
 | Fleet push (admin, confirmed) | `config apply --file f.yaml --attr env=prod --confirm` | — | `POST /config/apply` |
 | Re-encrypt stored bodies | `config rotate-key --db data/opamp.db` | — | — |
 | Offline (no server) | `--db data/opamp.db …` | — | — |
@@ -340,6 +341,32 @@ opampctl --password "$ADMIN_PASSWORD" config rollout rollback ro-… # undo, sta
   skipped with a log line, never silently "restarted".
 - **MCP can read rollouts, never create, abort or roll back one** (`get_config_rollout`,
   `list_config_rollouts`). Creating a rollout is an approval (D9).
+
+### Custom capabilities and messages (#85)
+
+The spec's extension namespace. The agent advertises reverse-FQDN capabilities
+(`GET /agent/{id}` → `custom_capabilities`); the server can send a `CustomMessage` for
+one of them. **The payload contract belongs to the capability** — the server carries
+`data` through untouched and never interprets or stores it, so read the capability's
+own documentation before sending anything.
+
+```bash
+opampctl agents show <id> | jq '.custom_capabilities'
+opampctl --password "$ADMIN_PASSWORD" agents custom send <id> \
+    --capability io.opentelemetry.pause --type pause          # empty payload is valid
+opampctl --password "$ADMIN_PASSWORD" agents custom send <id> \
+    --capability io.opentelemetry.pause --type pause --data-file payload.json
+```
+
+- **Delivered exactly once**, on the next poll. The queue is persisted (a message lost
+  on restart would be a silent no-op) and cleared before the reply is serialised.
+- **Refused with 400** when the agent did not advertise the capability; the response
+  lists `supported_capabilities`. Do not retry with a made-up name — the agent is
+  entitled to ignore it.
+- **`--data`/`--data-file` is base64 on the wire** and opaque to the server. Empty is
+  valid: for some capabilities the `type` is the whole message.
+- The config offer waits one poll while a custom message is delivered, so one reply
+  carries one server-initiated action.
 
 ### Collector groups — named selectors (#111)
 

@@ -44,6 +44,7 @@ ROUTE_TO_CLIENT = {
     ("POST", "/agent/{agent_id}/config/deliver"): "deliver_agent_config",
     ("POST", "/agent/{agent_id}/config/rollback"): "rollback_agent_config",
     ("POST", "/agent/{agent_id}/restart"): "restart_agent",
+    ("POST", "/agent/{agent_id}/custom-message"): "send_custom_message",
     ("POST", "/config/validate"): "validate_config",
     ("POST", "/config/apply"): "apply_agent_config",
     ("GET", "/agent/{agent_id}/metrics"): "get_agent_metrics",
@@ -100,6 +101,7 @@ CLI_COMMANDS = {
     "config rollout abort": ("config", "rollout", "abort"),
     "config rollout rollback": ("config", "rollout", "rollback"),
     "agents config restart": ("agents", "config", "restart"),
+    "agents custom send": ("agents", "custom", "send"),
     "agents config withdraw": ("agents", "config", "withdraw"),
     "agents config deliver": ("agents", "config", "deliver"),
     "groups list": ("groups", "list"),
@@ -137,6 +139,7 @@ MCP_FORBIDDEN_TOOLS = {
     "restart_agent",
     "deliver_agent_config",
     "set_agent_config",
+    "send_custom_message",
 }
 
 

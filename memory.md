@@ -420,3 +420,44 @@
   escape hatch): group create → preview → propose → approve → `group_definition_changed`
   after an edit → shrink/empty refusal → archive blocked/unblocked. Suite: **1332
   passed** (was 1304; +19 groups, +4 CLI, +2 MCP, +3 UI).
+
+## #85 — custom capabilities and custom messages, 2026-11-03
+
+- **The server is a transport, not a feature layer.** Upstream marks both messages
+  *Development*, so the only honest implementation is: validate the capability against
+  the agent's advertised list, carry `data` through byte-for-byte, and never interpret,
+  store or audit the payload. Inventing a payload shape for `io.opentelemetry.pause`
+  (the issue's suggested showcase) would have been a guess about a third-party
+  contract — the docs instead state that the contract belongs to the capability, and
+  `--data-file` exists for callers that have one.
+- **Capabilities are replaced, never appended** (`note_capabilities` returns the new
+  list and joins the one batched write per message, #109). Appending would keep
+  offering capabilities the agent has dropped — the spec's message is the whole list.
+  Empty entries are dropped: an empty capability would match any message with an empty
+  `capability`, which is not a namespace.
+- **Queue semantics are #84's, deliberately:** `pending_custom_message` is persisted
+  (a message lost on restart is a silent no-op), and `take()` clears it *before* the
+  reply is serialised (a re-delivered pause is not a pause). The one difference is
+  that `custom_message` is a normal field, so it *could* ride with `remote_config`;
+  it does not — the config offer is cleared for that poll and re-made next time, so a
+  reply carries one server-initiated action and "did the pause land?" stays
+  attributable.
+- **400, not a silent drop, for an unadvertised capability**, with
+  `supported_capabilities` in the detail: the agent is entitled to ignore a message
+  for a capability it did not advertise, and "nothing happened" is indistinguishable
+  from a bug. Also 422 (missing type / bad base64), 413 (>64 KiB) and 404
+  (`OPAMP_CUSTOM_MESSAGES_ENABLED=false`) — `extra="forbid"` on the body so a mistyped
+  `payload` is a 422 rather than a no-op.
+- **Inbound** `custom_message` is logged (capability, type, byte count) and counted,
+  never stored: a column of uninterpreted blobs is how a fleet's data ends up in the
+  admin database by accident. The audit row for an outbound message carries the
+  capability and type, never the payload.
+- Layers: `POST /agent/{id}/custom-message` (operator, audited
+  `agent.custom_message`), `opamp_client.send_custom_message`, `opampctl agents custom
+  send` (`--data` / `--data-file`), and deliberately **no MCP tool** — it is an
+  imperative to a live collector, so it is in `MCP_FORBIDDEN_TOOLS`. UI: the agent
+  detail page lists `custom_capabilities` and shows the queued/delivered message.
+- `docs/spec-conformance.md` flipped the §Custom messages row from "not implemented" to
+  covered and gained one thin conformance case; the forward-compatibility case still
+  covers #82/#83 and now also asserts the understood parts are stored.
+- Suite: **1350 passed** (+17 `tests/test_custom_messages.py`, +1 conformance).

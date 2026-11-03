@@ -857,6 +857,32 @@ class OpampClient:
             body["reason"] = reason
         return self._post(f"/agent/{agent_id}/restart", json=body)
 
+    def send_custom_message(
+        self,
+        agent_id: str,
+        capability: str,
+        type: str,
+        data: str = "",
+    ) -> Dict[str, Any]:
+        """``POST /agent/{id}/custom-message`` — the spec's extension mechanism (#85).
+
+        ``capability`` is a reverse FQDN the agent advertised in
+        ``custom_capabilities`` (see :meth:`get_agent`), ``type`` is scoped to it and
+        ``data`` is **base64** opaque bytes: the payload contract belongs to the
+        capability, and the server neither interprets nor rewrites it.
+
+        Refused with **400** when the agent does not advertise the capability — the
+        detail lists ``supported_capabilities``. Delivered **exactly once**, on the
+        agent's next message; the config offer waits one poll so a reply carries one
+        server-initiated action.
+        """
+        body: Dict[str, Any] = {
+            "capability": capability,
+            "type": type,
+            "data": data or "",
+        }
+        return self._post(f"/agent/{agent_id}/custom-message", json=body)
+
     def rollback_agent_config(
         self, agent_id: str, note: Optional[str] = None
     ) -> Dict[str, Any]:

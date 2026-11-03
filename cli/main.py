@@ -70,6 +70,9 @@ audit_app = typer.Typer(
 updates_app = typer.Typer(
     help="Server update checks (#46)", no_args_is_help=True
 )
+custom_app = typer.Typer(
+    help="Custom capabilities and messages (#85)", no_args_is_help=True
+)
 groups_app = typer.Typer(
     help="Collector groups: named selectors for config push (#111)", no_args_is_help=True
 )
@@ -77,6 +80,7 @@ groups_app = typer.Typer(
 app.add_typer(agents_app, name="agents", help="Agent inspection commands")
 agents_app.add_typer(token_app, name="token", help="Agent credentials (admin)")
 agents_app.add_typer(agent_config_app, name="config", help="Remote config for one agent")
+agents_app.add_typer(custom_app, name="custom", help="Custom messages (#85)")
 app.add_typer(reports_app, name="reports", help="Markdown fleet reports")
 app.add_typer(compliance_app, name="compliance", help="OPA policy compliance")
 app.add_typer(alerts_app, name="alerts", help="Alert configuration (admin)")
@@ -1065,6 +1069,47 @@ def agent_restart(
     not set `accepts_restart_command: true` in its `opamp` extension.
     """
     _run(lambda oc: oc.restart_agent(agent_id, reason=reason))
+
+
+@custom_app.command("send")
+def agent_custom_send(
+    agent_id: str = typer.Argument(..., help="Agent id (hex instance_uid)"),
+    capability: str = typer.Option(..., "--capability", "-c",
+                                   help="Reverse FQDN the agent advertised"),
+    type: str = typer.Option(..., "--type", "-t",
+                             help="Capability-scoped message type"),
+    data: Optional[str] = typer.Option(
+        None, "--data", "-d",
+        help="Base64 payload; the contract belongs to the capability",
+    ),
+    data_file: Optional[Path] = typer.Option(
+        None, "--data-file", exists=True, dir_okay=False,
+        help="Read the raw payload from a file (base64-encoded before sending)",
+    ),
+) -> None:
+    """Send a custom message to one agent on its next poll (operator).
+
+    This is the spec's extension mechanism: `--capability` must be one of the agent's
+    advertised `custom_capabilities` (`opampctl agents show <id>` prints them), and
+    `--type` is scoped to that capability. `--data`/`--data-file` is opaque to the
+    server — it is passed through byte-for-byte in base64 — so the payload contract is
+    the capability's, not ours.
+
+    Delivered **exactly once**, on the agent's next poll; refused with 400 listing the
+    capabilities the agent does support when the capability is not advertised.
+    """
+    import base64 as _b64
+
+    if data_file is not None and data is not None:
+        _fail("provide --data or --data-file, not both")
+    payload = data or ""
+    if data_file is not None:
+        payload = _b64.b64encode(data_file.read_bytes()).decode()
+    _run(
+        lambda oc: oc.send_custom_message(
+            agent_id, capability=capability, type=type, data=payload
+        )
+    )
 
 
 @config_app.command("rotate-key")

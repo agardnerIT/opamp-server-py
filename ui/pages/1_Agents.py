@@ -181,6 +181,27 @@ if agent_id_param:
                 st.markdown(f"{tag.get('icon', '•')} {tag.get('label', 'Unknown')}")
         else:
             st.caption("No capabilities")
+        # #85: the spec's extension namespace, straight from the agent. A capability
+        # the agent does not advertise cannot be messaged at all (the API answers 400),
+        # so showing the list is what makes the send form usable.
+        custom = detailed_agent.get("custom_capabilities") or []
+        st.markdown("**Custom capabilities**")
+        if custom:
+            for capability in custom:
+                st.code(capability, language=None)
+        else:
+            st.caption("None advertised")
+        pending = detailed_agent.get("pending_custom_message")
+        if pending:
+            st.caption(
+                f"Queued: `{pending.get('capability')}` / `{pending.get('type')}` "
+                f"(waiting for the agent's next poll)"
+            )
+        elif detailed_agent.get("custom_message_delivered_at"):
+            st.caption(
+                "Last custom message delivered "
+                f"{format_local_time(detailed_agent.get('custom_message_delivered_at'))}"
+            )
 
     with col4:
         compliance = fleet_agent.get("compliance") if fleet_agent else None

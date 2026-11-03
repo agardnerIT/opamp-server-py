@@ -614,6 +614,9 @@ AUDITED_ROUTES = {
     # #84: a restart is a privileged action against a live machine; the queue write
     # happens after the row, and a refusal records `result="error"`.
     ("POST", "/agent/{agent_id}/restart"): "agent.restart",
+    # #85: a custom message is an imperative to a live collector. The audit row names
+    # the capability and type — never the payload, which is capability-defined binary.
+    ("POST", "/agent/{agent_id}/custom-message"): "agent.custom_message",
     # #111: groups change the blast radius of every future push that names them, so
     # every mutation is recorded — `group.update` carries the definition diff, because
     # "changed" is not something an auditor can act on.

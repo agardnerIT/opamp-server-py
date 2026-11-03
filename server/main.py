@@ -72,6 +72,7 @@ from server import (
     config_control,
     config_validation,
     crypto,
+    custom_messages,
     groups,
     posture,
     protocol,
@@ -370,6 +371,14 @@ PROM_GROUP_MEMBERS = prom_client.Gauge(
     "Live membership of a collector group, resolved at scrape time",
     ["group"],
 )
+# #85: custom messages, by direction. `queued` is an operator asking for something
+# the agent may or may not honour; `delivered` is the server keeping its side.
+PROM_CUSTOM_MESSAGES = prom_client.Counter(
+    "opamp_custom_messages_total",
+    "Custom messages queued for or delivered to agents, by direction",
+    ["direction"],
+)
+
 PROM_GROUP_MEMBERSHIP_CHANGES = prom_client.Counter(
     "opamp_group_membership_changes_total",
     "Group resolutions recorded, by reason (preview, propose, push, approve)",
@@ -1291,6 +1300,23 @@ def _apply_status_report(
         updates['package_statuses'] = agent_dict['packageStatuses']
         PROM_MESSAGES_RECEIVED.labels(message_type="package_status").inc()
 
+    # #85: the whole list, replaced on every report (the spec's message carries all of
+    # it), through the same batched write as every other field group (#109).
+    if 'customCapabilities' in agent_dict:
+        capabilities = custom_messages.note_capabilities(
+            agent_id, agent_dict['customCapabilities'] or {}
+        )
+        if capabilities is not None:
+            updates['custom_capabilities'] = capabilities
+        PROM_MESSAGES_RECEIVED.labels(message_type="custom_capabilities").inc()
+
+    # #85: an agent->server custom message. Logged, never interpreted or stored: the
+    # payload is capability-defined binary and a column of blobs is how a fleet's data
+    # ends up in the admin database by accident.
+    if 'customMessage' in agent_dict:
+        custom_messages.note_inbound(agent_id, agent_dict['customMessage'] or {})
+        PROM_MESSAGES_RECEIVED.labels(message_type="custom_message").inc()
+
     if 'remoteConfigStatus' in agent_dict:
         status = agent_dict['remoteConfigStatus'] or {}
         updates['remote_config_status'] = status.get('status', 'UNSET')
@@ -1719,6 +1745,25 @@ def _apply_agent_message(
                     command_response.SerializeToString(),
                     instance_uid=effective_uid,
                     disconnected=False,
+                )
+
+        # #85: a queued custom message rides this reply, and the config offer is
+        # dropped for this poll so one reply carries one server-initiated action —
+        # the same attribution rule as #84. The offer is simply re-made next poll.
+        if not disconnected:
+            custom = custom_messages.take(agent_id)
+            if custom is not None:
+                if offered:
+                    response.ClearField("remote_config")
+                    offered = False
+                response.custom_message.CopyFrom(custom)
+                PROM_CUSTOM_MESSAGES.labels(direction="delivered").inc()
+                tracing.set_span_attributes(
+                    sp,
+                    **{
+                        "reply.custom_message": custom.type,
+                        "reply.remote_config_offered": False,
+                    },
                 )
 
         # Last line of defence for #81/#102: nothing may put remote_config on the
@@ -2760,6 +2805,21 @@ class RestartRequest(BaseModel):
     """Body for `POST /agent/{id}/restart` (#84)."""
 
     reason: Optional[str] = None
+
+
+class CustomMessageRequest(BaseModel):
+    """Body for `POST /agent/{id}/custom-message` (#85).
+
+    `data` is **base64** because JSON cannot carry bytes and the wire field is
+    `bytes`. The server never interprets it: the payload contract belongs to the
+    capability, and guessing would corrupt a third-party extension.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    capability: str = Field(..., description="Reverse FQDN the agent advertised")
+    type: str = Field(..., description="Capability-scoped message type")
+    data: str = Field("", description="Base64 payload (empty is valid)")
 
 
 class RolloutRequest(BaseModel):
@@ -4318,6 +4378,90 @@ def restart_agent(
                 "delivered on the agent's next message; a reply carrying a command "
                 "carries nothing else"
             ),
+        },
+    }
+
+@app.post(
+    "/agent/{agent_id}/custom-message",
+    tags=["agents"],
+    summary="Send a custom message to one agent (operator)",
+)
+def send_custom_message(
+    agent_id: str,
+    body: CustomMessageRequest,
+    request: Request,
+    _audit=Depends(require_audit("agent.custom_message")),
+):
+    """Queue a `ServerToAgent.custom_message` for the agent's next reply. Requires `operator`.
+
+    This is the spec's extension mechanism (#85): a capability is a reverse FQDN the
+    agent advertises in `custom_capabilities`, `type` is scoped to that capability, and
+    `data` is **opaque bytes** (base64 here, because JSON). The server does not
+    interpret or rewrite the payload — the contract belongs to the capability — so
+    this is a validated, audited transport rather than a feature layer.
+
+    Refused with **400** when the agent does not advertise `capability`; the detail
+    lists `supported_capabilities`, because an unadvertised message is one the agent
+    is entitled to ignore, and "it did nothing" is indistinguishable from a bug.
+    **422** for a missing capability/type or non-base64 `data`, **413** above 64 KiB,
+    **404** for an unknown agent or when `OPAMP_CUSTOM_MESSAGES_ENABLED=false`.
+
+    **HTTP has no server push**, so the message rides the next poll and is delivered
+    **exactly once** (the queue is cleared before the reply is serialised — a
+    re-delivered pause is not a pause). The reply's config offer waits one poll so a
+    single reply carries one server-initiated action, and the agent view reports
+    `pending_custom_message` / `custom_message_delivered_at`.
+
+    Audited as `agent.custom_message` with the capability and type — never the payload.
+    """
+    principal = require_roles(request, ROLE_OPERATOR)
+    try:
+        agent_id = remote_config.normalize_agent_id(agent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    try:
+        record = custom_messages.queue(
+            agent_id,
+            capability=body.capability,
+            type=body.type,
+            data=body.data,
+            principal=principal,
+        )
+    except custom_messages.CustomMessageError as exc:
+        audit_action(
+            principal,
+            "agent.custom_message",
+            target_kind="agent",
+            target_id=agent_id,
+            capability=body.capability,
+            type=body.type,
+            error=str(exc.detail),
+            result="error",
+        )
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+    audit_action(
+        principal,
+        "agent.custom_message",
+        target_kind="agent",
+        target_id=agent_id,
+        capability=record["capability"],
+        type=record["type"],
+        bytes=len(body.data or ""),
+    )
+    PROM_CUSTOM_MESSAGES.labels(direction="queued").inc()
+    return {
+        "agent_id": agent_id,
+        "queued": True,
+        "custom_message": {
+            key: record[key] for key in ("capability", "type", "queued_at", "queued_by")
+        },
+        "supported_capabilities": custom_messages.supported(agent_id),
+        "delivery": {
+            "state": "queued",
+            "channel": "reply",
+            "detail": "delivered once on the agent's next message",
         },
     }
 

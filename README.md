@@ -383,7 +383,7 @@ Transports: **HTTP** (poll/reply) and **WebSocket** (`OPAMP_WS_ENABLED`, upgrade
 | Agent | `ReportsPackageStatuses` | ⚠️ stored and displayed, not acted on |
 | Agent | `AcceptsRemoteConfig` | ✅ required before a config is offered (`remote_config.decision_for`) |
 | Agent | `AcceptsRestartCommand` | ✅ [#84](https://github.com/agardnerIT/opamp-server-py/issues/84) — `POST /agent/{id}/restart`; 409 without the bit |
-| Agent | custom capabilities / messages | ❌ [#85](https://github.com/agardnerIT/opamp-server-py/issues/85) |
+| Agent | custom capabilities / messages | ✅ [#85](https://github.com/agardnerIT/opamp-server-py/issues/85) — list stored and shown; `POST /agent/{id}/custom-message` delivers one, exactly once |
 
 The classification lives in `server/remote_config.py`
 (`ALWAYS_ADVERTISED` / `CONDITIONAL` / `UNIMPLEMENTED` / `RESERVED`), and
@@ -853,6 +853,35 @@ Lifecycle: `proposed → active → superseded | rolled_back | poisoned`, plus
 - **Drift** is visible per agent (`GET /agent/{id}/config` → `drift` with the
   missing YAML paths) and fires **one** `config_drift` alert per (agent, revision),
   never one per poll.
+
+### Custom capabilities and messages (#85)
+
+Some collector features never make it into the core spec; OpAMP reserves a
+reverse-FQDN namespace for them (`CustomCapabilities` / `CustomMessage`, both marked
+*Development* upstream). The agent advertises what it supports, and the server can send
+a message for one of those capabilities:
+
+```bash
+opampctl agents show <id> | jq '.custom_capabilities'      # what this agent supports
+opampctl --password "$ADMIN_PASSWORD" agents custom send <id> \
+    --capability io.opentelemetry.pause --type pause       # empty payload is valid
+```
+
+The **payload contract belongs to the capability**. The server validates the
+capability against the agent's advertised list, carries `data` through byte-for-byte
+(base64 in the API, bytes on the wire) and never interprets, stores or audits the
+payload — a generic transport is the only honest implementation of an opaque
+capability, and guessing at a third-party payload would corrupt it. Four properties
+are enforced and tested:
+
+- the capability list is **replaced** on every report, never appended (the spec's
+  message carries the whole list);
+- a message for an **unadvertised** capability is a 400 that lists what the agent does
+  support — the agent is entitled to ignore it, and "nothing happened" reads as a bug;
+- delivery is **exactly once** (the queue is persisted, so a restart does not lose it,
+  and cleared *before* the reply is serialised, so it is not repeated), and the config
+  offer waits one poll because a reply carries one server-initiated action;
+- `OPAMP_CUSTOM_MESSAGES_ENABLED=false` removes the surface entirely.
 
 ### Named collector groups (#111)
 
@@ -1497,6 +1526,7 @@ The UI signs in the same way the CLI does — `POST /auth/session` — and then 
 | DELETE | `/agent/{id}/config` | approver | Withdraw by pushing an **empty** config map (agent falls back to its local config). Delivered once |
 | POST | `/agent/{id}/config/deliver` | operator | Deliver the active revision over the agent's live WebSocket now. Idempotent: always 200 with `delivery.state` = `delivered` \| `queued` \| `unchanged` (+ `reason`). Moves no pointer, creates no revision, so it needs no approval. Audited as `config.deliver`; a refusal on principal grounds adds a second row with `result: "error"` |
 | POST | `/agent/{id}/config/rollback` | approver | Return to the previous revision as a **new** revision with `parent_revision_id` set. 409 when there is nothing to roll back to |
+| POST | `/agent/{id}/custom-message` | operator | Send a `ServerToAgent.custom_message` (spec §Custom Messages): `{"capability", "type", "data"}` with `data` base64. 400 listing `supported_capabilities` when the agent did not advertise the capability, 422 for bad base64, 413 above 64 KiB, 404 when `OPAMP_CUSTOM_MESSAGES_ENABLED=false`. Delivered **exactly once** on the next reply |
 | POST | `/config/apply` | admin | Push one config to many agents: `{"config_map", "agents": [...] \| "filter": {...} \| "group": "prod-emea", "confirm": true}`. No selector is a 400 — never "all agents". A group target obeys the same guards as a proposal (`use_stored_resolution`, `confirm_scope_change`) |
 | POST | `/config/revisions` | operator | **Propose** a revision — validates and drafts it, delivers nothing: `{"config_map", "scope": {"agent_id" \| "agents" \| "filter" \| "group", "include_future", "use_stored_resolution"}, "confirm_scope_change", "note"}`. Returns `proposal_id`, per-agent revisions and the full verdict. 422 with every structured error |
 | GET | `/groups` | viewer | Saved selectors with a **live** member count and `last_resolution`. Membership is resolved on read, never stored |

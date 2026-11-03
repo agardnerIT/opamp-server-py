@@ -375,6 +375,30 @@ def test_a_full_component_list_is_accepted_without_an_ask(opamp):
     assert receiver["used"] is True
 
 
+# --- §Custom Messages -------------------------------------------------------
+
+
+def test_custom_capabilities_are_stored_and_a_message_is_answered(opamp):
+    """§Custom Messages: capabilities are data, and a legal message is never dropped.
+
+    The server stores the agent's whole `custom_capabilities` list (replaced, never
+    appended) and accepts an inbound `custom_message` without interpreting it — the
+    payload contract belongs to the capability, and upstream marks both messages
+    *Development*, so guessing at a shape would be the one unrecoverable move.
+
+    Detail: `tests/test_custom_messages.py` (delivery, refusals, exactly-once).
+    """
+    uid = spec.uid("custom")
+    opamp.expect(spec.first_report(uid, sequence_num=1))
+
+    spec_custom = spec.unsupported_optional_message(uid, sequence_num=2)
+    reply = opamp.expect(spec_custom)
+
+    assert not reply.HasField("error_response")
+    agent = opamp.agent(uid.hex())
+    assert agent["custom_capabilities"] == ["conformance.example"]
+
+
 # --- §Agent Disconnect ------------------------------------------------------
 
 
@@ -422,10 +446,10 @@ def test_the_reply_advertises_only_classified_capabilities(opamp):
 def test_a_legal_message_with_unimplemented_shapes_does_not_break_the_reply(opamp):
     """§Ensuring Interoperability: a legal message is never rejected for being new.
 
-    `ConnectionSettingsRequest` (#83), package statuses (#82) and custom messages (#85)
-    are not implemented here yet. The server must still accept the message, store what
-    it understands and reply normally — a client must never be punished for using a
-    part of the spec this server has not got to.
+    `ConnectionSettingsRequest` (#83) and package statuses (#82) are not implemented
+    here yet. The server must still accept the message, store what it understands
+    (package statuses, custom capabilities) and reply normally — a client must never be
+    punished for using a part of the spec this server has not got to.
 
     Detail: `tests/test_proto_sync.py` (the wire schema itself).
     """

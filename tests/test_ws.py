@@ -3,13 +3,10 @@
 import asyncio
 
 import pytest
-from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from proto import opamp_pb2
 from server.framing import decode_message, encode_message
-from server.main import app
-from server.state import AGENT_REGISTRY
 from tests.uids import uid
 from server.ws import (
     CLOSE_MESSAGE_TOO_BIG,
@@ -43,20 +40,6 @@ def recv(ws) -> opamp_pb2.ServerToAgent:
     response = opamp_pb2.ServerToAgent()
     response.ParseFromString(decode_message(ws.receive_bytes()))
     return response
-
-
-@pytest.fixture
-def client():
-    REGISTRY.reset()
-    yield TestClient(app)
-    REGISTRY.reset()
-    for agent_id in list(AGENT_REGISTRY._agents):
-        AGENT_REGISTRY.remove(agent_id)
-
-
-@pytest.fixture
-def ws_on(monkeypatch):
-    monkeypatch.setenv("OPAMP_WS_ENABLED", "true")
 
 
 class TestConnectionRegistry:

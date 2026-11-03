@@ -12,7 +12,6 @@ import base64
 from datetime import timedelta
 
 import pytest
-from fastapi.testclient import TestClient
 
 from proto import opamp_pb2
 from server import (
@@ -25,11 +24,10 @@ from server import (
     rollout,
 )
 from tests.conformance.harness import handle_message as reply
-from server.main import app
 from server.state import AGENT_REGISTRY, SQLiteCredentialStore, SQLiteRolloutStore, utcnow
 from server.ws import REGISTRY as WS_REGISTRY
+from tests.support import ADMIN, admin_headers
 
-ADMIN = "admin-pw-1234567890"
 
 CONFIG = {
     "": {
@@ -78,11 +76,6 @@ def uid_for(index: int) -> bytes:
 
 def agent_id_for(index: int) -> str:
     return uid_for(index).hex()
-
-
-def admin_headers() -> dict:
-    token = base64.b64encode(f":{ADMIN}".encode()).decode()
-    return {"Authorization": f"Basic {token}"}
 
 
 def agent_message(
@@ -176,11 +169,6 @@ def push_enabled(monkeypatch, tmp_path):
     for agent in list(AGENT_REGISTRY._agents.values()):
         AGENT_REGISTRY.remove(agent.agent_id)
     crypto.reset_key_cache()
-
-
-@pytest.fixture
-def client():
-    return TestClient(app)
 
 
 # ---------------------------------------------------------------- pure functions

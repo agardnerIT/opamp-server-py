@@ -16,14 +16,11 @@ import asyncio
 import gzip
 
 import pytest
-from fastapi.testclient import TestClient
 
 from proto import opamp_pb2
 from server.http_body import BodyTooLarge, read_body
-from server.main import app
 from server.state import AGENT_REGISTRY
 from tests.conformance.harness import opamp_send
-from server.ws import REGISTRY
 
 UID = bytes.fromhex("ab" * 16)
 
@@ -40,17 +37,6 @@ def message(total: int | None = None) -> opamp_pb2.AgentToServer:
         if len(msg.SerializeToString()) == total:
             return msg
     raise AssertionError(f"could not build a {total}-byte message")
-
-
-@pytest.fixture
-def client():
-    REGISTRY.reset()
-    for agent_id in list(AGENT_REGISTRY._agents):
-        AGENT_REGISTRY.remove(agent_id)
-    yield TestClient(app)
-    REGISTRY.reset()
-    for agent_id in list(AGENT_REGISTRY._agents):
-        AGENT_REGISTRY.remove(agent_id)
 
 
 @pytest.fixture(autouse=True)

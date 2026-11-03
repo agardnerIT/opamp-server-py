@@ -27,7 +27,6 @@ really in the pushed body before asserting it is absent from every surface.
 
 from __future__ import annotations
 
-import base64
 import json
 import sqlite3
 import time
@@ -55,9 +54,9 @@ from server.main import app
 from server.state import AGENT_REGISTRY, SQLiteCredentialStore
 from server.ws import CLOSE_POLICY_VIOLATION, REGISTRY as WS_REGISTRY
 from tests.fake_agent import FakeAgent
+from tests.support import ADMIN, admin_headers, basic
 
 FIXTURES = Path(__file__).parent / "fixtures" / "configs"
-ADMIN = "admin-pw-1234567890"
 SECRET = "s3cr3t-config-value"
 
 
@@ -74,15 +73,6 @@ CONFIG_V2 = config(fixture_body("valid.yaml").replace("limit_mib: 400", "limit_m
 
 
 # --------------------------------------------------------------------- fixtures
-
-
-def admin_headers() -> dict:
-    token = base64.b64encode(f":{ADMIN}".encode()).decode()
-    return {"Authorization": f"Basic {token}"}
-
-
-def basic(name: str, password: str = "pw-123456789") -> dict:
-    return {"Authorization": "Basic " + base64.b64encode(f"{name}:{password}".encode()).decode()}
 
 
 def make_principal(name: str, role: str, password: str = "pw-123456789") -> dict:
@@ -116,11 +106,6 @@ def secure_push(monkeypatch, tmp_path):
     for agent in list(AGENT_REGISTRY._agents.values()):
         AGENT_REGISTRY.remove(agent.agent_id)
     crypto.reset_key_cache()
-
-
-@pytest.fixture
-def client():
-    return TestClient(app)
 
 
 def new_agent(mode: str = "apply_ok", uid: bytes | None = None, **kwargs) -> FakeAgent:

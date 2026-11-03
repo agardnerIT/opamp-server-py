@@ -25,18 +25,23 @@ HTTP path is driven through `TestClient` in-process.
 from __future__ import annotations
 
 import pytest
-from fastapi.testclient import TestClient
 
 import server.main as server_main
 from proto import opamp_pb2
 from server import sequence
-from server.main import app
 from server.state import AGENT_REGISTRY, AgentState, SQLiteAgentStore
-from server.ws import REGISTRY as WS_REGISTRY
 from tests.conformance.harness import asks_for_full_state, opamp_send
 
 UID = bytes.fromhex("cd" * 16)
 AGENT_ID = UID.hex()
+
+
+@pytest.fixture(autouse=True)
+def fast_full_state(monkeypatch):
+    """Ask for full state on every gap: the rate limit is off unless a test sets it."""
+    monkeypatch.setenv("REPORT_FULL_STATE_MIN_INTERVAL_SECONDS", "0")
+    monkeypatch.delenv("OPAMP_CONFIG_PUSH_ENABLED", raising=False)
+    monkeypatch.delenv("OPAMP_AGENT_AUTH", raising=False)
 FULL_STATE = opamp_pb2.ServerToAgentFlags.ServerToAgentFlags_ReportFullState
 
 
@@ -47,22 +52,6 @@ def message(sequence_num: int = 0, healthy: bool = True) -> bytes:
     msg.capabilities = opamp_pb2.AgentCapabilities.AgentCapabilities_ReportsStatus
     msg.health.healthy = healthy
     return msg.SerializeToString()
-
-
-@pytest.fixture
-def client(monkeypatch):
-    WS_REGISTRY.reset()
-    for agent_id in list(AGENT_REGISTRY._agents):
-        AGENT_REGISTRY.remove(agent_id)
-    monkeypatch.delenv("OPAMP_CONFIG_PUSH_ENABLED", raising=False)
-    monkeypatch.delenv("OPAMP_AGENT_AUTH", raising=False)
-    # A rate limit of 0 keeps the gap tests about gaps; the limiter has its own
-    # tests below.
-    monkeypatch.setenv("REPORT_FULL_STATE_MIN_INTERVAL_SECONDS", "0")
-    yield TestClient(app)
-    WS_REGISTRY.reset()
-    for agent_id in list(AGENT_REGISTRY._agents):
-        AGENT_REGISTRY.remove(agent_id)
 
 
 # --- pure gap arithmetic ----------------------------------------------------

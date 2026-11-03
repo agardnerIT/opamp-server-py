@@ -54,11 +54,6 @@ def _reset(monkeypatch):
 
 
 @pytest.fixture
-def client():
-    return TestClient(app)
-
-
-@pytest.fixture
 def raw_client():
     """Client that returns 500s instead of raising, for fail-closed assertions."""
     return TestClient(app, raise_server_exceptions=False)

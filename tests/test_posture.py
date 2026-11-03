@@ -66,12 +66,6 @@ def _clean_env(monkeypatch):
     yield
 
 
-@pytest.fixture
-def client():
-    """The shared app object — no lifespan, so each test's env is what counts."""
-    yield TestClient(app)
-
-
 # --------------------------------------------------------------------------- posture
 
 

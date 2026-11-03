@@ -23,19 +23,13 @@ from fastapi.testclient import TestClient
 
 from proto import opamp_pb2
 from server import admin_auth, config_control, crypto, custom_messages
-from server.main import app
 from server.state import AGENT_REGISTRY
 from tests.conformance.harness import handle_message as reply
+from tests.support import ADMIN, admin_headers
 
-ADMIN = "admin-pw-1234567890"
 UID = bytes.fromhex("ab" * 16)
 AGENT_ID = "ab" * 16
 PAUSE = "io.opentelemetry.pause"
-
-
-def admin_headers() -> dict:
-    token = base64.b64encode(f":{ADMIN}".encode()).decode()
-    return {"Authorization": f"Basic {token}"}
 
 
 def agent_message(
@@ -88,11 +82,6 @@ def secure_posture(monkeypatch):
     yield
     config_control.reset_drift_alerts()
     crypto.reset_key_cache()
-
-
-@pytest.fixture
-def client():
-    return TestClient(app)
 
 
 @pytest.fixture

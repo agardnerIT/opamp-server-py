@@ -30,16 +30,14 @@ import threading
 
 import prometheus_client as prom_client
 import pytest
-from fastapi.testclient import TestClient
 
 from proto import opamp_pb2
 from server import admin_auth, agent_auth, crypto, remote_config, ws
 from server.framing import decode_message, encode_message
-from server.main import app
 from server.state import AGENT_REGISTRY, SQLiteCredentialStore
 from server.ws import REGISTRY, ProcessedMessage
+from tests.support import ADMIN, admin_headers, bearer
 
-ADMIN = "admin-pw-1234567890"
 UID = bytes.fromhex("ab" * 16)
 AGENT_ID = "ab" * 16
 OTHER_UID = bytes.fromhex("cd" * 16)
@@ -79,15 +77,6 @@ CONFIG_V2 = {
 
 
 # ------------------------------------------------------------------- helpers
-
-
-def admin_headers() -> dict:
-    token = base64.b64encode(f":{ADMIN}".encode()).decode()
-    return {"Authorization": f"Basic {token}"}
-
-
-def bearer(token: str) -> dict:
-    return {"Authorization": f"Bearer {token}"}
 
 
 def agent_message(
@@ -167,11 +156,6 @@ def push_enabled(monkeypatch, tmp_path):
     for agent in list(AGENT_REGISTRY._agents.values()):
         AGENT_REGISTRY.remove(agent.agent_id)
     crypto.reset_key_cache()
-
-
-@pytest.fixture
-def client():
-    return TestClient(app)
 
 
 @pytest.fixture

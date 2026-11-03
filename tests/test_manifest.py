@@ -5,9 +5,7 @@ import base64
 
 import pytest
 import yaml
-from fastapi.testclient import TestClient
 
-from server.main import app
 from server.state import AgentState, AGENT_REGISTRY
 from server.manifest import (
     generate_manifest,
@@ -89,13 +87,6 @@ def register_agent(agent_id, available_components=None, effective_config=None):
         ),
     )
     return agent_id
-
-
-@pytest.fixture
-def client():
-    yield TestClient(app)
-    for agent_id in list(AGENT_REGISTRY._agents.keys()):
-        AGENT_REGISTRY.remove(agent_id)
 
 
 # --- unit: generate_manifest --------------------------------------------------

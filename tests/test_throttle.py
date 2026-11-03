@@ -28,15 +28,12 @@ from datetime import datetime, timedelta, timezone
 
 import prometheus_client as prom_client
 import pytest
-from fastapi.testclient import TestClient
 from starlette.testclient import WebSocketDenialResponse
 
 from proto import opamp_pb2
 from server import throttle
 from server.framing import decode_message, encode_message
-from server.main import app
 from server.state import AGENT_REGISTRY, AgentState
-from server.ws import REGISTRY
 from tests.conformance.harness import opamp_send
 
 UID = bytes.fromhex("78" * 16)
@@ -74,17 +71,6 @@ def clean_throttle(monkeypatch):
     throttle.reset()
     yield
     throttle.reset()
-
-
-@pytest.fixture
-def client():
-    REGISTRY.reset()
-    for agent_id in list(AGENT_REGISTRY._agents):
-        AGENT_REGISTRY.remove(agent_id)
-    yield TestClient(app)
-    REGISTRY.reset()
-    for agent_id in list(AGENT_REGISTRY._agents):
-        AGENT_REGISTRY.remove(agent_id)
 
 
 @pytest.fixture

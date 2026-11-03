@@ -21,11 +21,9 @@ socket-free and fast.
 from __future__ import annotations
 
 import pytest
-from fastapi.testclient import TestClient
 
 from proto import opamp_pb2
 from server import framing
-from server.main import app
 from server.state import AGENT_REGISTRY
 from server.ws import OPAMP_WS_MESSAGES, REGISTRY
 from tests.conformance.harness import uid
@@ -34,6 +32,15 @@ from tests.ws_client import ws_session
 FULL_STATE = opamp_pb2.ServerToAgentFlags.ServerToAgentFlags_ReportFullState
 UID = uid("ws-lifecycle")
 AGENT_ID = UID.hex()
+
+
+@pytest.fixture(autouse=True)
+def ws_transport(monkeypatch):
+    """This suite is about the socket transport; the default agent posture applies."""
+    monkeypatch.setenv("OPAMP_WS_ENABLED", "true")
+    monkeypatch.delenv("OPAMP_AGENT_AUTH", raising=False)
+    monkeypatch.delenv("OPAMP_CONFIG_PUSH_ENABLED", raising=False)
+    monkeypatch.delenv("OPAMP_MAX_MESSAGE_BYTES", raising=False)
 
 
 def report(*, healthy: bool = True, sequence_num: int = 0) -> opamp_pb2.AgentToServer:
@@ -65,19 +72,6 @@ def heartbeat(sequence_num: int = 1) -> opamp_pb2.AgentToServer:
 
 def sent_metric(outcome: str) -> float:
     return OPAMP_WS_MESSAGES.labels(direction="sent", outcome=outcome)._value.get()
-
-
-@pytest.fixture
-def client(monkeypatch):
-    REGISTRY.reset()
-    monkeypatch.setenv("OPAMP_WS_ENABLED", "true")
-    monkeypatch.delenv("OPAMP_AGENT_AUTH", raising=False)
-    monkeypatch.delenv("OPAMP_CONFIG_PUSH_ENABLED", raising=False)
-    monkeypatch.delenv("OPAMP_MAX_MESSAGE_BYTES", raising=False)
-    yield TestClient(app)
-    REGISTRY.reset()
-    for agent_id in list(AGENT_REGISTRY._agents):
-        AGENT_REGISTRY.remove(agent_id)
 
 
 # --- reconnect --------------------------------------------------------------

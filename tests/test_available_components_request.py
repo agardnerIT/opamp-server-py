@@ -28,14 +28,11 @@ import base64
 import sqlite3
 
 import pytest
-from fastapi.testclient import TestClient
 from google.protobuf import json_format
 
 import server.main as server_main
 from proto import opamp_pb2
-from server.main import app
 from server.state import AGENT_REGISTRY, COMPONENTS_IGNORED_LOG_AT, SQLiteAgentStore
-from server.ws import REGISTRY as WS_REGISTRY
 from tests.conformance.harness import (
     asks_for_components,
     asks_for_full_state,
@@ -44,6 +41,13 @@ from tests.conformance.harness import (
 
 UID = bytes.fromhex("77" * 16)
 AGENT_ID = UID.hex()
+
+
+@pytest.fixture(autouse=True)
+def default_posture(monkeypatch):
+    """Push and agent auth off, whatever the developer's shell says."""
+    monkeypatch.delenv("OPAMP_CONFIG_PUSH_ENABLED", raising=False)
+    monkeypatch.delenv("OPAMP_AGENT_AUTH", raising=False)
 
 HASH_A = b"\xaa\x01"
 HASH_B = b"\xbb\x02"
@@ -92,19 +96,6 @@ def report(
     msg = opamp_pb2.AgentToServer()
     json_format.ParseDict(payload, msg)
     return msg.SerializeToString()
-
-
-@pytest.fixture
-def client(monkeypatch):
-    WS_REGISTRY.reset()
-    for agent_id in list(AGENT_REGISTRY._agents):
-        AGENT_REGISTRY.remove(agent_id)
-    monkeypatch.delenv("OPAMP_CONFIG_PUSH_ENABLED", raising=False)
-    monkeypatch.delenv("OPAMP_AGENT_AUTH", raising=False)
-    yield TestClient(app)
-    WS_REGISTRY.reset()
-    for agent_id in list(AGENT_REGISTRY._agents):
-        AGENT_REGISTRY.remove(agent_id)
 
 
 def metric(counter, **labels) -> float:

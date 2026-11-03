@@ -20,16 +20,21 @@ from __future__ import annotations
 import gzip
 
 import pytest
-from fastapi.testclient import TestClient
 
 from proto import opamp_pb2
-from server.main import GZIP_MIN_RESPONSE_BYTES, app
+from server.main import GZIP_MIN_RESPONSE_BYTES
 from server.state import AGENT_REGISTRY
-from server.ws import REGISTRY as WS_REGISTRY
 from tests.conformance.harness import opamp_send
 
 UID = bytes.fromhex("ef" * 16)
 AGENT_ID = UID.hex()
+
+
+@pytest.fixture(autouse=True)
+def default_posture(monkeypatch):
+    """Push and agent auth off: this suite is about framing, not posture."""
+    monkeypatch.delenv("OPAMP_CONFIG_PUSH_ENABLED", raising=False)
+    monkeypatch.delenv("OPAMP_AGENT_AUTH", raising=False)
 
 
 def status_message(healthy: bool = True, description: str = "compressed-agent") -> bytes:
@@ -41,19 +46,6 @@ def status_message(healthy: bool = True, description: str = "compressed-agent") 
     attribute.key = "service.name"
     attribute.value.string_value = description
     return msg.SerializeToString()
-
-
-@pytest.fixture
-def client(monkeypatch):
-    WS_REGISTRY.reset()
-    for agent_id in list(AGENT_REGISTRY._agents):
-        AGENT_REGISTRY.remove(agent_id)
-    monkeypatch.delenv("OPAMP_CONFIG_PUSH_ENABLED", raising=False)
-    monkeypatch.delenv("OPAMP_AGENT_AUTH", raising=False)
-    yield TestClient(app)
-    WS_REGISTRY.reset()
-    for agent_id in list(AGENT_REGISTRY._agents):
-        AGENT_REGISTRY.remove(agent_id)
 
 
 # --- request side -----------------------------------------------------------

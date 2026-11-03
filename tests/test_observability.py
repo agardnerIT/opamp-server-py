@@ -24,16 +24,15 @@ import json
 
 import prometheus_client as prom_client
 import pytest
-from fastapi.testclient import TestClient
 from loguru import logger
 
 from proto import opamp_pb2
 from server import posture, tracing
 from server import logging as server_logging
-from server.main import _handle_agent_message, app
+from server.main import _handle_agent_message
 from server.state import AGENT_REGISTRY
+from tests.support import ADMIN
 
-ADMIN = "admin-pw-1234567890"
 
 
 # --------------------------------------------------------------------- fixtures
@@ -92,11 +91,6 @@ def clean_registry():
     yield
     for agent in list(AGENT_REGISTRY._agents.values()):
         AGENT_REGISTRY.remove(agent.agent_id)
-
-
-@pytest.fixture
-def client():
-    return TestClient(app)
 
 
 def _json_lines(lines: list) -> list:

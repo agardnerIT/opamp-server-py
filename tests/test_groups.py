@@ -16,18 +16,16 @@ a guard only the control-plane module enforces is a guard a route can forget.
 
 from __future__ import annotations
 
-import base64
 import json
 
 import pytest
-from fastapi.testclient import TestClient
 
 from proto import anyvalue_pb2, opamp_pb2
 from server import admin_auth, config_control, crypto
-from server.main import _handle_agent_message, app
+from server.main import _handle_agent_message
 from server.state import COLLECTOR_GROUPS, SQLiteGroupStore
+from tests.support import ADMIN, admin_headers
 
-ADMIN = "admin-pw-1234567890"
 UID = bytes.fromhex("ab" * 16)
 AGENT_ID = "ab" * 16
 OTHER_UID = bytes.fromhex("cd" * 16)
@@ -62,11 +60,6 @@ CONFIG = {
         "content_type": "text/yaml",
     }
 }
-
-
-def admin_headers() -> dict:
-    token = base64.b64encode(f":{ADMIN}".encode()).decode()
-    return {"Authorization": f"Basic {token}"}
 
 
 def describe(uid: bytes, env: str = "prod", region: str = "emea") -> None:
@@ -120,11 +113,6 @@ def secure_posture(monkeypatch, tmp_path):
     yield
     config_control.reset_drift_alerts()
     crypto.reset_key_cache()
-
-
-@pytest.fixture
-def client():
-    return TestClient(app)
 
 
 # ------------------------------------------------------------- create and read

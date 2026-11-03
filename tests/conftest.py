@@ -1,4 +1,4 @@
-"""Shared test isolation.
+"""Shared test isolation and the fixtures every suite may request.
 
 Two globals are process-wide and default to the *repository's* `data/opamp.db`:
 the credential/principal/session/audit stores (#94, #95, #97) and the alert config
@@ -9,6 +9,11 @@ tests green) and writes test fixtures into that same file.
 
 So every test gets throwaway stores, and lockout state is reset between tests
 (it is in-memory by design, so it would otherwise leak across the whole session).
+
+The WebSocket registry is reset here for the same reason: it holds live connections,
+bindings and push accounting, none of which a test may inherit. Fourteen suites used
+to wrap `TestClient(app)` in their own reset boilerplate; one autouse reset is the
+same guarantee without fourteen copies to keep in sync.
 """
 
 from __future__ import annotations
@@ -16,8 +21,19 @@ from __future__ import annotations
 import copy
 
 import pytest
+from fastapi.testclient import TestClient
 
-from server import agent_auth, alerts, audit, auth, crypto, remote_config, rollout, updates
+from server import (
+    agent_auth,
+    alerts,
+    audit,
+    auth,
+    crypto,
+    remote_config,
+    rollout,
+    updates,
+)
+from server.main import app
 from server.state import (
     AGENT_REGISTRY,
     COLLECTOR_GROUPS,
@@ -30,8 +46,24 @@ from server.state import (
     SQLiteRolloutStore,
     SQLiteSessionStore,
 )
+from server.ws import REGISTRY as WS_REGISTRY
 
 DEFAULT_ALERT_CONFIG = copy.deepcopy(alerts.ALERT_CONFIG)
+
+
+@pytest.fixture
+def client():
+    """The shared app object, in-process (no lifespan, so the test's env is what counts).
+
+    Suites that need extra posture (a WebSocket-enabled server, a push-enabled one)
+    add their own autouse fixture rather than another copy of this.
+    """
+    return TestClient(app)
+
+
+@pytest.fixture
+def ws_on(monkeypatch):
+    monkeypatch.setenv("OPAMP_WS_ENABLED", "true")
 
 
 @pytest.fixture(autouse=True)
@@ -68,6 +100,8 @@ def isolated_global_stores(monkeypatch, tmp_path):
     monkeypatch.setattr(AGENT_REGISTRY, "_store", SQLiteAgentStore(tmp_path / "agents.db"))
     AGENT_REGISTRY._agents.clear()
     AGENT_REGISTRY._persisted_at.clear()
+    AGENT_REGISTRY._full_state_requested_at.clear()
+    WS_REGISTRY.reset()
     from server import main as server_main
 
     monkeypatch.setattr(
@@ -91,6 +125,8 @@ def isolated_global_stores(monkeypatch, tmp_path):
     yield
     AGENT_REGISTRY._agents.clear()
     AGENT_REGISTRY._persisted_at.clear()
+    AGENT_REGISTRY._full_state_requested_at.clear()
+    WS_REGISTRY.reset()
     server_main.AGENT_METRICS.clear()
     auth.reset_lockouts()
     audit.reset_circuit_breaker()

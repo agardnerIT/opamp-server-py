@@ -11,21 +11,27 @@ naming the suite that owns the detail.
 from __future__ import annotations
 
 import pytest
-from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from server import framing
-from server.main import app
 from server.state import AGENT_REGISTRY
 from server.ws import (
     CLOSE_MESSAGE_TOO_BIG,
     CLOSE_POLICY_VIOLATION,
     CLOSE_PROTOCOL_ERROR,
-    REGISTRY,
 )
 from tests.conformance import harness as spec
 from tests.conformance.harness import expect_reply, opamp_send
 from tests.ws_client import ws_session
+
+@pytest.fixture(autouse=True)
+def ws_transport(monkeypatch):
+    """Every case here speaks the socket transport, with the default agent posture."""
+    monkeypatch.setenv("OPAMP_WS_ENABLED", "true")
+    monkeypatch.delenv("OPAMP_AGENT_AUTH", raising=False)
+    monkeypatch.delenv("OPAMP_CONFIG_PUSH_ENABLED", raising=False)
+    monkeypatch.delenv("OPAMP_MAX_MESSAGE_BYTES", raising=False)
+
 
 #: The state a transport must not change. Volatile fields (timestamps, the cadence
 #: estimate) are excluded because they are about *when*, not *what*.
@@ -37,21 +43,6 @@ COMPARED_FIELDS = (
     "package_statuses",
     "remote_config_status",
 )
-
-
-@pytest.fixture
-def client(monkeypatch):
-    REGISTRY.reset()
-    for agent_id in list(AGENT_REGISTRY._agents):
-        AGENT_REGISTRY.remove(agent_id)
-    monkeypatch.setenv("OPAMP_WS_ENABLED", "true")
-    monkeypatch.delenv("OPAMP_AGENT_AUTH", raising=False)
-    monkeypatch.delenv("OPAMP_CONFIG_PUSH_ENABLED", raising=False)
-    monkeypatch.delenv("OPAMP_MAX_MESSAGE_BYTES", raising=False)
-    yield TestClient(app)
-    REGISTRY.reset()
-    for agent_id in list(AGENT_REGISTRY._agents):
-        AGENT_REGISTRY.remove(agent_id)
 
 
 def test_a_message_produces_the_same_state_over_either_transport(client):

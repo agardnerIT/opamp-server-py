@@ -16,23 +16,21 @@ Every acceptance criterion in the issue maps to a test here:
 
 from __future__ import annotations
 
-import base64
 import json
 import sqlite3
 from datetime import timedelta
 
 import pytest
-from fastapi.testclient import TestClient
 from loguru import logger
 
 from server import admin_auth, auth, crypto
 from server.audit import audit_event
-from server.main import app
 from server.state import (
     SQLitePrincipalStore,
     SQLiteSessionStore,
     utcnow,
 )
+from tests.support import basic, bearer
 
 LEGACY = "legacy-pw-1234567890"
 
@@ -57,11 +55,6 @@ def isolated(monkeypatch, tmp_path):
 
 
 @pytest.fixture
-def client():
-    return TestClient(app)
-
-
-@pytest.fixture
 def legacy(monkeypatch):
     """Only the shared password configured (what every existing deployment has)."""
     monkeypatch.setattr(admin_auth, "ADMIN_PASSWORD", LEGACY)
@@ -79,15 +72,6 @@ def admin_principal(client, legacy):
     )
     assert created.status_code == 201, created.text
     return created.json(), basic("root", "root-pw-123456")
-
-
-def basic(name: str, password: str) -> dict:
-    token = base64.b64encode(f"{name}:{password}".encode()).decode()
-    return {"Authorization": f"Basic {token}"}
-
-
-def bearer(token: str) -> dict:
-    return {"Authorization": f"Bearer {token}"}
 
 
 def make_principal(client, headers, name: str, role: str, password: str = "pw-123456789") -> dict:

@@ -13,13 +13,12 @@ Acceptance criteria pinned here:
 from __future__ import annotations
 
 import pytest
-from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from proto import opamp_pb2
 from server import agent_auth, protocol
 from server.framing import decode_message, encode_message
-from server.main import _handle_agent_message, app
+from server.main import _handle_agent_message
 from server.state import AGENT_REGISTRY
 from tests.conformance.harness import opamp_send, parse_reply
 from server.ws import CLOSE_PROTOCOL_ERROR, REGISTRY
@@ -56,26 +55,10 @@ def assert_bad_request(response, *, contains: str = "") -> opamp_pb2.ServerToAge
     return reply
 
 
-@pytest.fixture
-def client():
-    REGISTRY.reset()
-    for agent_id in list(AGENT_REGISTRY._agents):
-        AGENT_REGISTRY.remove(agent_id)
-    yield TestClient(app)
-    REGISTRY.reset()
-    for agent_id in list(AGENT_REGISTRY._agents):
-        AGENT_REGISTRY.remove(agent_id)
-
-
 @pytest.fixture(autouse=True)
 def open_agent_auth(monkeypatch):
     monkeypatch.delenv("OPAMP_AGENT_AUTH", raising=False)
     monkeypatch.delenv("OPAMP_CONFIG_PUSH_ENABLED", raising=False)
-
-
-@pytest.fixture
-def ws_on(monkeypatch):
-    monkeypatch.setenv("OPAMP_WS_ENABLED", "true")
 
 
 class TestBadRequest:

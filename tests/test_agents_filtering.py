@@ -6,9 +6,7 @@ exclusion, and 422 on invalid healthy values.
 """
 
 import pytest
-from fastapi.testclient import TestClient
 
-from server.main import app
 from server.state import AgentState, AGENT_REGISTRY
 
 
@@ -34,13 +32,6 @@ def make_agent(
         ),
     )
     return agent_id
-
-
-@pytest.fixture
-def client():
-    yield TestClient(app)
-    for agent_id in list(AGENT_REGISTRY._agents.keys()):
-        AGENT_REGISTRY.remove(agent_id)
 
 
 @pytest.fixture

@@ -1,15 +1,4 @@
-import pytest
-from fastapi.testclient import TestClient
-from server.main import app
-from server.state import AGENT_REGISTRY
 from tests.uids import uid
-
-
-@pytest.fixture
-def client():
-    yield TestClient(app)
-    for agent_id in list(AGENT_REGISTRY._agents.keys()):
-        AGENT_REGISTRY.remove(agent_id)
 
 
 class TestHealthEndpoints:

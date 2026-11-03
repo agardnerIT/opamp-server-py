@@ -22,14 +22,19 @@ import pytest
 from fastapi.testclient import TestClient
 
 from proto import opamp_pb2
-from server.main import app
-from server.state import AGENT_REGISTRY
-from server.ws import REGISTRY
 from tests.conformance import harness as spec
 from tests.conformance.harness import expect_reply, opamp_send
 from tests.ws_client import ws_session
 
 TRANSPORTS = ["http", "ws"]
+
+
+@pytest.fixture(autouse=True)
+def ws_transport(monkeypatch):
+    """Both transports must be reachable, so the socket is on for every case here."""
+    monkeypatch.setenv("OPAMP_WS_ENABLED", "true")
+    monkeypatch.delenv("OPAMP_AGENT_AUTH", raising=False)
+    monkeypatch.delenv("OPAMP_CONFIG_PUSH_ENABLED", raising=False)
 
 
 class HTTPTransport:
@@ -67,20 +72,6 @@ def session(client: TestClient, transport: str):
     else:
         with ws_session(client) as ws:
             yield WSTransport(ws)
-
-
-@pytest.fixture
-def client(monkeypatch):
-    REGISTRY.reset()
-    for agent_id in list(AGENT_REGISTRY._agents):
-        AGENT_REGISTRY.remove(agent_id)
-    monkeypatch.setenv("OPAMP_WS_ENABLED", "true")
-    monkeypatch.delenv("OPAMP_AGENT_AUTH", raising=False)
-    monkeypatch.delenv("OPAMP_CONFIG_PUSH_ENABLED", raising=False)
-    yield TestClient(app)
-    REGISTRY.reset()
-    for agent_id in list(AGENT_REGISTRY._agents):
-        AGENT_REGISTRY.remove(agent_id)
 
 
 @pytest.mark.parametrize("transport", TRANSPORTS)

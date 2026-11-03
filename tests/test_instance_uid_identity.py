@@ -28,7 +28,6 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from fastapi.testclient import TestClient
 
 import server.main as server_main
 from proto import opamp_pb2
@@ -36,7 +35,6 @@ from server import agent_auth, protocol
 from server.main import (
     PROM_DUPLICATE_UIDS,
     PROM_UID_HEADER_PROBLEMS,
-    app,
 )
 from server.state import AGENT_REGISTRY
 from server.ws import REGISTRY as WS_REGISTRY
@@ -88,11 +86,6 @@ def isolated(monkeypatch):
     for agent_id in list(AGENT_REGISTRY._agents):
         AGENT_REGISTRY.remove(agent_id)
     server_main.DUPLICATE_UID_DETECTORS.reset()
-
-
-@pytest.fixture
-def client():
-    return TestClient(app)
 
 
 # ---------------------------------------------------------------- header parsing

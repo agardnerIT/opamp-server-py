@@ -12,7 +12,6 @@ import base64
 import json
 
 import pytest
-from fastapi.testclient import TestClient
 
 from proto import opamp_pb2
 from server import (
@@ -29,8 +28,8 @@ from tests.conformance.harness import handle_message as reply
 from server.main import app
 from server.state import AGENT_REGISTRY, SQLiteCredentialStore, SQLiteRolloutStore
 from server.ws import REGISTRY as WS_REGISTRY
+from tests.support import ADMIN, admin_headers
 
-ADMIN = "admin-pw-1234567890"
 AGENT_ID = "ab" * 16
 
 CONFIG = {
@@ -65,11 +64,6 @@ CONFIG = {
         "content_type": "text/yaml",
     }
 }
-
-
-def admin_headers() -> dict:
-    token = base64.b64encode(f":{ADMIN}".encode()).decode()
-    return {"Authorization": f"Basic {token}"}
 
 
 def agent_message(
@@ -143,11 +137,6 @@ def push_enabled(monkeypatch, tmp_path):
     for agent in list(AGENT_REGISTRY._agents.values()):
         AGENT_REGISTRY.remove(agent.agent_id)
     crypto.reset_key_cache()
-
-
-@pytest.fixture
-def client():
-    return TestClient(app)
 
 
 @pytest.fixture
@@ -490,7 +479,6 @@ def test_health_publishes_the_spec_version_and_capability_mask(client):
 
 def test_the_client_can_drive_the_whole_rollout_surface(client, registered):
     """AGENTS.md's four-layer rule: a route is not done until `opamp_client` speaks it."""
-    import httpx
 
     from client.opamp_client import OpampClient
     from tests.asgi_transport import InProcessASGITransport

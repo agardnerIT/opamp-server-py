@@ -17,16 +17,14 @@ import base64
 import json
 
 import pytest
-from fastapi.testclient import TestClient
 
 from proto import opamp_pb2
 from server import admin_auth, agent_auth, audit, crypto, remote_config
 from tests.conformance.harness import handle_message as reply
-from server.main import app
 from server.state import AGENT_REGISTRY, SQLiteCredentialStore
 from server.ws import REGISTRY as WS_REGISTRY
+from tests.support import ADMIN, admin_headers
 
-ADMIN = "admin-pw-1234567890"
 UID = bytes.fromhex("ab" * 16)
 AGENT_ID = "ab" * 16
 SECRET = "s3cr3t-config-value"
@@ -48,11 +46,6 @@ CONFIG = {
         "content_type": "text/yaml",
     }
 }
-
-
-def admin_headers() -> dict:
-    token = base64.b64encode(f":{ADMIN}".encode()).decode()
-    return {"Authorization": f"Basic {token}"}
 
 
 def agent_message(
@@ -100,11 +93,6 @@ def push_enabled(monkeypatch, tmp_path):
     for agent in list(AGENT_REGISTRY._agents.values()):
         AGENT_REGISTRY.remove(agent.agent_id)
     crypto.reset_key_cache()
-
-
-@pytest.fixture
-def client():
-    return TestClient(app)
 
 
 @pytest.fixture

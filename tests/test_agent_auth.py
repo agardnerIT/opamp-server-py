@@ -13,7 +13,6 @@ Each acceptance criterion in the issue maps to a test here:
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 
@@ -25,11 +24,10 @@ from starlette.websockets import WebSocketDisconnect
 from proto import opamp_pb2
 from server import admin_auth, agent_auth, crypto, posture
 from server.framing import decode_message, encode_message
-from server.main import app
 from server.state import AGENT_REGISTRY, SQLiteCredentialStore
 from server.ws import CLOSE_POLICY_VIOLATION, REGISTRY
+from tests.support import ADMIN, admin_headers, bearer
 
-ADMIN = "admin-pw-1234567890"
 VICTIM_UID = bytes.fromhex("11" * 16)
 ATTACKER_UID = bytes.fromhex("22" * 16)
 
@@ -46,15 +44,6 @@ def agent_message(uid: bytes, healthy: bool = True, disconnect: bool = False) ->
 
 def frame(uid: bytes, **kwargs) -> bytes:
     return encode_message(agent_message(uid, **kwargs))
-
-
-def admin_headers() -> dict:
-    token = base64.b64encode(f":{ADMIN}".encode()).decode()
-    return {"Authorization": f"Basic {token}"}
-
-
-def bearer(token: str) -> dict:
-    return {"Authorization": f"Bearer {token}"}
 
 
 # --------------------------------------------------------------------- fixtures
@@ -75,11 +64,6 @@ def isolated(monkeypatch, tmp_path):
     REGISTRY.reset()
     for agent in list(AGENT_REGISTRY._agents.values()):
         AGENT_REGISTRY.remove(agent.agent_id)
-
-
-@pytest.fixture
-def client():
-    return TestClient(app)
 
 
 @pytest.fixture

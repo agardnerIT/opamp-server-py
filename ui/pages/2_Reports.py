@@ -2,7 +2,7 @@ import os
 import sys
 import streamlit as st
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from ui.shared import (
     SERVER_URL,
     get_agents,

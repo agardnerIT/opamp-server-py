@@ -13,12 +13,14 @@ If one of these fails, the fix is almost never to relax the test.
 from __future__ import annotations
 
 import ast
+import os
 import re
 from pathlib import Path
 
 import pytest
 
 UI_DIR = Path(__file__).resolve().parent.parent / "ui"
+REPO = UI_DIR.parent
 
 PAGES = sorted(UI_DIR.glob("pages/*.py"))
 UI_MODULES = sorted(p for p in UI_DIR.glob("*.py"))
@@ -193,6 +195,30 @@ def test_admin_only_actions_are_hidden_from_lower_roles():
     # And they are still declared to the server, so a hidden button is not the boundary.
     assert 'required_role=ROLE_ADMIN' in text
     assert 'required_role=ROLE_OPERATOR' in text
+
+
+def test_pages_add_the_repository_root_to_sys_path():
+    """A page in ui/pages must add the repo root, not ui/, or `from ui.shared` fails."""
+    for page in PAGES:
+        tree = ast.parse(source(page))
+        inserts = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "insert"
+            and isinstance(node.func.value, ast.Attribute)
+            and node.func.value.attr == "path"
+        ]
+        assert inserts, f"{page.name} has no sys.path.insert"
+        resolved = eval(
+            compile(ast.Expression(inserts[0].args[1]), str(page), "eval"),
+            {"os": os, "__file__": str(page)},
+        )
+        assert resolved == str(REPO), (
+            f"{page.name} adds {resolved}, not the repository root {REPO}; "
+            "`from ui.shared` will fail in the container"
+        )
 
 
 def test_release_email_box_is_config_gated():

@@ -3,7 +3,7 @@ import sys
 import streamlit as st
 import pandas as pd
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from ui.shared import (
     ROLE_OPERATOR,
     SERVER_URL,

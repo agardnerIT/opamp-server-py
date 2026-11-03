@@ -5,7 +5,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from ui.shared import (
     ROLE_ADMIN,
     ROLE_OPERATOR,

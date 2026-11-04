@@ -59,12 +59,53 @@ def get_server_url():
     return SERVER_URL
 
 
+#: Where the snippet reads the agent credential from. An environment variable, not a
+#: literal: the token must not land in the config file (git) and `configopaque` keeps
+#: it out of the agent's own effective-config report, which this server stores.
+AGENT_TOKEN_ENV = "OPAMP_AGENT_TOKEN"
+
+#: The modes `OPAMP_AGENT_AUTH` can take. `unknown` is not one of them — it is what this
+#: module reports when the server cannot be asked, so the UI never claims "open" by
+#: default (#124).
+AGENT_AUTH_MODES = ("off", "token", "mtls")
+AGENT_AUTH_UNKNOWN = "unknown"
+
+
+def get_health():
+    """`GET /health` as a dict, or `{}` when the server cannot be reached."""
+    try:
+        health_resp = requests.get(f"{SERVER_URL}/health", timeout=5)
+        return health_resp.json() if health_resp.status_code == 200 else {}
+    except Exception:
+        return {}
+
+
+#: Distinguishes "no payload supplied, go and ask" from "the payload said nothing".
+#: `None` cannot do that job: a page passes the health dict it already has, and a test
+#: must be able to pass an empty one without a network call.
+_UNSET = object()
+
+
+def agent_auth_mode(health_data=_UNSET):
+    """The server's `OPAMP_AGENT_AUTH` mode, from the public posture block (#96).
+
+    `GET /health` publishes it as `config_push.agent_auth`, so the UI can render the
+    right connect snippet without a password. A server we cannot ask is `unknown`, not
+    `off`: assuming "open" is exactly how a token deployment ends up pasting a config
+    that 401s forever (#124).
+    """
+    data = get_health() if health_data is _UNSET else health_data
+    mode = ((data or {}).get("config_push") or {}).get("agent_auth")
+    return mode if mode in AGENT_AUTH_MODES else AGENT_AUTH_UNKNOWN
+
+
 def collector_config_snippet(
     server_url=None,
     *,
     agent_name="my-collector",
     poll_interval="5s",
     in_container=False,
+    agent_auth="off",
 ):
     """#116: the copy-paste collector config, in one place.
 
@@ -78,19 +119,29 @@ def collector_config_snippet(
     collector on the same machine can use `localhost`, a containerised one cannot (it
     resolves inside its own network namespace), so `in_container` swaps in the host
     alias Docker Desktop provides and Linux can be told about.
+
+    `agent_auth` is the server's mode (#124). With `token` the snippet carries the
+    `headers:` block the endpoint now demands; without it the copy-paste path ended in a
+    401 the page never mentioned. `off` prints exactly the bytes it printed before.
     """
     base = (server_url or SERVER_URL).rstrip("/")
     endpoint = f"{base}/v1/opamp"
     if in_container:
         for local in ("127.0.0.1", "localhost", "0.0.0.0"):
             endpoint = endpoint.replace(f"//{local}", "//host.docker.internal")
+    headers = ""
+    if agent_auth == "token":
+        headers = (
+            "        headers:\n"
+            f'          Authorization: "Bearer ${{env:{AGENT_TOKEN_ENV}}}"\n'
+        )
     return f"""extensions:
   opamp:
     server:
       http:
         endpoint: {endpoint}
         polling_interval: {poll_interval}
-    agent_description:
+{headers}    agent_description:
       non_identifying_attributes:
         "agent.name": "{agent_name}"      # your label; the Agents page shows it
         "deployment.environment": "development"
@@ -122,6 +173,49 @@ service:
       processors: [batch]
       exporters: [debug]
 """
+
+
+def agent_auth_note(mode):
+    """The sentence under the snippet, or `None` when there is nothing to say (#124).
+
+    Wording lives here, not in the two pages that render it, for the same reason the
+    snippet does: Help and the empty fleet must not drift. Every mode gets an honest
+    answer, including `off` — "no token needed" is a fact about this server, not about
+    the protocol, and a user who is not told cannot decide whether it is acceptable.
+    """
+    if mode == "token":
+        return (
+            "**This server requires an agent credential** (`OPAMP_AGENT_AUTH=token`), so "
+            f"the snippet reads `{AGENT_TOKEN_ENV}` from the agent's environment. A "
+            "token is bound to one `instance_uid` and an agent only reveals that by "
+            "connecting, so the order matters: let the agent register while the server "
+            "is `off`, mint the token with `opampctl agents token create <agent-id>` "
+            "(the response carries a paste-ready block), put it in "
+            f"`{AGENT_TOKEN_ENV}`, then set `OPAMP_AGENT_AUTH=token` and restart. On a "
+            "server that is already in `token` mode, nothing can connect until that is "
+            "done — README → Cutover runbook."
+        )
+    if mode == "mtls":
+        return (
+            "`OPAMP_AGENT_AUTH=mtls` is reported by this build but not enforced: client "
+            "certificates are terminated by your proxy, so this agent needs no "
+            "credential header — the transport identifies it instead."
+        )
+    if mode == AGENT_AUTH_UNKNOWN:
+        return (
+            "Could not read this server's agent-auth mode from `GET /health`, so this "
+            "config claims no credential. If the server runs with "
+            "`OPAMP_AGENT_AUTH=token`, the endpoint answers 401 — add the `headers:` "
+            "block from README → Agent authentication."
+        )
+    if mode == "off":
+        return (
+            "`OPAMP_AGENT_AUTH=off` (the default): this endpoint accepts any client that "
+            "can reach it, and believes whatever `instance_uid` the message body claims. "
+            "That is fine on a trusted network; see README → Agent authentication before "
+            "exposing it."
+        )
+    return None
 
 
 def format_local_time(utc_str):

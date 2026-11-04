@@ -5,6 +5,8 @@ import streamlit as st
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from ui.shared import (
     SERVER_URL,
+    agent_auth_mode,
+    agent_auth_note,
     collector_config_snippet,
     get_server_url,
     render_sidebar,
@@ -22,8 +24,10 @@ st.markdown("## Collector Configuration")
 st.markdown("Add this minimal config to your OpenTelemetry Collector to connect to this OpAMP server:")
 
 # #116: one snippet for the Help page and the empty fleet view, so a fix to the config
-# can never land in only one of them.
-default_yaml = collector_config_snippet(get_server_url())
+# can never land in only one of them. #124: the server's mode decides whether it carries
+# an agent credential — this page used to document the unauthenticated shape only.
+auth_mode = agent_auth_mode()
+default_yaml = collector_config_snippet(get_server_url(), agent_auth=auth_mode)
 
 st.code(default_yaml, language="yaml")
 
@@ -34,6 +38,9 @@ st.download_button(
     mime="text/yaml",
     key="download_config"
 )
+
+if note := agent_auth_note(auth_mode):
+    (st.warning if auth_mode == "token" else st.caption)(note)
 
 st.divider()
 

@@ -71,6 +71,9 @@ class FakeServer:
         self.login_status = 201
         self.login_headers = {}
         self.token_valid = True
+        # #124: what `/health` reports as `config_push.agent_auth`, which decides whether
+        # the connect snippet carries a credential.
+        self.agent_auth_mode = "off"
         self.calls = []
 
     # -- assertions helpers -----------------------------------------------
@@ -269,7 +272,13 @@ class FakeServer:
                 },
             )
         if url.endswith("/health"):
-            return FakeResponse(200, {"opa_enabled": True, "config_push": {}})
+            return FakeResponse(
+                200,
+                {
+                    "opa_enabled": True,
+                    "config_push": {"agent_auth": self.agent_auth_mode},
+                },
+            )
         if url.endswith("/agents"):
             return FakeResponse(200, {"agents": self.agents, "count": len(self.agents)})
         if url.endswith("/compliance/validate"):
@@ -793,6 +802,60 @@ def test_the_docker_toggle_rewrites_the_endpoint_for_a_containerised_collector(s
     snippet = "\n".join(element.value for element in app.code)
     assert "host.docker.internal" in snippet
     assert "host-gateway" in texts(app)
+
+
+def test_the_empty_fleet_snippet_carries_a_credential_when_the_server_requires_one(server):
+    """#124: a token server 401s the unauthenticated shape, so the snippet must not print it.
+
+    The old snippet was generated from `SERVER_URL` alone, which made the UI's first
+    instruction wrong on every deployment that can push config (push requires `token`).
+    """
+    server.agent_auth_mode = "token"
+    app = empty_agents_page(server)
+    snippet = "\n".join(element.value for element in app.code)
+    assert "headers:" in snippet
+    assert 'Authorization: "Bearer ${env:OPAMP_AGENT_TOKEN}"' in snippet
+    body = texts(app)
+    assert "requires an agent credential" in body
+    # The trap is the ordering, so the page has to say it: the token is bound to a uid
+    # the agent has not revealed yet, which is why a fresh token-mode server cannot
+    # onboard anything by itself.
+    assert "instance_uid" in body
+    assert "agents token create" in body
+
+
+def test_the_empty_fleet_snippet_claims_no_credential_on_an_open_server(server):
+    server.agent_auth_mode = "off"
+    app = empty_agents_page(server)
+    snippet = "\n".join(element.value for element in app.code)
+    assert "headers" not in snippet and "Authorization" not in snippet
+    # Open is stated, not implied: the operator cannot accept a risk nobody named.
+    assert "OPAMP_AGENT_AUTH=off" in texts(app)
+
+
+def test_the_help_page_documents_the_same_credential_block(server):
+    server.agent_auth_mode = "token"
+    app = signed_in(HELP_PAGE)
+    app.run()
+    assert not app.exception, app.exception
+    snippet = "\n".join(element.value for element in app.code)
+    assert "OPAMP_AGENT_TOKEN" in snippet
+    assert "requires an agent credential" in texts(app)
+
+
+def test_an_unreachable_health_check_does_not_claim_the_endpoint_is_open(server, monkeypatch):
+    """Unknown is its own answer: `off` would be a guess with a 401 at the end of it."""
+
+    def offline(url, *args, **kwargs):
+        raise requests.RequestException("connection refused")
+
+    monkeypatch.setattr(requests, "get", offline)
+    app = signed_in(HELP_PAGE)
+    app.run()
+    assert not app.exception, app.exception
+    snippet = "\n".join(element.value for element in app.code)
+    assert "Authorization" not in snippet
+    assert "Could not read this server's agent-auth mode" in texts(app)
 
 
 def test_an_unreachable_server_is_not_reported_as_a_configuration_problem(server, monkeypatch):

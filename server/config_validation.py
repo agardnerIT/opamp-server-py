@@ -22,8 +22,9 @@ hundred structural complaints about a tree that does not exist:
 3. structural rules (:func:`check_structure`)
 4. protected invariants (:func:`check_invariants`)
 5. inventory warnings (:func:`check_inventory`)
-6. policy gate (:func:`check_policy`)
-7. a :class:`Verdict` that the caller stores on the revision
+6. config-object-name warnings (:func:`check_object_names`)
+7. policy gate (:func:`check_policy`)
+8. a :class:`Verdict` that the caller stores on the revision
 
 Severity policy, because "everything is an error" is how a validator gets switched off:
 
@@ -792,6 +793,90 @@ def check_inventory(
         )
 
 
+def _reported_object_names(agent: Any) -> List[str]:
+    """The `config_map` keys an agent reports, or `[]` when it has not reported one.
+
+    The report is what the agent *received and applied*, so it is the only evidence the
+    server has for the name an agent looks its config up by. `AgentState.effective_config`
+    is the stored JSON **string** (or a `enc:` sealed body when a config key is set), so
+    both spellings are accepted and anything unreadable is simply no evidence — a
+    damaged or sealed report must not fail a validation.
+    """
+    report = getattr(agent, "effective_config", None)
+    if not report:
+        return []
+    if isinstance(report, (str, bytes, bytearray)):
+        try:
+            report = json.loads(report)
+        except (ValueError, TypeError):
+            return []
+    if not isinstance(report, Mapping):
+        return []
+    from server import effective_config as effective_config_module
+
+    try:
+        return [obj.key for obj in effective_config_module.objects(report)]
+    except Exception:  # a damaged report is not a reason to fail a validation
+        return []
+
+
+def check_object_names(
+    normalised: Mapping[str, Dict[str, Any]],
+    verdict: Verdict,
+    agents: Sequence[Any],
+) -> None:
+    """Warn when a config object is **keyed** differently from what the agent reports.
+
+    The `config_map` key is not decoration: the spec types it
+    `map<string, AgentConfigFile>` and leaves what the name means to the agent. An
+    OpenTelemetry collector takes the unnamed object (`""`), while osquery's OpAMP
+    extension accepts exactly one object and demands the key `osquery.json` — handed
+    `""` it reports `expected a single osquery.json object, got ['']` and FAILS, which
+    poisons the revision and pauses its rollout at batch 0.
+
+    That failure is the protocol working, but it is a mis-addressed push rather than a
+    bad config, and the server has the evidence to say so before delivery: what the
+    target agents reported. A warning, not an error, because keying a *new* object is a
+    legitimate thing to do on an agent that reports several.
+    """
+    present = [agent for agent in (agents or ()) if agent is not None]
+    if not present:
+        return
+    proposed = {str(key) for key in normalised}
+    # key -> agents that report a different name; the agent's names are kept for the hint.
+    mismatched: Dict[str, List[str]] = {}
+    reported_names: Dict[str, List[str]] = {}
+    compared = 0
+    for agent in present:
+        names = _reported_object_names(agent)
+        if not names:
+            continue
+        compared += 1
+        agent_id = str(getattr(agent, "agent_id", "") or "")
+        for key in sorted(proposed - set(names)):
+            mismatched.setdefault(key, []).append(agent_id)
+        reported_names.setdefault(agent_id, names)
+    if not compared or not mismatched:
+        return
+
+    for key, agent_ids in sorted(mismatched.items()):
+        affected = ", ".join(agent_id[:8] for agent_id in agent_ids[:3])
+        more = f" (+{len(agent_ids) - 3} more)" if len(agent_ids) > 3 else ""
+        theirs = sorted({name for name in reported_names[agent_ids[0]]})
+        shown = ", ".join(
+            "the unnamed object" if name == "" else f"`{name}`" for name in theirs
+        )
+        verdict.add_warning(
+            key or "<empty key>",
+            f"{len(agent_ids)} target agent(s) report a different config object "
+            f"name: {affected}{more} report {shown}",
+            "the agent looks its config up by this name, so a differently keyed "
+            "revision is refused (osquery: `expected a single osquery.json object`) "
+            "and pauses the rollout at batch 0 — key the revision to the name the "
+            "agent reports",
+        )
+
+
 # ------------------------------------------------------------------------ policy
 
 
@@ -1062,6 +1147,7 @@ def check_config_map(
 
     agent_list = list(agents or ())
     _annotate_profile(verdict, *_target_profile(agent_list), agent_list)
+    check_object_names(normalised, verdict, agent_list)
 
     for key, entry in normalised.items():
         body = entry["body"]

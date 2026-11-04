@@ -12,6 +12,8 @@ component that does not exist, a config that orphans the agent by deleting the
 
 from __future__ import annotations
 
+import base64
+import json
 import time
 from pathlib import Path
 
@@ -403,3 +405,84 @@ def test_document_drift_matches_any_reported_body():
         )
         == []
     )
+
+
+# ---------------------------------------------------- config object names (keying)
+
+
+class _AgentWithConfig:
+    """An agent stand-in that reports one config object under `name`.
+
+    `effective_config` is the report shape the server stores: the protobuf
+    `MessageToDict` form, whose inner `configMap` is keyed by object name.
+    """
+
+    def __init__(self, agent_id, name, document='{"schedule": {"x": {"query": "select 1;"}}}'):
+        self.agent_id = agent_id
+        self.available_components = {}
+        self.effective_config = json.dumps(
+            {
+                "configMap": {
+                    "configMap": {
+                        name: {
+                            "body": base64.b64encode(document.encode()).decode(),
+                            "contentType": "application/json",
+                        }
+                    }
+                }
+            }
+        )
+
+
+def _object_name_warnings(verdict):
+    """Only the findings this stage produces, so unrelated warnings are not asserted."""
+    return [
+        finding
+        for finding in verdict.warnings
+        if "config object" in finding.message
+    ]
+
+
+def test_a_config_keyed_differently_from_the_agents_report_is_flagged():
+    """`config_map` keys are names the agent looks config up by, not labels.
+
+    osquery's OpAMP extension accepts exactly one object and requires the key
+    `osquery.json`; handed `""` it reports `expected a single osquery.json object,
+    got ['']` and FAILS — which poisons the revision and pauses the rollout at batch
+    0. The server cannot know that rule, but it does know what the agent reported, and
+    a mismatch is the mis-addressed push itself.
+    """
+    agent = _AgentWithConfig("ab" * 16, "osquery.json")
+    verdict = config_validation.check_config_map(
+        {"": {"body": "a: 1\n", "content_type": "text/yaml"}}, agents=[agent]
+    )
+    assert verdict.ok  # a warning: keying a *new* object is legitimate
+    findings = _object_name_warnings(verdict)
+    assert [finding.path for finding in findings] == ["<empty key>"]
+    message = findings[0].message
+    assert "report a different config object name" in message
+    assert "`osquery.json`" in message
+    assert "abababab" in message  # names the agents, like the inventory warnings do
+
+
+def test_a_matching_config_key_is_silent():
+    agent = _AgentWithConfig("ab" * 16, "osquery.json")
+    verdict = config_validation.check_config_map(
+        {"osquery.json": {"body": "a: 1\n", "content_type": "text/yaml"}}, agents=[agent]
+    )
+    assert _object_name_warnings(verdict) == []
+
+
+def test_agents_that_report_no_config_are_not_compared():
+    """No report is no evidence — an agent that has never applied a config must not
+    produce a warning that says its key is wrong."""
+
+    class Silent:
+        agent_id = "cd" * 16
+        available_components = {}
+        effective_config = None
+
+    verdict = config_validation.check_config_map(
+        {"": {"body": "a: 1\n", "content_type": "text/yaml"}}, agents=[Silent()]
+    )
+    assert _object_name_warnings(verdict) == []

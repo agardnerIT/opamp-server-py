@@ -100,10 +100,21 @@ class FakeServer:
         # config. `None` unless a test sets it, so the default page has none.
         self.effective_config = None
         self.calls = []
+        # Request bodies, so a test can assert what the page *sent*, not only where (#131).
+        self.bodies = []
 
     # -- assertions helpers -----------------------------------------------
     def methods_for(self, fragment):
         return [method for method, url in self.calls if fragment in url]
+
+    def body_for(self, fragment):
+        """The JSON body of the last request to a URL containing `fragment`."""
+        for url, body in reversed(self.bodies):
+            if fragment in url:
+                return body
+        raise AssertionError(
+            f"no body recorded for {fragment!r}; recorded: {[url for url, _ in self.bodies]}"
+        )
 
     # -- transport --------------------------------------------------------
     def _token_ok(self, headers):
@@ -111,6 +122,8 @@ class FakeServer:
 
     def request(self, method, url, headers=None, timeout=None, **kwargs):
         self.calls.append((method, url))
+        if kwargs.get("json") is not None:
+            self.bodies.append((url, kwargs["json"]))
         authed = self._token_ok(headers)
         # `admin_request()` goes through `.request()` for every verb, so the pages that
         # use it (Remote Config) need the agent listing here, not only in `.get()`.
@@ -387,7 +400,7 @@ class FakeServer:
                     "principal": {"name": "alice", "role": self.role},
                 },
             )
-        return self.request("POST", url, headers=headers)
+        return self.request("POST", url, headers=headers, json=kwargs.get("json"))
 
     def delete(self, url, headers=None, timeout=None, **kwargs):
         self.calls.append(("DELETE", url))
@@ -998,6 +1011,76 @@ def test_prefill_loads_the_agent_config_decoded(server):
     assert body.strip().startswith("{")
     assert app.session_state["rc_content_type"] == "application/json"
     assert "Loaded object" in texts(app)
+
+
+def test_the_object_name_the_operator_gives_is_the_key_that_is_proposed(server):
+    """The `config_map` key is the name the agent looks its config up by.
+
+    It was hardcoded to `""` here, so a config aimed at an osquery agent was
+    misaddressed: the extension wants `osquery.json`, reported FAILED, poisoned the
+    revision and paused the rollout at batch 0.
+    """
+    server.agents = [fake_agent()]
+    app = signed_in(
+        REMOTE_CONFIG_PAGE,
+        rc_body='{"schedule": {}}',
+        rc_object_key="osquery.json",
+    ).run()
+    assert not app.exception, app.exception
+
+    [
+        button
+        for button in app.button
+        if (button.label or "") == "Propose revision"
+    ][0].click().run()
+    assert not app.exception, app.exception
+
+    config_map = server.body_for("/config/revisions")["config_map"]
+    assert list(config_map) == ["osquery.json"]
+    assert config_map["osquery.json"]["body"] == '{"schedule": {}}'
+
+    # Validate sends the same keying, so the warning it returns is about the real one.
+    [button for button in app.button if (button.label or "") == "Validate"][0].click().run()
+    assert list(server.body_for("/config/validate")["config_map"]) == ["osquery.json"]
+
+
+def test_prefill_carries_the_object_name_so_the_revision_matches_the_agent(server):
+    """A prefilled body under a different key is still a mis-addressed push.
+
+    The report already says which name the agent applied (`osquery.json`); the page
+    read the body and dropped the name, so the proposal re-keyed it to `""`.
+    """
+    agent = fake_agent()
+    server.agents = [agent]
+    document = json.dumps({"schedule": {"battery_stats": {"query": "select 1;"}}})
+    server.effective_config = json.dumps(
+        {
+            "configMap": {
+                "configMap": {
+                    "osquery.json": {
+                        "body": base64.b64encode(document.encode()).decode(),
+                        "contentType": "application/json",
+                    }
+                }
+            }
+        }
+    )
+
+    app = signed_in(REMOTE_CONFIG_PAGE, rc_prefill=agent["id"]).run()
+    [
+        button
+        for button in app.button
+        if (button.label or "") == "Prefill from this agent's effective config"
+    ][0].click().run()
+    assert not app.exception, app.exception
+    assert app.session_state["rc_object_key"] == "osquery.json"
+
+    [
+        button
+        for button in app.button
+        if (button.label or "") == "Propose revision"
+    ][0].click().run()
+    assert list(server.body_for("/config/revisions")["config_map"]) == ["osquery.json"]
 
 
 def test_a_redacted_body_is_refused_before_it_can_be_pushed(server):

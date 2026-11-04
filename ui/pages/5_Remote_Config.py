@@ -52,6 +52,7 @@ TARGET_MODE_KEY = "rc_target_mode"
 GROUP_KEY = "rc_group"
 BODY_KEY = "rc_body"
 CONTENT_TYPE_KEY = "rc_content_type"
+OBJECT_KEY_KEY = "rc_object_key"
 ROLE_KEY = "rc_object_role"
 PROPOSAL_KEY = "rc_proposal"
 PLAN_KEY = "rc_plan"
@@ -105,11 +106,20 @@ def _detail(response):
     return str(body)
 
 
-def _config_map(body, content_type, role=""):
+def _config_map(body, content_type, role="", name=""):
+    """The one-object `config_map` a revision stores.
+
+    `name` is the map key — the agent-side **config object name**, not decoration. The
+    spec types it `map<string, AgentConfigFile>` and leaves the meaning to the agent: a
+    collector is happy with `""`, osquery's OpAMP extension refuses anything but
+    `osquery.json` (it reports `expected a single osquery.json object, got ['']`). It was
+    hardcoded to `""` here, so every proposal made from this page was misaddressed and
+    the agent failed it — correctly, and the rollout paused at batch 0.
+    """
     entry = {"body": body, "content_type": content_type or "text/yaml"}
     if role:
         entry["role"] = role
-    return {"": entry}
+    return {(name or "").strip(): entry}
 
 
 def _is_redacted(text):
@@ -151,10 +161,14 @@ def _prefill_from_agent(agent_id):
 
     st.session_state[BODY_KEY] = editable.body
     st.session_state[CONTENT_TYPE_KEY] = editable.content_type
+    # The name comes from the report: proposing under a different key is how a good body
+    # gets refused by the agent (see `_config_map`).
+    st.session_state[OBJECT_KEY_KEY] = editable.key or ""
     st.session_state[ROLE_KEY] = editable.role
     message = (
         f"Loaded object `{editable.key or '<empty key>'}` from {agent_id} as "
-        f"{editable.content_type}, decoded."
+        f"{editable.content_type}, decoded; the revision will be keyed "
+        f"`{editable.key or '<empty key>'}` to match."
     )
     if editable.others:
         message += " Not prefilled (one object per revision): " + ", ".join(
@@ -349,14 +363,27 @@ with st.expander(f"Agents in scope ({len(target_ids)})", expanded=False):
 
 
 st.header("2. Edit", divider="gray")
-edit_cols = st.columns([1, 1, 2])
+edit_cols = st.columns([1, 1, 1, 2])
 with edit_cols[0]:
     content_type = st.selectbox(
         "Content type", list(EDITOR_CONTENT_TYPES), key=CONTENT_TYPE_KEY
     )
 with edit_cols[1]:
-    object_role = st.text_input("Object role (optional)", key=ROLE_KEY, placeholder="")
+    object_key = st.text_input(
+        "Config object name",
+        key=OBJECT_KEY_KEY,
+        placeholder="e.g. osquery.json",
+        help=(
+            "The `config_map` key the agent looks the object up by. Leave it blank for "
+            "an agent that takes an unnamed object (the OpenTelemetry collector), and "
+            "use the name the agent reports — `Prefill` fills it in. An osquery agent "
+            "refuses anything but `osquery.json` and reports FAILED, which pauses the "
+            "rollout at batch 0."
+        ),
+    )
 with edit_cols[2]:
+    object_role = st.text_input("Object role (optional)", key=ROLE_KEY, placeholder="")
+with edit_cols[3]:
     prefill_id = st.selectbox(
         "Prefill from agent", [""] + target_ids, key="rc_prefill",
         help="Copies that agent's current effective config into the editor, decoded.",
@@ -402,7 +429,9 @@ st.header("3. Validate", divider="gray")
 # validator is noise in the request log and in a shared server's CPU.
 if st.button("Validate", type="secondary"):
     validate_body = {
-        "config_map": _config_map(body, content_type, object_role.strip()),
+        "config_map": _config_map(
+            body, content_type, object_role.strip(), object_key
+        ),
         "agent_id": target_ids[0] if target_ids else None,
     }
     response = admin_request(
@@ -461,7 +490,9 @@ if st.button("Propose revision", type="primary", disabled=not body.strip()):
             "/config/revisions",
             required_role=ROLE_OPERATOR,
             json={
-                "config_map": _config_map(body, content_type, object_role.strip()),
+                "config_map": _config_map(
+                    body, content_type, object_role.strip(), object_key
+                ),
                 "scope": scope,
                 "note": note or None,
                 "confirm_scope_change": bool(confirm_scope_change),

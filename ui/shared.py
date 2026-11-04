@@ -265,6 +265,14 @@ def mint_agent_token_form(
         if intro:
             st.markdown(intro)
 
+        # The gate comes **before** the form, not inside the submit branch. Gating on
+        # submit ran `require_admin` after the operator had clicked, which rendered the
+        # sign-in form and stopped the run: the POST never happened, the label and
+        # expiry they had typed were thrown away, and after signing in they were back
+        # at an empty form with no token. Click, sign in, nothing, click again — that
+        # loop is why the gate is here. A form nobody can submit is not offered.
+        require_admin(ROLE_ADMIN)
+
         with st.form(f"{key_prefix}_mint_token"):
             label = st.text_input("Label", value="", placeholder="prod")
             expiry = st.selectbox(
@@ -286,10 +294,8 @@ def mint_agent_token_form(
         if not submitted:
             return
 
-        # Minting grants access to the endpoint, so it is an admin action like any
-        # other: the shared sign-in renders here and stops the page when it is needed
-        # (#105).
-        require_admin(ROLE_ADMIN)
+        # No second auth check: a submit is a fresh run, so the gate above already ran
+        # for it and returned the session that made this form reachable.
         body = {"label": label, "max_agents": int(max_agents)}
         days = EXPIRY_CHOICES[expiry]
         if days is not None:

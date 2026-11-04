@@ -28,6 +28,7 @@ from pathlib import Path
 from ui import session as ui_session
 
 REPO = Path(__file__).resolve().parent.parent
+AGENTS_PAGE = REPO / "ui" / "pages" / "1_Agents.py"
 ADMIN_DIR = REPO / "ui" / "pages" / "admin"
 ALERTS_PAGE = ADMIN_DIR / "alerts.py"
 COMPLIANCE_PAGE = ADMIN_DIR / "compliance.py"
@@ -1013,6 +1014,38 @@ def test_the_docker_toggle_rewrites_the_endpoint_for_a_containerised_collector(s
     snippet = "\n".join(element.value for element in app.code)
     assert "host.docker.internal" in snippet
     assert "host-gateway" in texts(app)
+
+
+def test_the_guided_mint_gates_before_it_shows_a_form(server):
+    """Sign-in must come *before* the form, not after the submit.
+
+    Gating inside the submit branch dropped the intent: `require_admin` rendered the
+    sign-in form and `st.stop()`ed the run, so the POST never happened and the operator
+    came back to an empty form with their label and expiry reset. Click → sign in →
+    nothing → click again is the loop this test exists to prevent.
+    """
+    server.agent_auth_mode = "token"
+    server.agents = []
+    server.role = "admin"  # minting a credential needs the admin role, not approver
+    app = AppTest.from_file(str(AGENTS_PAGE), default_timeout=30)
+    app.run()
+    assert not app.exception, app.exception
+
+    # The step is still explained while signed out — the context must not vanish with
+    # the form — but a form the operator cannot submit is not offered at all.
+    assert "Generate a token for this fleet" in texts(app)
+    assert "Admin sign-in required" in texts(app)
+    assert not [button for button in app.button if button.label == "Generate token"]
+
+    sign_in(app)
+    assert not app.exception, app.exception
+
+    submit = [button for button in app.button if button.label == "Generate token"]
+    assert submit, "signing in must reveal the form"
+    submit[0].click().run()
+    assert not app.exception, app.exception
+    snippet = "\n".join(element.value for element in app.code)
+    assert server.minted_token in snippet, "one click after signing in must mint the token"
 
 
 def test_a_token_server_offers_to_mint_the_token_instead_of_printing_a_placeholder(server):

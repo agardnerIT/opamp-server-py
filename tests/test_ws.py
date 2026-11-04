@@ -140,11 +140,22 @@ class TestOutboundQueue:
 
 class TestHandshake:
     def test_disabled_refuses(self, client, monkeypatch):
-        monkeypatch.delenv("OPAMP_WS_ENABLED", raising=False)
+        monkeypatch.setenv("OPAMP_WS_ENABLED", "false")
         with pytest.raises(WebSocketDisconnect) as exc:
             with client.websocket_connect("/v1/opamp"):
                 pass
         assert exc.value.code == CLOSE_POLICY_VIOLATION
+
+    def test_enabled_by_default(self, client, monkeypatch):
+        """No server-side opt-in: an agent that asks for the upgrade gets one.
+
+        This is the whole point of the default. An operator should not have to
+        learn about a flag before a WebSocket client can connect.
+        """
+        monkeypatch.delenv("OPAMP_WS_ENABLED", raising=False)
+
+        with client.websocket_connect("/v1/opamp") as ws:
+            assert ws is not None
 
     def test_enabled_accepts(self, client, ws_on):
         with client.websocket_connect("/v1/opamp") as ws:

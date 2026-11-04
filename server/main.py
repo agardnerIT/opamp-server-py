@@ -1945,7 +1945,8 @@ async def opamp_endpoint(request: Request) -> Response:
     mismatch into a 400. When a body is refused (413, 415, 400) the header is the only
     identity in the log line, because there is no parsed message to name.
 
-    The same path also accepts a WebSocket upgrade when `OPAMP_WS_ENABLED=true`.
+    The same path also accepts a WebSocket upgrade, by default
+    (`OPAMP_WS_ENABLED=false` refuses it).
 
     **Overload (#78):** when the gate is enabled (`OPAMP_THROTTLE_ENABLED`) and the
     event loop is behind by more than `OPAMP_THROTTLE_MAX_LAG_SECONDS`, this endpoint
@@ -2073,10 +2074,11 @@ async def opamp_endpoint(request: Request) -> Response:
 async def opamp_ws_endpoint(websocket: WebSocket) -> None:
     """OpAMP WebSocket transport — same path as the HTTP endpoint.
 
-    Disabled by default. When `OPAMP_WS_ENABLED` is false the handshake is
-    refused with close code 1008 and the server behaves exactly as an HTTP-only
-    server. When enabled, each binary frame is a varint header (must be 0)
-    followed by an `AgentToServer` protobuf, per spec §WebSocket Transport.
+    On by default. `OPAMP_WS_ENABLED=false` refuses the handshake with close code
+    1008, so the server behaves exactly as an HTTP-only server; a client that
+    never asks for the upgrade is unaffected either way. Each binary frame is a
+    varint header (must be 0) followed by an `AgentToServer` protobuf, per spec
+    §WebSocket Transport.
 
     Authentication runs **before** `accept()` (#94): with `OPAMP_AGENT_AUTH=token`
     a missing/unknown/revoked token fails the handshake (close 1008, which a
@@ -4921,7 +4923,8 @@ def get_config_rollout(rollout_id: str, request: Request):
     The three questions this answers: which batch is in flight, what state every agent
     is in (`pending|delivered|applying|applied|failed|reverted|paused`), and — when it
     is paused — the single reason (`failed`, `auto_reverted`, `agent_went_silent`,
-    `unhealthy`, `delivery_unconfirmed`, `superseded`) plus the operator-facing summary
+    `unhealthy`, `config_conflict`, `delivery_unconfirmed`, `superseded`) plus the
+    operator-facing summary
     "N applied, K failed, paused at batch 2". Bodies are never included.
     """
     require_roles(request, ROLE_VIEWER)

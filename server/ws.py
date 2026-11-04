@@ -194,10 +194,18 @@ class ProcessedMessage(NamedTuple):
 def ws_enabled() -> bool:
     """Read `OPAMP_WS_ENABLED` at call time so behaviour is testable.
 
-    Default false: the server stays HTTP-only, which is what every existing
-    collector expects. The route still exists and refuses the handshake.
+    Default true. Accepting the upgrade costs nothing when nobody asks for it: a
+    client that speaks only HTTP never sends one, so an HTTP-only collector is
+    unaffected by the default and does not have to know this flag exists. Making
+    it opt-in instead bought nothing and cost every WebSocket agent — including
+    this project's own osquery extension — a server-side configuration step
+    before it could connect at all.
+
+    The route also stays available when the flag is false, refusing the handshake
+    with `1008` rather than disappearing, so switching it off is a deliberate
+    "no" rather than a missing endpoint.
     """
-    return os.environ.get("OPAMP_WS_ENABLED", "false").lower() in ("true", "1", "yes")
+    return os.environ.get("OPAMP_WS_ENABLED", "true").lower() in ("true", "1", "yes")
 
 
 class TokenBucket:

@@ -36,10 +36,11 @@ the project becomes the data controller for a list of email addresses.
 - 38 offline Worker tests pass; CI runs `npm test` and `npm run typecheck`.
 - The in-product update check is now implemented (`docs/updates-available.md`);
   this email list remains optional and independent.
-- Still needed: a physical postal address for the CAN-SPAM footer, published
-  server/UI images (the `0.0.5-test` images predate admin auth and the box; local
-  images were rebuilt for testing), and a decision on whether to move
-  `agardner.net` to Cloudflare for a branded Worker hostname.
+- Server/UI images are now published: `0.0.6` (2026-11-04) is the first release
+  past admin auth and the release-emails box, so the images on ghcr match what the
+  docs, `docker-compose.yml` and the UI screenshots describe. Still needed: a
+  physical postal address for the CAN-SPAM footer, and a decision on whether to
+  move `agardner.net` to Cloudflare for a branded Worker hostname.
 
 ---
 

@@ -64,8 +64,8 @@ new field — so the test is the only thing that catches it.
 ### Docker Compose (Recommended)
 
 Pre-built images are available from GitHub Container Registry:
-- `ghcr.io/agardnerit/opamp-server-py-server:latest`
-- `ghcr.io/agardnerit/opamp-server-py-ui:latest`
+- `ghcr.io/agardnerit/opamp-server-py-server:0.0.6`
+- `ghcr.io/agardnerit/opamp-server-py-ui:0.0.6`
 
 Images are multi-arch (`linux/amd64`, `linux/arm64`). Pushing a `vX.Y.Z` git tag
 publishes `X.Y.Z` and `X.Y`, and moves `latest`; a prerelease tag such as

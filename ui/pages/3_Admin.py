@@ -19,6 +19,7 @@ from ui.shared import (
     get_updates,
     logout,
     mint_agent_token_form,
+    rerun_in_tab,
     render_sidebar,
     require_admin,
     requests,
@@ -32,6 +33,9 @@ st.set_page_config(
 )
 
 render_sidebar()
+
+#: The keyed `st.tabs` widget holding the selected Admin tab (see below).
+ADMIN_TAB_KEY = "admin_active_tab"
 
 # #105: one login implementation, one session token, no password in session state.
 # This page needs `operator`: alerts are the only thing here an operator may change.
@@ -70,7 +74,15 @@ if session.can(ROLE_ADMIN):
     tab_names.append("Sessions")
 tab_names.append("Updates")
 tab_names.append("Release emails")
-admin_tabs = st.tabs(tab_names)
+
+# `st.tabs` shows the first tab on every rerun unless it is keyed, and this page
+# reruns after a mint or a revoke — both of which happen on "Agent tokens". Without
+# the key, an operator minting a token was bounced to "Alerts" and never saw the
+# one-time secret at all. The label lives in session state, so it also survives the
+# reruns Streamlit does on its own.
+if st.session_state.get(ADMIN_TAB_KEY) not in tab_names:
+    st.session_state[ADMIN_TAB_KEY] = tab_names[0]
+admin_tabs = st.tabs(tab_names, key=ADMIN_TAB_KEY)
 
 with admin_tabs[0]:
     resp = admin_request("GET", "/alerts", required_role=ROLE_OPERATOR)
@@ -255,7 +267,10 @@ if session.can(ROLE_ADMIN):
         # empty-fleet branch, which is unreachable once any agent has connected.
         if agent_auth_mode() == "token":
             with st.expander("Generate a new token", expanded=False):
-                mint_agent_token_form("admin_token")
+                mint_agent_token_form(
+                    "admin_token",
+                    preserve_tab=(ADMIN_TAB_KEY, "Agent tokens"),
+                )
         else:
             st.caption(
                 "This deployment does not require an agent credential "
@@ -307,7 +322,7 @@ if session.can(ROLE_ADMIN):
                         )
                         if revoke_resp is not None and revoke_resp.status_code == 200:
                             st.success(f"Revoked `{token_id}`.")
-                            st.rerun()
+                            rerun_in_tab((ADMIN_TAB_KEY, "Agent tokens"))
                         elif revoke_resp is not None:
                             st.error(f"Revoking failed: {revoke_resp.text}")
 

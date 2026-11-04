@@ -708,6 +708,8 @@ def test_revoking_a_token_needs_a_confirmation_and_is_audited_by_the_server(serv
         method == "DELETE" and url.endswith("/agent-tokens/agtok_abc123")
         for method, url in server.calls
     )
+    # The page reruns to refresh the table; it must not dump the operator on "Alerts".
+    assert app.session_state["admin_active_tab"] == "Agent tokens"
 
 
 def test_the_admin_page_can_mint_a_replacement_after_a_revocation(server):
@@ -732,6 +734,9 @@ def test_the_admin_page_can_mint_a_replacement_after_a_revocation(server):
     shown = "\n".join(element.value for element in app.code)
     assert server.minted_token in shown, "the new token must be shown once, in full"
     assert "only time it is shown" in texts(app)
+    # The rerun after a mint must not re-select the first tab: "Alerts" is first, so a
+    # plain `st.rerun()` hid the one-time token completely. This is the whole bug.
+    assert app.session_state["admin_active_tab"] == "Agent tokens"
     assert any(
         method == "POST" and url.endswith("/agent-tokens") for method, url in server.calls
     ), "minting must go through the shared admin transport"

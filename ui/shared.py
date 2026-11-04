@@ -237,12 +237,31 @@ EXPIRY_CHOICES = {"1 day": 1, "7 days": 7, "30 days": 30, "Never": None}
 MINTED_TOKEN_KEY = "minted_agent_token"
 
 
+def rerun_in_tab(preserve_tab=None):
+    """``st.rerun()`` that does not throw the operator back to the first tab.
+
+    `st.tabs` is not stateful: every rerun re-renders with the first tab selected, so
+    any code that reruns from inside a later tab silently teleports the operator —
+    minting a token on Admin ended up showing the Alerts tab, with the one-time token
+    never rendered. Passing `key=` to `st.tabs` makes the selection survive a rerun, and
+    this writes the intent into that key first.
+
+    ``preserve_tab`` is ``(session_state_key, tab_label)`` or ``None`` for pages without
+    tabs.
+    """
+    if preserve_tab is not None:
+        key, label = preserve_tab
+        st.session_state[key] = label
+    st.rerun()
+
+
 def mint_agent_token_form(
     key_prefix,
     *,
     in_container=False,
     show_snippet=True,
     intro=None,
+    preserve_tab=None,
 ):
     """Mint a fleet token and show it once — the one implementation (#126).
 
@@ -254,85 +273,94 @@ def mint_agent_token_form(
     unreachable the moment one agent has ever connected.
 
     The form is the same form in both places, so the safe defaults do not depend on
-    which page an operator happened to land on.
+    which page an operator landed on.
+
+    After a successful mint the page reruns so the form is replaced by the token, and
+    the rerun goes through `rerun_in_tab` for `preserve_tab`: on a tabbed page a plain
+    `st.rerun()` re-selects the first tab, which dropped an operator on "Alerts" with
+    the one-time secret never shown at all. A minted token that is not rendered is a
+    lost token, so that rerun is the part that must be right.
     """
     minted = st.session_state.get(MINTED_TOKEN_KEY)
-    if minted:
-        st.success(
-            "Token created. **Copy it now** — the server stores only its hash, so this "
-            "is the one and only time it is shown."
-        )
-        st.code(minted["token"], language="text")
-        if show_snippet:
-            snippet = collector_config_snippet(
-                get_server_url(),
-                in_container=in_container,
-                agent_auth="token",
-                token_literal=minted["token"],
+    if minted is None:
+        if intro:
+            st.markdown(intro)
+
+        with st.form(f"{key_prefix}_mint_token"):
+            label = st.text_input("Label", value="", placeholder="prod")
+            expiry = st.selectbox(
+                "Expires",
+                list(EXPIRY_CHOICES),
+                index=1,
+                help="A leaked token is only useful until it expires. 'Never' is for a "
+                "token you rotate by hand.",
             )
-            st.code(snippet, language="yaml")
-            st.download_button(
-                "Download config.yaml",
-                snippet,
-                file_name="config.yaml",
-                mime="text/yaml",
-                key=f"{key_prefix}_download",
+            max_agents = st.number_input(
+                "Max agents",
+                min_value=1,
+                max_value=10000,
+                value=15,
+                help="The agent over this limit is refused and logged, so a leaked token "
+                "cannot consume the server.",
             )
-        cap = minted.get("max_agents")
-        st.caption(
-            f"Token `{minted.get('token_id')}` · expires "
-            + (minted.get("expires_at") or "never")
-            + " · max agents "
-            + (str(cap) if cap is not None else "unlimited")
-            + f". Revoke it on the **Admin** page if it leaks. The snippet embeds the "
-            f"token because you are pasting it into a file you own; `{AGENT_TOKEN_ENV}` "
-            "(Help page) keeps it out of the file, which is better once it works."
+            submitted = st.form_submit_button("Generate token", type="primary")
+        if not submitted:
+            return
+
+        # Minting grants access to the endpoint, so it is an admin action like any
+        # other: the shared sign-in renders here and stops the page when it is needed
+        # (#105).
+        require_admin(ROLE_ADMIN)
+        body = {"label": label, "max_agents": int(max_agents)}
+        days = EXPIRY_CHOICES[expiry]
+        if days is not None:
+            body["expires_in_days"] = days
+        response = admin_request(
+            "POST", "/agent-tokens", required_role=ROLE_ADMIN, json=body
         )
-        if st.button("Done", key=f"{key_prefix}_dismiss_token"):
-            st.session_state.pop(MINTED_TOKEN_KEY, None)
-            st.rerun()
+        if response is None:
+            st.error("Could not reach the server to mint a token.")
+            return
+        if response.status_code != 201:
+            st.error(f"Minting a token failed: {response.text}")
+            return
+        st.session_state[MINTED_TOKEN_KEY] = response.json()
+        rerun_in_tab(preserve_tab)
         return
 
-    if intro:
-        st.markdown(intro)
-
-    with st.form(f"{key_prefix}_mint_token"):
-        label = st.text_input("Label", value="", placeholder="prod")
-        expiry = st.selectbox(
-            "Expires",
-            list(EXPIRY_CHOICES),
-            index=1,
-            help="A leaked token is only useful until it expires. 'Never' is for a token "
-            "you rotate by hand.",
+    st.success(
+        "Token created. **Copy it now** — the server stores only its hash, so this "
+        "is the one and only time it is shown."
+    )
+    st.code(minted["token"], language="text")
+    if show_snippet:
+        snippet = collector_config_snippet(
+            get_server_url(),
+            in_container=in_container,
+            agent_auth="token",
+            token_literal=minted["token"],
         )
-        max_agents = st.number_input(
-            "Max agents",
-            min_value=1,
-            max_value=10000,
-            value=15,
-            help="The agent over this limit is refused and logged, so a leaked token "
-            "cannot consume the server.",
+        st.code(snippet, language="yaml")
+        st.download_button(
+            "Download config.yaml",
+            snippet,
+            file_name="config.yaml",
+            mime="text/yaml",
+            key=f"{key_prefix}_download",
         )
-        submitted = st.form_submit_button("Generate token", type="primary")
-    if not submitted:
-        return
-
-    # Minting grants access to the endpoint, so it is an admin action like any other:
-    # the shared sign-in renders here and stops the page when it is needed (#105).
-    require_admin(ROLE_ADMIN)
-    body = {"label": label, "max_agents": int(max_agents)}
-    days = EXPIRY_CHOICES[expiry]
-    if days is not None:
-        body["expires_in_days"] = days
-    response = admin_request("POST", "/agent-tokens", required_role=ROLE_ADMIN, json=body)
-    if response is None:
-        st.error("Could not reach the server to mint a token.")
-        return
-    if response.status_code != 201:
-        st.error(f"Minting a token failed: {response.text}")
-        return
-    st.session_state[MINTED_TOKEN_KEY] = response.json()
-    st.rerun()
+    cap = minted.get("max_agents")
+    st.caption(
+        f"Token `{minted.get('token_id')}` · expires "
+        + (minted.get("expires_at") or "never")
+        + " · max agents "
+        + (str(cap) if cap is not None else "unlimited")
+        + ". Revoke it on the **Admin** page if it leaks. The snippet embeds the "
+        f"token because you are pasting it into a file you own; `{AGENT_TOKEN_ENV}` "
+        "(Help page) keeps it out of the file, which is better once it works."
+    )
+    if st.button("Done", key=f"{key_prefix}_dismiss_token"):
+        st.session_state.pop(MINTED_TOKEN_KEY, None)
+        rerun_in_tab(preserve_tab)
 
 
 def agent_token_state(token):

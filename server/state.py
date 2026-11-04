@@ -47,6 +47,11 @@ def _stringify_any_value(value: Optional[Dict]) -> Optional[str]:
 DATA_DIR = Path(os.environ.get("DATA_DIR", "data")).resolve()
 DB_PATH = DATA_DIR / "opamp.db"
 
+# #126: outcomes of `SQLiteCredentialStore.register_agent`. Strings rather than an enum
+# because they are also the `reason` on the metric and in the audit entry.
+AGENT_LIMIT_OK = "ok"
+AGENT_LIMIT_REACHED = "agent_limit"
+
 
 def _parse_ts(s: Optional[str]) -> datetime:
     return datetime.fromisoformat(s).replace(tzinfo=timezone.utc) if s else utcnow()
@@ -385,25 +390,52 @@ class SQLiteMetricsStore:
             ).warning(f"Could not delete metrics for {agent_id}: {exc}")
 
 class SQLiteCredentialStore:
-    """Per-agent OpAMP credentials (#94): one row per issued token.
+    """OpAMP agent tokens (#94, #126): one row per issued token.
 
     Only the SHA-256 of a token is stored — the token itself exists in the API
     response that created it and nowhere else. Rows are never deleted, so
     `revoked_at`/`last_seen_at` stay available as the audit trail an operator
     needs to watch a fleet finish a cutover.
 
-    Rotation uses `retire_on_use`: the outgoing row is retired automatically the
-    first time its replacement authenticates, which is what makes rotation
-    zero-downtime without a timer (a timer would either cut too early, breaking a
-    collector that has not reloaded yet, or leave the old token alive forever).
+    Two kinds of row, and the difference is `agent_id`:
+
+    * **bound** (`agent_id` = a hex uid): the #94 credential. It *is* that agent's
+      identity, and a message claiming another uid is refused. Rotation uses
+      `retire_on_use`: the outgoing row retires automatically the first time its
+      replacement authenticates, which is what makes rotation zero-downtime without
+      a timer (a timer would either cut too early, breaking a collector that has not
+      reloaded yet, or leave the old token alive forever).
+    * **fleet** (`agent_id` = ``FLEET_TOKEN``, the empty string): #126. One token, many
+      agents, up to `max_agents`. It authorises access; it is *not* an identity, so the
+      uid in the body stands. The empty string rather than NULL is deliberate: it keeps
+      the column `NOT NULL` (so no table rebuild to upgrade an existing database) and
+      it cannot collide with a real uid, which is always hex.
+
+    `token_id` is the public handle (`agtok_…`) that listings, revocation and audit
+    entries key off. A `token_hash` must never be one: it is the verifier, so publishing
+    it — even hashed — would turn a listing endpoint into an oracle.
 
     Timestamps are ISO-8601 UTC strings, like every other table here.
     """
+
+    #: `agent_id` value for a token that is not bound to one agent (#126).
+    FLEET_TOKEN = ""
+
+    #: Columns added after the first release. `PRAGMA table_info` + `ALTER TABLE` is
+    #: how this project upgrades in place (no migration framework, one file).
+    _ADDED_COLUMNS = (
+        ("token_id", "TEXT"),
+        ("expires_at", "TEXT"),
+        ("max_agents", "INTEGER"),
+    )
 
     def __init__(self, db_path: Path = DB_PATH):
         self.db_path = db_path
         db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
+            # Before any write: WAL cannot be set inside a transaction, and the ALTER
+            # TABLE / UPDATE below open one on an existing database.
+            conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS agent_credentials (
                     token_hash TEXT PRIMARY KEY,
@@ -415,15 +447,40 @@ class SQLiteCredentialStore:
                     retire_on_use TEXT
                 )
             """)
+            existing = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(agent_credentials)")
+            }
+            for name, sql_type in self._ADDED_COLUMNS:
+                if name not in existing:
+                    conn.execute(
+                        f"ALTER TABLE agent_credentials ADD COLUMN {name} {sql_type}"
+                    )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS agent_credentials_agent_idx "
                 "ON agent_credentials(agent_id)"
             )
-            # WAL is a database-level setting, so it also benefits the agent and
-            # metrics writes sharing this file, and keeps an offline reader
-            # (`opampctl --db`) from blocking the auth path.
-            conn.execute("PRAGMA journal_mode=WAL")
-
+            # #126: which uids a token has been used by. The cap counts these, so the
+            # count survives a restart and a re-labelled token; the pair is the key so
+            # one agent can never consume two slots.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS agent_credential_agents (
+                    token_hash TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    first_seen_at TEXT NOT NULL,
+                    PRIMARY KEY (token_hash, agent_id)
+                )
+            """)
+            # Rows minted before #126 have no handle. Derive one from the hash: it is
+            # stable across restarts and only ever exposed as an opaque id.
+            conn.execute(
+                "UPDATE agent_credentials SET token_id='agtok_' || substr(token_hash, 1, 16) "
+                "WHERE token_id IS NULL"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS agent_credentials_token_id_idx "
+                "ON agent_credentials(token_id)"
+            )
     def _connect(self) -> sqlite3.Connection:
         # A short timeout + busy timeout instead of the default 5s exception:
         # auth runs on every agent message, so a lock held by a metrics write
@@ -440,16 +497,29 @@ class SQLiteCredentialStore:
     def add(
         self,
         token_hash: str,
-        agent_id: str,
+        agent_id: str = FLEET_TOKEN,
         label: str = "",
         retire_on_use: Optional[str] = None,
+        token_id: Optional[str] = None,
+        expires_at: Optional[str] = None,
+        max_agents: Optional[int] = None,
     ) -> None:
+        """Insert one token. `agent_id=""` (the default) is a fleet token (#126)."""
         with self._connect() as conn:
             conn.execute(
                 "INSERT INTO agent_credentials "
-                "(token_hash, agent_id, label, created_at, retire_on_use) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (token_hash, agent_id, label, utcnow().isoformat(), retire_on_use),
+                "(token_hash, agent_id, label, created_at, retire_on_use, token_id, "
+                "expires_at, max_agents) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    token_hash,
+                    agent_id,
+                    label,
+                    utcnow().isoformat(),
+                    retire_on_use,
+                    token_id or f"agtok_{token_hash[:16]}",
+                    expires_at,
+                    max_agents,
+                ),
             )
 
     def get(self, token_hash: str) -> Optional[Dict[str, Any]]:
@@ -536,6 +606,113 @@ class SQLiteCredentialStore:
         for row in rows:
             grouped[row["agent_id"]].append(self._row(row))
         return dict(grouped)
+
+    # -- #126: fleet tokens -------------------------------------------------
+
+    def list_all(self) -> List[Dict[str, Any]]:
+        """Every token, newest first, with its live use count.
+
+        The count comes from `agent_credential_agents` (distinct uids that presented
+        the token), so "3 of 15" is the same number the cap enforces — a second
+        source of truth would drift the moment a slot is refused.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT c.*, (SELECT COUNT(*) FROM agent_credential_agents a "
+                "WHERE a.token_hash = c.token_hash) AS agents_used "
+                "FROM agent_credentials c ORDER BY c.created_at DESC"
+            ).fetchall()
+        return [self._row(row) for row in rows]
+
+    def by_token_id(self, token_id: str) -> Optional[Dict[str, Any]]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM agent_credentials WHERE token_id=?", (token_id,)
+            ).fetchone()
+        return self._row(row) if row else None
+
+    def revoke_by_token_id(self, token_id: str) -> bool:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE agent_credentials SET revoked_at=? "
+                "WHERE token_id=? AND revoked_at IS NULL",
+                (utcnow().isoformat(), token_id),
+            )
+            return bool(cursor.rowcount)
+
+    def agents_for_token(self, token_hash: str) -> List[str]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT agent_id FROM agent_credential_agents WHERE token_hash=? "
+                "ORDER BY first_seen_at",
+                (token_hash,),
+            ).fetchall()
+        return [row["agent_id"] for row in rows]
+
+    def tokens_for_agent(self, agent_id: str) -> List[Dict[str, Any]]:
+        """Fleet tokens this uid has presented, newest first.
+
+        A fleet token is not the agent's identity, but "which token let this agent in"
+        is the first question when a cap is hit or a token leaks.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT c.* FROM agent_credentials c "
+                "JOIN agent_credential_agents a ON a.token_hash = c.token_hash "
+                "WHERE a.agent_id=? ORDER BY c.created_at DESC",
+                (agent_id,),
+            ).fetchall()
+        return [self._row(row) for row in rows]
+
+    def register_agent(
+        self,
+        token_hash: str,
+        agent_id: str,
+        max_agents: Optional[int],
+    ) -> str:
+        """Count `agent_id` against this token's cap. Returns `ok` or `agent_limit`.
+
+        `BEGIN IMMEDIATE` takes the write lock *before* the count, so two agents
+        racing for the last slot cannot both be admitted: the second one blocks, then
+        reads the post-insert count and is refused. A plain `with conn:` block would
+        defer the write until the INSERT and let both pass the check.
+
+        A uid that has already been seen is a no-op, so this runs on every message
+        without consuming a slot twice (the caller still caches the answer — see
+        `agent_auth` — because this is a write transaction on the auth path).
+        """
+        conn = self._connect()
+        conn.isolation_level = None
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            seen = conn.execute(
+                "SELECT 1 FROM agent_credential_agents "
+                "WHERE token_hash=? AND agent_id=?",
+                (token_hash, agent_id),
+            ).fetchone()
+            if seen:
+                conn.execute("COMMIT")
+                return AGENT_LIMIT_OK
+            if max_agents is not None:
+                used = conn.execute(
+                    "SELECT COUNT(*) FROM agent_credential_agents WHERE token_hash=?",
+                    (token_hash,),
+                ).fetchone()[0]
+                if used >= int(max_agents):
+                    conn.execute("COMMIT")
+                    return AGENT_LIMIT_REACHED
+            conn.execute(
+                "INSERT INTO agent_credential_agents "
+                "(token_hash, agent_id, first_seen_at) VALUES (?, ?, ?)",
+                (token_hash, agent_id, utcnow().isoformat()),
+            )
+            conn.execute("COMMIT")
+            return AGENT_LIMIT_OK
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        finally:
+            conn.close()
 
 
 class SQLitePrincipalStore:

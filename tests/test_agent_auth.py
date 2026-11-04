@@ -93,10 +93,22 @@ class TestCredentialStore:
         assert token not in json.dumps(rows)
         assert token not in json.dumps(agent_auth.credential_summary(VICTIM_UID.hex()))
 
-    def test_issue_rejects_a_non_uid(self):
-        for bad in ("", "not-hex", "11" * 15, "zz" * 16):
+    def test_issue_rejects_a_non_uid_when_the_token_is_bound(self):
+        """`""` is the *fleet* token since #126, so only a non-empty bad uid is an error."""
+        for bad in ("not-hex", "11" * 15, "zz" * 16, "  "):
             with pytest.raises(ValueError):
                 agent_auth.issue_token(bad)
+
+    def test_an_empty_agent_id_mints_a_fleet_token(self):
+        token, record = agent_auth.issue_token("", label="prod")
+        assert record["agent_id"] == SQLiteCredentialStore.FLEET_TOKEN
+        assert record["token_id"].startswith("agtok_")
+        # Not bound: it belongs to no agent's history, and it shows up as a fleet token.
+        assert agent_auth.CREDENTIALS.history(VICTIM_UID.hex()) == []
+        listed = agent_auth.list_tokens()
+        assert [row["token_id"] for row in listed] == [record["token_id"]]
+        assert listed[0]["bound"] is False
+        assert agent_auth.hash_token(token) == record["token_hash"]
 
     def test_rotation_marks_the_previous_credential(self):
         first, _ = agent_auth.issue_token(VICTIM_UID.hex())
@@ -185,12 +197,14 @@ class TestHttpEnforcement:
         assert response.status_code == 200
 
     def test_binding_conflict_is_refused_over_http(self, client):
-        """A uid bound to another principal may not be spoken for over HTTP either."""
+        """A uid bound to another credential may not be spoken for over HTTP either."""
         token = mint(client)["token"]
         REGISTRY.bind(1, VICTIM_UID, "someone-else")
         response = client.post("/v1/opamp", content=agent_message(VICTIM_UID), headers=bearer(token))
         assert response.status_code == 403
-        assert "principal" in response.json()["detail"]
+        # #126: the binding is keyed on the credential (a fleet token serves many uids,
+        # so the uid can no longer name the owner).
+        assert "credential" in response.json()["detail"]
         assert REGISTRY.principal_for(VICTIM_UID) == "someone-else"
 
 
@@ -228,7 +242,8 @@ class TestWebSocketEnforcement:
         assert AGENT_REGISTRY.get(ATTACKER_UID.hex()) is None
 
     def test_same_credential_reconnect_moves_the_binding(self, client, ws_on):
-        token = mint(client)["token"]
+        minted = mint(client)
+        token = minted["token"]
         with client.websocket_connect("/v1/opamp", headers=bearer(token)) as first:
             first.send_bytes(frame(VICTIM_UID))
             first.receive_bytes()
@@ -237,10 +252,11 @@ class TestWebSocketEnforcement:
                 second.send_bytes(frame(VICTIM_UID))
                 second.receive_bytes()
                 assert REGISTRY.connection_for(VICTIM_UID) != bound_before
-                assert REGISTRY.principal_for(VICTIM_UID) == VICTIM_UID.hex()
+                # #126: bindings are keyed on the credential's public handle.
+                assert REGISTRY.principal_for(VICTIM_UID) == minted["token_id"]
 
-    def test_takeover_by_a_different_principal_closes_1008(self, client, ws_on):
-        """A live binding held by another principal may not be claimed, even by
+    def test_takeover_by_a_different_credential_closes_1008(self, client, ws_on):
+        """A live binding held by another credential may not be claimed, even by
         the agent whose credential it is — the socket is refused, state untouched."""
         token = mint(client)["token"]
         REGISTRY.bind(1, VICTIM_UID, "someone-else")
@@ -252,13 +268,13 @@ class TestWebSocketEnforcement:
         assert REGISTRY.principal_for(VICTIM_UID) == "someone-else"
         assert AGENT_REGISTRY.get(VICTIM_UID.hex()) is None
 
-    def test_authenticated_principal_pre_empts_an_unauthenticated_binding(self, client, ws_on):
-        token = mint(client)["token"]
+    def test_authenticated_credential_pre_empts_an_unauthenticated_binding(self, client, ws_on):
+        minted = mint(client)
         REGISTRY.bind(1, VICTIM_UID, None)  # an `off`-mode socket from before the cutover
-        with client.websocket_connect("/v1/opamp", headers=bearer(token)) as ws:
+        with client.websocket_connect("/v1/opamp", headers=bearer(minted["token"])) as ws:
             ws.send_bytes(frame(VICTIM_UID))
             ws.receive_bytes()
-            assert REGISTRY.principal_for(VICTIM_UID) == VICTIM_UID.hex()
+            assert REGISTRY.principal_for(VICTIM_UID) == minted["token_id"]
 
 
 # --------------------------------------------------------------------- rotation

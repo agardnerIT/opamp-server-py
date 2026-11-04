@@ -133,35 +133,43 @@ opampctl agents compliance <agent-id>
 | Re-encrypt stored bodies | `config rotate-key --db data/opamp.db` | — | — |
 | Offline (no server) | `--db data/opamp.db …` | — | — |
 
-## Agent credentials (`OPAMP_AGENT_AUTH=token`)
+## Agent tokens (`OPAMP_AGENT_AUTH=token`, the default)
 
-When the server authenticates agents, each one sends `Authorization: Bearer <token>`
-in its collector config (`extensions.opamp.server.http.headers`, or `server.ws.headers`).
-The token **is** the agent's identity: `instance_uid` must match it, and a token for
-one agent claiming another's uid is refused (403 / WS 1008).
+Agents present `Authorization: Bearer <token>` in their config
+(`extensions.opamp.server.http.headers`, or `server.ws.headers`). Two kinds, and picking
+the wrong one is the most common mistake:
+
+| Kind | Mint with | Identity | Use when |
+|---|---|---|---|
+| **fleet** | `opampctl agent-tokens create` | the `instance_uid` the agent sends | Onboarding a fleet. Not bound to a uid, so it can be minted *before* any agent exists, and one token serves up to `--max-agents` agents |
+| **bound** | `opampctl agents token create <id>` | the token itself (uid must match, else 403/1008) | Pinning one credential to one agent you already know |
 
 ```bash
-opampctl agents list                                   # note the id
-opampctl --password "$ADMIN_PASSWORD" agents token create <id> --label prod-1
-#   -> {"token": "opamp_agent_...", "collector_snippet": "extensions:\n  opamp: ..."}
-opampctl agents get <id> | jq .credential              # enrolled/active/last_seen_at
-opampctl --password "$ADMIN_PASSWORD" agents token revoke <id>   # blocks delivery, keeps state
+opampctl agent-tokens create --label prod --expires-in-days 7 --max-agents 15
+#   -> {"token": "opamp_agent_...", "token_id": "agtok_...", "expires_at": ..., "collector_snippet": ...}
+opampctl agent-tokens list          # token_id, expires_at, agents_used/max_agents, active
+opampctl agent-tokens revoke agtok_...        # blocks new messages, keeps state + the row
 ```
 
 Rules that matter when acting on this:
 
-- The token is returned **once**; only its SHA-256 is stored. If you lose it, mint a
-  new one (rotation is zero-downtime: the old token retires on the first successful
-  use of the new one; `--retire-previous` cuts over immediately).
-- Never print a token into a report, issue, commit or chat transcript. `--raw` exists
-  for `TOKEN=$(opampctl ... --raw)` pipelines, not for display.
-- `401` on `/v1/opamp` = no/bad/revoked credential. `403` = valid credential, wrong
-  agent. Both are counted in `opamp_agent_auth_failures_total{reason}`.
-- Revocation is not a wipe: the agent's record, state and (later) desired config stay.
-  Don't "clean up" by deleting agents you revoked.
-- Minting needs the admin password, and the MCP tools for it are **absent** unless
-  the MCP process runs with `OPAMP_MCP_ALLOW_WRITES=true`. That is intentional.
-
+- A fleet token is **access, not identity**: it authorises the endpoint, and each agent
+  keeps its own uid. A bound token **is** identity and refuses any other uid.
+- The token is returned **once**; only its SHA-256 is stored. Never print it into a
+  report, issue, commit or chat transcript. `--raw` exists for
+  `TOKEN=$(opampctl ... --raw)` pipelines, not for display. Only `token_id` is safe to
+  quote — it is the handle revocation uses.
+- Diagnose a 401 by reason (`opamp_agent_auth_failures_total{reason}`):
+  `missing`/`malformed` = the agent's config; `unknown`/`revoked`/`expired` = the token;
+  `agent_limit` = the cap was reached (mint a new token, or raise it); `uid_mismatch` =
+  a bound token used by another agent. `403` = a valid credential refused on policy.
+- Always set `--expires-in-days` and `--max-agents` on a fleet token: those two are what
+  bound the damage from a leak. Revocation is not a wipe — the agent's record, state and
+  desired config stay.
+- Agent auth is on unless someone set `OPAMP_ALLOW_UNAUTHENTICATED_AGENTS=true`; check
+  `/health` → `config_push.agent_auth` and `agent_auth_override` before assuming either
+  way. Minting needs admin auth, and the MCP write tools are **absent** unless the MCP
+  process runs with `OPAMP_MCP_ALLOW_WRITES=true`. That is intentional.
 
 ## Agent types (#118)
 

@@ -1048,22 +1048,76 @@ class OpampClient:
         agent_id: str,
         label: str = "",
         retire_previous: bool = False,
+        expires_in_days: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """``POST /agents/{id}/token`` — mint a per-agent credential (admin).
+        """``POST /agents/{id}/token`` — mint a **bound** credential for one agent (admin).
 
         For ``OPAMP_AGENT_AUTH=token``. ``agent_id`` is the hex ``instance_uid`` the
         credential is bound to, so the credential may only ever speak for that one
-        agent. Returns ``{"agent_id", "token", "label", "created_at",
-        "collector_snippet", "note"}`` — the token is shown **once** and only its
-        SHA-256 is stored, so keep it. ``collector_snippet`` is a paste-ready
+        agent. Returns ``{"agent_id", "token", "token_id", "label", "created_at",
+        "expires_at", "collector_snippet", "note"}`` — the token is shown **once** and
+        only its SHA-256 is stored, so keep it. ``collector_snippet`` is a paste-ready
         ``extensions.opamp.server.<http|ws>.headers`` block.
 
         ``retire_previous=True`` revokes the agent's older credentials immediately;
         the default retires them on the first successful use of the new token, which
-        is what makes rotation zero-downtime.
+        is what makes rotation zero-downtime. ``expires_in_days=None`` means never.
+
+        For a token that onboards a *fleet* (no uid known in advance), use
+        :meth:`create_fleet_token`.
         """
-        body = {"label": label, "retire_previous": retire_previous}
+        body: Dict[str, Any] = {"label": label, "retire_previous": retire_previous}
+        if expires_in_days is not None:
+            body["expires_in_days"] = expires_in_days
         return self._post(f"/agents/{agent_id}/token", json=body)
+
+    def create_fleet_token(
+        self,
+        label: str = "",
+        expires_in_days: Optional[int] = None,
+        max_agents: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """``POST /agent-tokens`` — mint a fleet token (admin).
+
+        This is the token an operator generates *before* the fleet exists: it is not
+        bound to an ``instance_uid``, so nothing has to register first. Put it in each
+        agent's config and the server accepts the uid each agent invents for itself.
+
+        ``expires_in_days`` is 1-365 (1/7/30 are the presets) or ``None`` for never;
+        ``max_agents`` is 1+ or ``None`` for unlimited. The agent that would exceed the
+        cap is refused with 403 (``agent_limit``) and a line in the server log, so a
+        leaked token cannot consume the fleet.
+
+        Returns ``{"token", "token_id", "label", "created_at", "expires_at",
+        "max_agents", "collector_snippet", "note"}``. The token is shown **once**; use
+        ``token_id`` to list or revoke it.
+        """
+        body: Dict[str, Any] = {"label": label}
+        if expires_in_days is not None:
+            body["expires_in_days"] = expires_in_days
+        if max_agents is not None:
+            body["max_agents"] = max_agents
+        return self._post("/agent-tokens", json=body)
+
+    def list_agent_tokens(self) -> Dict[str, Any]:
+        """``GET /agent-tokens`` — every token's state, never a token or a hash.
+
+        Returns ``{"tokens": [{"token_id", "label", "bound", "agent_id",
+        "created_at", "expires_at", "expired", "max_agents", "agents_used",
+        "last_seen_at", "revoked_at", "active"}], "count": n}``. ``agents_used`` and
+        ``max_agents`` are the cap as an operator reads it ("3 of 15"); ``expires_at:
+        null`` means never.
+        """
+        return self._get("/agent-tokens")
+
+    def revoke_fleet_token(self, token_id: str) -> Dict[str, Any]:
+        """``DELETE /agent-tokens/{token_id}`` — revoke one token by its handle (admin).
+
+        Returns ``{"token_id", "revoked": true}``, or raises 404 if it does not exist
+        or was already revoked. Revocation blocks new messages immediately and keeps
+        the row and every agent's state.
+        """
+        return self._request("DELETE", f"/agent-tokens/{token_id}")
 
     def revoke_agent_token(self, agent_id: str) -> Dict[str, Any]:
         """``DELETE /agents/{id}/token`` — revoke every live credential (admin).

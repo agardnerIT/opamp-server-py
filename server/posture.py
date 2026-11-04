@@ -106,17 +106,41 @@ def allow_insecure_config_push() -> bool:
     return _env_flag("OPAMP_ALLOW_INSECURE_CONFIG_PUSH")
 
 
+def allow_unauthenticated_agents() -> bool:
+    """`OPAMP_ALLOW_UNAUTHENTICATED_AGENTS` — the explicit way back to the old default.
+
+    #126: agent auth is `token` unless `OPAMP_AGENT_AUTH` says otherwise, because a
+    tokenless OpAMP endpoint trusts whatever `instance_uid` a client puts in the body.
+    The old behaviour is still reachable, but only by saying so: the failure mode it
+    enables ("spin this up, bind to 0.0.0.0, whoops") is identical to
+    `OPAMP_ALLOW_INSECURE_CONFIG_PUSH`, so it gets the same shape — an override that is
+    logged at startup, reported in `/health` and shown as a banner in the UI.
+    """
+    return _env_flag("OPAMP_ALLOW_UNAUTHENTICATED_AGENTS")
+
+
 def agent_auth_mode() -> str:
-    """`OPAMP_AGENT_AUTH` normalised to `off|token|mtls` (unknown values = off)."""
+    """`OPAMP_AGENT_AUTH` normalised to `off|token|mtls`.
+
+    **Unset means `token`** (#126). A tokenless OpAMP endpoint believes whatever
+    `instance_uid` a client puts in the body, so it must be an explicit decision rather
+    than the thing you get by not deciding.
+
+    There are two ways to make that decision, and neither is silent: set
+    `OPAMP_AGENT_AUTH=off`, or set `OPAMP_ALLOW_UNAUTHENTICATED_AGENTS=true` and leave
+    the mode unset (for tooling that would otherwise have to know about this feature at
+    all — `docker-compose.yml` did exactly that). An unknown value is a typo, so it keeps
+    authentication **on** and says so, instead of quietly downgrading to open.
+    """
     raw = (os.environ.get("OPAMP_AGENT_AUTH") or "").strip().lower()
     if not raw:
-        return "off"
+        return "off" if allow_unauthenticated_agents() else "token"
     if raw not in VALID_AGENT_AUTH_MODES:
         logger.warning(
             f"Unknown OPAMP_AGENT_AUTH={raw!r} (expected one of "
-            f"{', '.join(VALID_AGENT_AUTH_MODES)}); treating agent auth as off"
+            f"{', '.join(VALID_AGENT_AUTH_MODES)}); agent auth stays on (token)"
         )
-        return "off"
+        return "off" if allow_unauthenticated_agents() else "token"
     return raw
 
 
@@ -164,6 +188,9 @@ def posture() -> Dict[str, object]:
         "enabled": config_push_enabled(),
         "insecure": insecure(),
         "agent_auth": agent_auth,
+        # #126: `off` is only reachable through an override, and a surface that shows
+        # the mode must be able to show *why* it is off.
+        "agent_auth_override": allow_unauthenticated_agents(),
         "audit": audit_enabled(),
         "tls": tls_enabled(),
         "config_at_rest": config_at_rest_mode(),

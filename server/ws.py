@@ -725,7 +725,11 @@ async def serve(
     not pushable. Production passes nothing, so the two are the same object.
     """
     registry = REGISTRY if registry is None else registry
-    principal_id = getattr(principal, "agent_id", None)
+    # The credential, not the uid: a fleet token (#126) has no single agent, and two
+    # agents behind it are the same principal for binding purposes.
+    principal_id = getattr(principal, "token_id", None) or getattr(
+        principal, "agent_id", None
+    )
     conn_id = registry.new_id()
     queue: asyncio.Queue = asyncio.Queue(maxsize=outbound_queue_depth())
     connection = registry.open(conn_id, queue, asyncio.get_running_loop(), principal_id)

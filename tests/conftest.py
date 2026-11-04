@@ -117,6 +117,12 @@ def isolated_global_stores(monkeypatch, tmp_path):
     # #46: the update loop must never reach GitHub from a test. Individual update
     # tests opt back in with their own fixture and a fake client.
     monkeypatch.setenv("UPDATE_CHECK", "off")
+    # #126: agent auth is now `token` unless the server is told otherwise. Most suites
+    # here are protocol tests that post AgentToServer messages without a credential, so
+    # the baseline is the explicit override rather than an implicit default; the auth
+    # suites set OPAMP_AGENT_AUTH themselves and keep testing the real gate.
+    monkeypatch.setenv("OPAMP_ALLOW_UNAUTHENTICATED_AGENTS", "true")
+    monkeypatch.delenv("OPAMP_AGENT_AUTH", raising=False)
     monkeypatch.setattr(updates, "STATE_PATH", tmp_path / "update-check.json")
     monkeypatch.setattr(updates, "SETTINGS_PATH", tmp_path / "update-settings.json")
     auth.reset_lockouts()

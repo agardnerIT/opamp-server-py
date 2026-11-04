@@ -480,6 +480,50 @@ def revoke_agent_token(agent_id: str) -> str:
     return _tool(lambda oc: oc.revoke_agent_token(agent_id))
 
 
+@mcp.tool()
+def list_agent_tokens() -> str:
+    """List agent tokens with expiry, cap and use (read-only; any role).
+
+    Never returns a token or a hash — `token_id` is the handle used to revoke one.
+    `agents_used`/`max_agents` is the cap ("3 of 15"), and `expired`/`active` are
+    computed server-side. Check this before blaming an agent for a 401: `expired` and
+    `agent_limit` are token-side refusals, not agent-side misconfiguration.
+    """
+    return _tool(lambda oc: oc.list_agent_tokens())
+
+
+def create_fleet_token(
+    label: str = "",
+    expires_in_days: Optional[int] = None,
+    max_agents: Optional[int] = None,
+) -> str:
+    """Mint a fleet agent token (admin; write-gated, requires ADMIN_PASSWORD).
+
+    Not bound to an instance_uid, so it can be minted *before* any agent has
+    contacted the server — this is the token that onboards a fleet. `max_agents` is
+    the cap that stops a leaked token from consuming the fleet (the agent over the
+    cap is refused `agent_limit`), and `expires_in_days` (1-365, or null for never)
+    bounds how long a leak is useful.
+
+    The token is returned once — only its hash is stored — with `token_id` (the
+    handle to list or revoke it) and a paste-ready `collector_snippet`.
+    """
+    return _tool(
+        lambda oc: oc.create_fleet_token(
+            label=label, expires_in_days=expires_in_days, max_agents=max_agents
+        )
+    )
+
+
+def revoke_fleet_token(token_id: str) -> str:
+    """Revoke one token by its handle (admin; write-gated).
+
+    Blocks new messages immediately, keeps the row (audit trail, cap count) and
+    leaves every agent's state alone.
+    """
+    return _tool(lambda oc: oc.revoke_fleet_token(token_id))
+
+
 def set_update_check(enabled: Optional[bool] = None) -> str:
     """Enable/disable automatic update checks (admin override); null clears it."""
     return _tool(lambda oc: oc.set_update_check(enabled))
@@ -502,6 +546,10 @@ def _register_write_tools() -> None:
         return
     mcp.tool()(create_agent_token)
     mcp.tool()(revoke_agent_token)
+    # #126: minting a fleet token is the operation that grants access to the endpoint,
+    # so it sits behind the same gate as every other write.
+    mcp.tool()(create_fleet_token)
+    mcp.tool()(revoke_fleet_token)
     # #99/D9: MCP may *propose*. Approve, reject, reactivate and rollback are never
     # tools here, at any setting — approval is a human role, and a client that can
     # approve its own proposal has no separation of duties to speak of.

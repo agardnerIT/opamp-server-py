@@ -49,6 +49,7 @@ def _clean_env(monkeypatch):
         "OPAMP_CONFIG_PUSH_ENABLED",
         "OPAMP_ALLOW_INSECURE_CONFIG_PUSH",
         "OPAMP_AGENT_AUTH",
+        "OPAMP_ALLOW_UNAUTHENTICATED_AGENTS",
         "PUBLIC_URL",
         "TLS_TERMINATED_UPSTREAM",
         "OPAMP_AUDIT_ENABLED",
@@ -69,11 +70,15 @@ def _clean_env(monkeypatch):
 # --------------------------------------------------------------------------- posture
 
 
-def test_defaults_are_off_and_safe():
+def test_defaults_are_closed():
     assert posture.config_push_enabled() is False
     assert posture.push_allowed() is False
     assert posture.insecure() is False
-    assert posture.agent_auth_mode() == "off"
+    # #126: agent auth is ON by default. This is the whole point of the issue — a
+    # tokenless OpAMP endpoint believes whatever uid the body claims, so being open
+    # has to be a decision rather than the thing you get by not deciding.
+    assert posture.agent_auth_mode() == "token"
+    assert posture.allow_unauthenticated_agents() is False
     assert posture.tls_enabled() is False
     # #97: the audit log is real now and on by default — an audit log an operator
     # has to remember to enable is off during every incident that matters.
@@ -81,11 +86,21 @@ def test_defaults_are_off_and_safe():
     assert posture.posture() == {
         "enabled": False,
         "insecure": False,
-        "agent_auth": "off",
+        "agent_auth": "token",
+        "agent_auth_override": False,
         "audit": True,
         "tls": False,
         "config_at_rest": "unconfigured",
     }
+
+
+def test_the_override_is_the_documented_way_back_to_open(monkeypatch):
+    monkeypatch.setenv("OPAMP_ALLOW_UNAUTHENTICATED_AGENTS", "true")
+    assert posture.agent_auth_mode() == "off"
+    assert posture.posture()["agent_auth_override"] is True
+    # ...and an explicit `off` still means off: the decision is honoured either way.
+    monkeypatch.setenv("OPAMP_AGENT_AUTH", "off")
+    assert posture.agent_auth_mode() == "off"
 
 
 def test_flag_parsing_accepts_truthy_spellings(monkeypatch):
@@ -97,8 +112,11 @@ def test_flag_parsing_accepts_truthy_spellings(monkeypatch):
         assert posture.config_push_enabled() is False, raw
 
 
-def test_unknown_agent_auth_mode_is_off(monkeypatch):
+def test_unknown_agent_auth_mode_stays_closed(monkeypatch):
+    """A typo must not open the endpoint (#126): unknown = the secure reading."""
     monkeypatch.setenv("OPAMP_AGENT_AUTH", "oauth-ish")
+    assert posture.agent_auth_mode() == "token"
+    monkeypatch.setenv("OPAMP_ALLOW_UNAUTHENTICATED_AGENTS", "true")
     assert posture.agent_auth_mode() == "off"
 
 
@@ -115,12 +133,21 @@ def test_tls_from_public_url_or_upstream_terminator(monkeypatch):
 
 def test_unmet_requirements_names_every_missing_item_at_once():
     missing = posture.unmet_requirements()
-    assert len(missing) == 4
+    # #126: agent auth is on by default, so it is no longer one of the misses — the
+    # remaining three are what a default install actually lacks.
+    assert len(missing) == 3
     assert "admin auth" in missing[0]
-    assert "agents are not authenticated" in missing[1]
-    assert "TLS" in missing[2]
+    assert "TLS" in missing[1]
     # #98: a plaintext config store is a requirement failure, not a warning.
-    assert "unencrypted" in missing[3]
+    assert "unencrypted" in missing[2]
+
+
+def test_an_open_endpoint_is_named_as_an_unmet_requirement(monkeypatch):
+    """Turning the override on must put agent auth back on the list (#126)."""
+    monkeypatch.setenv("OPAMP_ALLOW_UNAUTHENTICATED_AGENTS", "true")
+    assert any(
+        "agents are not authenticated" in item for item in posture.unmet_requirements()
+    )
 
 
 def test_requirements_met_gives_empty_list(monkeypatch, tmp_path):
@@ -174,9 +201,10 @@ def test_startup_refuses_naming_every_requirement(monkeypatch):
         posture.assert_startup_posture()
     message = str(exc.value)
     assert "refusing to start" in message
-    for fragment in ("admin auth", "agents are not authenticated", "TLS", "unencrypted"):
+    for fragment in ("admin auth", "TLS", "unencrypted"):
         assert fragment in message
-    assert len(exc.value.missing) == 4
+    # #126: agent auth is met by default, so it is not one of the three misses.
+    assert len(exc.value.missing) == 3
     assert "OPAMP_ALLOW_INSECURE_CONFIG_PUSH" in message
 
 
@@ -294,7 +322,9 @@ def test_posture_warning_is_loud_and_actionable(monkeypatch):
     warning = posture.posture_warning()
     assert warning is not None
     assert "Insecure config push is enabled" in warning
-    assert "any client can claim any agent identity" in warning
+    # #126: with the default `token` mode the agent path is enforced even here, so the
+    # warning must say so rather than claiming the endpoint is open.
+    assert "token (enforced)" in warning
     assert "cleartext" in warning
     assert "OPAMP_ALLOW_INSECURE_CONFIG_PUSH" in warning
 
@@ -324,7 +354,10 @@ def test_health_reports_posture(client):
     assert body["config_push"] == {
         "enabled": False,
         "insecure": False,
-        "agent_auth": "off",
+        # #126: on by default, and the override is reported so a UI can tell
+        # "enforced" from "enforced unless someone set the escape hatch".
+        "agent_auth": "token",
+        "agent_auth_override": False,
         "audit": True,
         "tls": False,
         "config_at_rest": "unconfigured",
@@ -387,14 +420,16 @@ def test_config_posture_reports_every_requirement(client):
         "audit",
         "config_at_rest",
     }
-    # #97: audit is the one requirement that is met out of the box.
+    # #97: audit is met out of the box. #126: so is agent auth — a default install
+    # refuses tokenless agents, which is the point of the issue.
     assert body["requirements"]["audit"]["met"] is True
+    assert body["requirements"]["agent_auth"]["met"] is True
     assert all(
         not state["met"]
         for key, state in body["requirements"].items()
-        if key != "audit"
+        if key not in ("audit", "agent_auth")
     )
-    assert len(body["unmet"]) == 4
+    assert len(body["unmet"]) == 3
     assert body["http"] == {
         "public_url": None,
         "tls": False,

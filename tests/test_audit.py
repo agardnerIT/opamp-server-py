@@ -577,6 +577,10 @@ AUDITED_ROUTES = {
     ("DELETE", "/auth/principals/{principal_id}"): "admin.principal.revoked",
     ("POST", "/agents/{agent_id}/token"): "agent.credential.issued",
     ("DELETE", "/agents/{agent_id}/token"): "agent.credential.revoked",
+    # #126: minting a fleet token grants access to the endpoint and revoking one takes
+    # it away, so both are recorded by `token_id` — never by the token.
+    ("POST", "/agent-tokens"): "agent.token.issued",
+    ("DELETE", "/agent-tokens/{token_id}"): "agent.token.revoked",
     ("POST", "/compliance/check/{agent_id}"): "compliance.checked",
     ("POST", "/compliance/reload"): "compliance.policies_reloaded",
     ("PUT", "/alerts"): "alerts.updated",

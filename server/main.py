@@ -1431,9 +1431,10 @@ def _handle_agent_message(
     check_uid_header(uid_header, original_uid, transport)
 
     if principal is not None:
-        # Identity comes from the credential, never from the body (D1). Reject
-        # before `_apply_status_report`, so an impostor cannot mutate even briefly.
-        agent_auth.authorize_uid(principal, agent_id)
+        # A bound token *is* the identity, so a mismatch is refused here; a fleet token
+        # authorises access and is counted against its cap (#126). Either way this runs
+        # before `_apply_status_report`, so a refusal cannot mutate state even briefly.
+        agent_auth.authorize_agent(principal, agent_id)
         if wants_uid:
             # A server-minted uid has no credential behind it, so honouring this in
             # token mode would create an unauthenticated agent (D1). Refuse instead.
@@ -1442,12 +1443,15 @@ def _handle_agent_message(
                 "with agent authentication the credential is the identity",
                 instance_uid=original_uid,
             )
+        # Keyed on the credential, not the uid: two agents behind one fleet token are
+        # the same principal and must not fight over a socket, while a second *token*
+        # taking over an agent's binding is exactly what this refuses (#94, #126).
         bound = WS_REGISTRY.principal_for(original_uid)
-        if bound is not None and bound != principal.agent_id:
+        if bound is not None and bound != principal.token_id:
             raise agent_auth.AgentAuthError(
                 agent_auth.REASON_BINDING_CONFLICT,
-                "instance_uid is bound to a different principal",
-                principal=principal.agent_id,
+                "instance_uid is bound to a different credential",
+                principal=principal.token_id,
                 claimed=agent_id,
             )
 
@@ -2296,10 +2300,135 @@ def get_agent(agent_id: str):
 
 
 class AgentTokenRequest(BaseModel):
-    """Optional body for credential issuance."""
+    """Optional body for bound-credential issuance (#94)."""
 
     label: str = ""
     retire_previous: bool = False
+    # #126: a bound token can expire too. `None` means never.
+    expires_in_days: int | None = None
+
+
+class AgentTokenCreate(BaseModel):
+    """Body for minting a fleet token (#126).
+
+    `expires_in_days` is one of 1/7/30 or null (never); `max_agents` is a positive
+    integer or null (unlimited). `agent_id` is absent on purpose: a fleet token is not
+    bound to a uid, which is the whole point — an admin can mint it before any agent has
+    ever contacted the server.
+    """
+
+    label: str = ""
+    expires_in_days: int | None = None
+    max_agents: int | None = None
+
+
+@app.post(
+    "/agent-tokens",
+    tags=["agents"],
+    summary="Mint a fleet agent token (admin)",
+    status_code=201,
+)
+def create_fleet_token(
+    request: Request,
+    response: Response,
+    body: AgentTokenCreate | None = None,
+):
+    """Mint a token that any number of agents may present, up to `max_agents` (#126).
+
+    This is the token an operator generates *before* the fleet exists: it is not bound
+    to an `instance_uid`, so nothing has to register first. Put it in each agent's
+    config (`extensions.opamp.server.http.headers.Authorization`, or `server.ws.headers`)
+    and the server accepts the uid each agent invents for itself.
+
+    Body (all optional): `{"label": "prod", "expires_in_days": 7, "max_agents": 15}`.
+    `expires_in_days` is 1-365, or `null` for never. `max_agents` is 1+, or `null` for
+    unlimited; the agent that would exceed it is refused with 403 (`agent_limit`) and a
+    line in the server log, so a leaked token cannot consume the fleet.
+
+    The plaintext token is returned **once** — only its SHA-256 is stored — along with
+    `token_id`, the public handle used to list and revoke it. It never appears in
+    `GET /agent-tokens`, in logs or in audit entries. Responses are `Cache-Control:
+    no-store`.
+    """
+    principal = require_roles(request, ROLE_ADMIN)
+    body = body or AgentTokenCreate()
+    try:
+        token, record = agent_auth.issue_token(
+            "",
+            label=body.label,
+            expires_in_days=body.expires_in_days,
+            max_agents=body.max_agents,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    audit_action(
+        principal,
+        "agent.token.issued",
+        target_kind="agent_token",
+        target_id=record.get("token_id", ""),
+        label=body.label,
+        expires_at=record.get("expires_at"),
+        max_agents=body.max_agents,
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return {
+        "token": token,
+        "token_id": record.get("token_id"),
+        "label": record.get("label", ""),
+        "created_at": record.get("created_at"),
+        "expires_at": record.get("expires_at"),
+        "max_agents": record.get("max_agents"),
+        "collector_snippet": agent_auth.collector_snippet(token),
+        "note": (
+            "Shown once and not recoverable: put it in the agents' config now. "
+            "The token's hash is all this server keeps. Revoke it with "
+            f"DELETE /agent-tokens/{record.get('token_id')} if it leaks."
+        ),
+    }
+
+
+@app.get("/agent-tokens", tags=["agents"], summary="List agent tokens (viewer)")
+def list_agent_tokens(request: Request):
+    """Every token, with its state and how much of its cap is used. Never a token.
+
+    Read-only, so a `viewer` may see it: an operator watching a fleet needs to know
+    which token is about to expire or has hit its agent cap, and neither fact is a
+    secret. `token_id` is an opaque handle, not a verifier — the token and its SHA-256
+    are absent from every row.
+
+    `agents_used` and `max_agents` are reported together because a cap is only
+    meaningful as "3 of 15"; `expires_at: null` means never; `expired` and `active`
+    are computed server-side so no client has to re-derive them.
+    """
+    require_roles(request, ROLE_VIEWER)
+    tokens = agent_auth.list_tokens()
+    return {"tokens": tokens, "count": len(tokens)}
+
+
+@app.delete(
+    "/agent-tokens/{token_id}",
+    tags=["agents"],
+    summary="Revoke one agent token (admin)",
+)
+def revoke_fleet_token(token_id: str, request: Request):
+    """Revoke a token by its public handle. Requires admin auth.
+
+    Idempotent: `{"token_id", "revoked": bool}`. Revocation blocks new messages
+    immediately, keeps the row (so the audit trail and the cap count survive) and does
+    **not** touch any agent's state — revoking a leaked token must not delete the fleet
+    it was used by.
+    """
+    principal = require_roles(request, ROLE_ADMIN)
+    if not agent_auth.revoke_token(token_id):
+        raise HTTPException(status_code=404, detail="no such token, or already revoked")
+    audit_action(
+        principal,
+        "agent.token.revoked",
+        target_kind="agent_token",
+        target_id=token_id,
+    )
+    return {"token_id": token_id, "revoked": True}
 
 
 @app.post(
@@ -2352,7 +2481,10 @@ def create_agent_token(
     )
     try:
         token, record = agent_auth.issue_token(
-            agent_id, label=body.label, retire_previous=body.retire_previous
+            agent_id,
+            label=body.label,
+            retire_previous=body.retire_previous,
+            expires_in_days=body.expires_in_days,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
@@ -2361,8 +2493,10 @@ def create_agent_token(
     return {
         "agent_id": record.get("agent_id", agent_id),
         "token": token,
+        "token_id": record.get("token_id"),
         "label": record.get("label", ""),
         "created_at": record.get("created_at"),
+        "expires_at": record.get("expires_at"),
         "collector_snippet": agent_auth.collector_snippet(
             token,
             agent_type=(

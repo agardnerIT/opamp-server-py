@@ -57,6 +57,10 @@ ROUTE_TO_CLIENT = {
     ("GET", "/auth/verify"): "auth_verify",
     ("POST", "/agents/{agent_id}/token"): "create_agent_token",
     ("DELETE", "/agents/{agent_id}/token"): "revoke_agent_token",
+    # #126: fleet tokens — mint before any agent exists, expire, and cap.
+    ("POST", "/agent-tokens"): "create_fleet_token",
+    ("GET", "/agent-tokens"): "list_agent_tokens",
+    ("DELETE", "/agent-tokens/{token_id}"): "revoke_fleet_token",
     ("GET", "/config/posture"): "config_posture",
     ("GET", "/updates"): "get_updates",
     ("POST", "/updates/check"): "check_updates",
@@ -103,6 +107,9 @@ CLI_COMMANDS = {
     "config rollout abort": ("config", "rollout", "abort"),
     "config rollout rollback": ("config", "rollout", "rollback"),
     "agents config restart": ("agents", "config", "restart"),
+    "agent-tokens create": ("agent-tokens", "create"),
+    "agent-tokens list": ("agent-tokens", "list"),
+    "agent-tokens revoke": ("agent-tokens", "revoke"),
     "agents types": ("agents", "types"),
     "agents set-type": ("agents", "set-type"),
     "agents custom send": ("agents", "custom", "send"),
@@ -128,6 +135,9 @@ MCP_READ_TOOLS = {
     # #118: reading the recognised agent types is how a client decides whether a
     # component list or a verdict means anything for a given agent.
     "list_agent_types",
+    # #126: "which token is about to expire or has hit its cap" is a read, and it is
+    # how an agent diagnoses a 401 it did not cause.
+    "list_agent_tokens",
     # #111: groups are propose-side. Reading them is how an agent picks a target
     # instead of inventing a filter; `create_group` is gated, never a read tool.
     "list_groups",

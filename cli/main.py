@@ -47,6 +47,10 @@ agents_app = typer.Typer(help="Agent inspection commands", no_args_is_help=True)
 token_app = typer.Typer(
     help="Agent credentials for OPAMP_AGENT_AUTH=token (#94)", no_args_is_help=True
 )
+fleet_token_app = typer.Typer(
+    help="Fleet agent tokens: expiring, capacity-limited, not bound to a uid (#126)",
+    no_args_is_help=True,
+)
 reports_app = typer.Typer(help="Markdown fleet reports", no_args_is_help=True)
 compliance_app = typer.Typer(help="OPA policy compliance", no_args_is_help=True)
 alerts_app = typer.Typer(help="Alert configuration (admin)", no_args_is_help=True)
@@ -79,6 +83,9 @@ groups_app = typer.Typer(
 
 app.add_typer(agents_app, name="agents", help="Agent inspection commands")
 agents_app.add_typer(token_app, name="token", help="Agent credentials (admin)")
+app.add_typer(
+    fleet_token_app, name="agent-tokens", help="Fleet agent tokens (#126)"
+)
 agents_app.add_typer(agent_config_app, name="config", help="Remote config for one agent")
 agents_app.add_typer(custom_app, name="custom", help="Custom messages (#85)")
 app.add_typer(reports_app, name="reports", help="Markdown fleet reports")
@@ -1749,6 +1756,66 @@ def agents_token_revoke(
     not a wipe). Idempotent: `revoked: 0` means there was nothing live.
     """
     _run(lambda oc: oc.revoke_agent_token(agent_id))
+
+
+# ------------------------------------------------------- fleet tokens (#126)
+
+
+@fleet_token_app.command("create")
+def agent_tokens_create(
+    label: str = typer.Option("", "--label", "-l", help="Free-form label, e.g. prod"),
+    expires_in_days: Optional[int] = typer.Option(
+        None,
+        "--expires-in-days",
+        "-e",
+        help="Days until this token stops working (1/7/30 are the presets). Omit for never",
+    ),
+    max_agents: Optional[int] = typer.Option(
+        None,
+        "--max-agents",
+        "-m",
+        help="How many agents may use this token. Omit for unlimited",
+    ),
+    raw: bool = typer.Option(False, "--raw", help="Print just the token (for $(...) use)"),
+) -> None:
+    """Mint a fleet token — admin, live server only.
+
+    Not bound to an instance UID, so it can be minted *before* any agent has
+    contacted the server: mint, paste into each agent's config, done. `--max-agents`
+    is the cap that stops a leaked token from consuming the fleet, and
+    `--expires-in-days` bounds how long a leak is useful. The token is shown once;
+    the response also carries `token_id` (use it to list or revoke) and a
+    `collector_snippet` to paste.
+    """
+    _run(
+        lambda oc: oc.create_fleet_token(
+            label=label, expires_in_days=expires_in_days, max_agents=max_agents
+        ),
+        raw_field="token" if raw else None,
+    )
+
+
+@fleet_token_app.command("list")
+def agent_tokens_list() -> None:
+    """List tokens with expiry, cap and use — never a token or a hash.
+
+    `agents_used` of `max_agents` is the cap as an operator reads it; `expired` and
+    `active` are computed server-side.
+    """
+    _run(lambda oc: oc.list_agent_tokens())
+
+
+@fleet_token_app.command("revoke")
+def agent_tokens_revoke(
+    token_id: str = typer.Argument(..., help="Token handle, e.g. agtok_1a2b3c4d5e6f7a8b"),
+) -> None:
+    """Revoke one token by its handle — admin, live server only.
+
+    Blocks new messages immediately, keeps the row (audit trail and cap count) and
+    leaves every agent's state alone: revoking a leaked token must not delete the
+    fleet it was used by.
+    """
+    _run(lambda oc: oc.revoke_fleet_token(token_id))
 
 
 @agents_app.command("report")

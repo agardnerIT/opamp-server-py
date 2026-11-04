@@ -348,30 +348,37 @@ def credential_summaries(
     }
 
 
-def collector_snippet(token: str, transport: str = "http") -> str:
-    """A paste-ready `extensions.opamp` block carrying the token.
-
-    This is the v1 bootstrap: the token goes into the agent's config, because the
-    collector extension cannot receive one in-band (see the module docstring).
-    """
+def snippet_endpoint(transport: str = "http") -> str:
+    """The OpAMP URL an agent should be pointed at (`http` or `ws` transport)."""
     base = (posture.public_url() or DEFAULT_ENDPOINT).rstrip("/")
     scheme, _, host = base.partition("://")
     if transport == "ws":
         ws_scheme = "wss" if scheme == "https" else "ws"
-        endpoint = f"{ws_scheme}://{host or base}/v1/opamp"
-        block = "ws"
-    else:
-        endpoint = f"{base}/v1/opamp"
-        block = "http"
-    return (
-        "extensions:\n"
-        "  opamp:\n"
-        "    server:\n"
-        f"      {block}:\n"
-        f"        endpoint: {endpoint}\n"
-        "        headers:\n"
-        f'          Authorization: "Bearer {token}"\n'
-    )
+        return f"{ws_scheme}://{host or base}/v1/opamp"
+    return f"{base}/v1/opamp"
+
+
+def collector_snippet(
+    token: str,
+    transport: str = "http",
+    agent_type: Optional[str] = None,
+) -> str:
+    """A paste-ready bootstrap block carrying the token, in the agent's own shape.
+
+    This is the v1 bootstrap: the token goes into the agent's config, because the
+    collector extension cannot receive one in-band (see the module docstring).
+
+    *#118*: the YAML is the `otelcol` profile's, not this module's. "How do I wire a
+    credential into this product" is exactly the kind of type-specific knowledge a
+    profile owns — a generic agent gets plain text (endpoint + header) rather than an
+    invented YAML document it cannot read. `agent_type` is the resolved profile name
+    when the agent is already known; a token is usually minted *before* the agent
+    first connects, so the default stays the collector block.
+    """
+    from server import profiles
+
+    profile = profiles.get(agent_type or "otelcol") or profiles.get("otelcol")
+    return profile.bootstrap_snippet(snippet_endpoint(transport), token)
 
 
 # --------------------------------------------------------------------- startup

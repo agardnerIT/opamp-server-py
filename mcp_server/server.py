@@ -240,6 +240,21 @@ def get_agent_metrics(agent_id: str) -> str:
     return _tool(lambda oc: oc.get_agent_metrics(agent_id))
 
 
+@mcp.tool()
+def list_agent_types() -> str:
+    """Agent types this server can recognise (#118). Read-only.
+
+    `otelcol` is an OpenTelemetry Collector (the server reads its components and may
+    judge its config); `generic` is any other OpAMP agent, whose config is stored and
+    relayed without being interpreted. Check this before reading a component list or
+    a validation verdict for an agent: for `generic`, both are collector-specific and
+    do not describe the agent. Every agent's `agent_type`, `agent_type_source`
+    (pinned/declared/sniffed/fallback) and `agent_type_warning` come back in
+    list_agents and get_agent.
+    """
+    return _tool(lambda oc: oc.agent_types())
+
+
 # --------------------------------------------------------------- remote config
 
 
@@ -470,6 +485,17 @@ def set_update_check(enabled: Optional[bool] = None) -> str:
     return _tool(lambda oc: oc.set_update_check(enabled))
 
 
+def set_agent_type(agent_id: str, agent_type: Optional[str] = None) -> str:
+    """Pin an agent's type, or return it to auto-detection (operator; write-gated).
+
+    Use when detection is wrong or the agent cannot say what it is: a pin outranks
+    every signal the agent sends, survives restarts and is audited. Pass null to
+    clear the pin. Names come from list_agent_types; an unknown name is refused (422)
+    rather than silently treated as `generic`.
+    """
+    return _tool(lambda oc: oc.set_agent_type(agent_id, agent_type))
+
+
 def _register_write_tools() -> None:
     """Expose the write tools only with OPAMP_MCP_ALLOW_WRITES=true (#94, #106)."""
     if not writes_enabled():
@@ -484,6 +510,9 @@ def _register_write_tools() -> None:
     # the blast radius of every future push, so it sits behind the same gate.
     mcp.tool()(create_group)
     mcp.tool()(set_update_check)
+    # #118: a pin changes what the server is willing to claim about an agent (and
+    # therefore which validator its configs face), so it is a write, not a read.
+    mcp.tool()(set_agent_type)
 
 
 # ------------------------------------------------------------------ manifests

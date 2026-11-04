@@ -31,6 +31,7 @@ Pure functions only: no FastAPI, no SQLite, no Streamlit.
 
 from __future__ import annotations
 
+import json
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Set
@@ -39,13 +40,14 @@ import yaml
 from loguru import logger
 
 from server import config_validation
+from server.profiles.base import YAML_CONTENT_TYPES as _YAML_CONTENT_TYPES
 from server.redaction import decode_text_body
 
 #: Content types that mean "this body is a collector config". An empty value is
 #: treated as YAML: older agents do not set it, and the field is optional by spec.
-YAML_CONTENT_TYPES = frozenset(
-    {"", "text/yaml", "application/yaml", "text/x-yaml", "application/x-yaml"}
-)
+#: Defined in `server.profiles.base` because profile identity inference (#118) needs
+#: the same set without importing the collector-shaped module.
+YAML_CONTENT_TYPES = _YAML_CONTENT_TYPES
 
 
 @dataclass(frozen=True)
@@ -113,13 +115,30 @@ def _decode_body(entry: Mapping[str, Any]) -> tuple[Optional[str], Optional[str]
     return decode_text_body(body) or body, None
 
 
+def _entry_field(entry: Mapping[str, Any], name: str) -> Any:
+    """Read a config-object field in either spelling.
+
+    Two callers, two conventions: the agent path is `MessageToDict` output
+    (`contentType`, `role`) and the API/revision path is a hand-written document
+    (`content_type`). Reading only one spelling is not a cosmetic bug — a missing
+    `content_type` silently means "YAML", so a JSON body would be *parsed as YAML*
+    and skipped with a misleading reason (#118 hit this while reading content types
+    for identity inference).
+    """
+    camel = name.split("_")[0] + "".join(part.title() for part in name.split("_")[1:])
+    for key in (name, camel):
+        if key in entry:
+            return entry.get(key)
+    return None
+
+
 def load_object(key: str, entry: Any) -> ConfigObject:
     """Decode and parse one map entry. Never raises; says why in `skipped`."""
     if not isinstance(entry, Mapping):
         return ConfigObject(key=key, skipped=f"entry is {type(entry).__name__}, not an object")
 
-    content_type = entry.get("content_type") or ""
-    role = entry.get("role") or ""
+    content_type = _entry_field(entry, "content_type") or ""
+    role = _entry_field(entry, "role") or ""
     if not is_yaml_content_type(content_type):
         return ConfigObject(
             key=key,
@@ -170,6 +189,44 @@ def objects(effective_config: Any) -> List[ConfigObject]:
     """Every object in the map, decoded, with `""` first. Never raises."""
     config_map = _config_map(effective_config)
     return [load_object(key, config_map[key]) for key in _ordered_keys(config_map)]
+
+
+def content_types(effective_config: Any) -> tuple:
+    """The normalised, de-duplicated `content_type`s the agent declared (#118).
+
+    Deliberately **no parsing**: this answers "how did the agent label its bodies",
+    which is what identity inference needs, and it runs on read paths. An undeclared
+    (`""`) content type is omitted rather than reported as `""` — per spec the field
+    is optional, so its absence is not a declaration of anything, and treating it as
+    "YAML" would make every pre-v0.20.0 agent look like it had declared a format.
+    """
+    found: List[str] = []
+    if isinstance(effective_config, (bytes, bytearray)):
+        try:
+            effective_config = bytes(effective_config).decode("utf-8")
+        except UnicodeDecodeError:
+            return ()
+    if isinstance(effective_config, str):
+        # The agent's report is stored as JSON text (that is what `AgentState` holds),
+        # and this is called from a read path, so decode defensively and never raise.
+        try:
+            effective_config = json.loads(effective_config)
+        except ValueError:
+            return ()
+    config_map = _config_map(effective_config)
+    for key in _ordered_keys(config_map):
+        entry = config_map[key]
+        if not isinstance(entry, Mapping):
+            continue
+        normalised = (
+            str(_entry_field(entry, "content_type") or "")
+            .split(";")[0]
+            .strip()
+            .lower()
+        )
+        if normalised and normalised not in found:
+            found.append(normalised)
+    return tuple(found)
 
 
 def _scalar_ids(value: Any) -> Set[Any]:

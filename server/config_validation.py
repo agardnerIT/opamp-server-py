@@ -192,6 +192,15 @@ class Verdict:
     normalised: Dict[str, Dict[str, str]] = field(default_factory=dict, repr=False)
     parsed: Dict[str, Any] = field(default_factory=dict, repr=False)
     checked_at: str = field(default_factory=lambda: _now())
+    # #118: *which* rules produced this verdict, and how that was decided
+    # (`pinned`/`declared`/`sniffed`/`fallback`, or `mixed` for a target set that
+    # spans profiles). A verdict that cannot name its profile is a verdict nobody can
+    # audit — and a structural "pass" for an agent the server never interpreted is the
+    # one dangerous thing a spoofable type could buy. Deliberately **not** part of
+    # `fingerprint()`: a stored revision approved before #118 must not become
+    # un-appliable because the attribution appeared.
+    profile: str = ""
+    profile_source: str = ""
 
     @property
     def ok(self) -> bool:
@@ -232,6 +241,8 @@ class Verdict:
             "policy": dict(self.policy),
             "fingerprint": self.fingerprint(),
             "checked_at": self.checked_at,
+            "profile": self.profile,
+            "profile_source": self.profile_source,
         }
 
 
@@ -933,6 +944,72 @@ def _detect_redaction(config_map: Any) -> bool:
     return bool(redaction.contains_redaction(config_map))
 
 
+def _target_profile(agents: Optional[Sequence[Any]]) -> Tuple[str, str]:
+    """Which profile the target agents resolve to, and how it was decided (#118).
+
+    Returns `("", "")` when the verdict is not agent-scoped (`POST /config/validate`
+    with no `agent_id`) — an unattributed verdict is honest about being unattributed —
+    and `("mixed", "mixed")` when the targets disagree, because picking the majority
+    would let one agent's type speak for another's config.
+    """
+    present = [agent for agent in (agents or ()) if agent is not None]
+    if not present:
+        return "", ""
+    from server import profiles
+
+    counts: Dict[Tuple[str, str], int] = {}
+    for agent in present:
+        resolution = profiles.resolve_cached(agent)
+        key = (resolution.name, resolution.source)
+        counts[key] = counts.get(key, 0) + 1
+    if len({name for name, _ in counts}) > 1:
+        return "mixed", "mixed"
+    (name, source), _ = max(counts.items(), key=lambda item: item[1])
+    return name, source
+
+
+def _annotate_profile(
+    verdict: Verdict, profile_name: str, source: str, agents: Sequence[Any]
+) -> None:
+    """Record the profile on the verdict, and say so when it is not interpreted.
+
+    This is the attribution half of #118 (the gating half is #119): a `generic` target
+    still gets the collector-specific checks, but the verdict now *says* that they are
+    collector-specific, so nobody reads a pass as "this agent's config is valid for
+    this agent". For every `otelcol` target this adds nothing — which is what keeps the
+    golden no-change test byte-identical.
+    """
+    verdict.profile = profile_name
+    verdict.profile_source = source
+    if not profile_name:
+        return
+    from server import profiles
+
+    if profile_name == "mixed":
+        verdict.add_warning(
+            "",
+            "the target agents resolve to more than one profile "
+            f"({', '.join(sorted({profiles.resolve_cached(a).name for a in agents}))}); "
+            "the findings below are collector-specific and may not describe every target",
+            "pin the agents that are not OpenTelemetry Collectors "
+            "(PUT /agent/{id}/type) so their configs are judged on their own terms",
+        )
+        return
+    profile = profiles.get(profile_name)
+    if profile is not None and not profile.validates_structure:
+        verdict.add_warning(
+            "",
+            f"the target profile is {profile_name!r}: the server does not interpret "
+            "this agent's configuration, so collector-specific findings below may not "
+            "apply",
+            "if this agent is an OpenTelemetry Collector, pin it with "
+            "PUT /agent/{id}/type; if it is not, expect these findings to be noise (#119)",
+        )
+
+
+#: The profile a verdict was produced under, and how it was decided (#118).
+
+
 def check_config_map(
     config_map: Any,
     *,
@@ -952,6 +1029,9 @@ def check_config_map(
     normalised = check_shape(config_map, verdict, allow_empty=allow_empty)
     if not normalised:
         return verdict
+
+    agent_list = list(agents or ())
+    _annotate_profile(verdict, *_target_profile(agent_list), agent_list)
 
     for key, entry in normalised.items():
         body = entry["body"]

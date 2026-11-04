@@ -453,3 +453,129 @@ def test_the_container_variant_rewrites_only_the_host():
     assert endpoint("http://collector-host:4320", in_container=True) == (
         "http://collector-host:4320/v1/opamp"
     )
+
+
+# --------------------------------------------- the snippet must match the mode (#124)
+
+
+def _opamp_server_block(**kwargs):
+    pytest.importorskip("streamlit")
+    yaml = pytest.importorskip("yaml")
+    from ui.shared import collector_config_snippet
+
+    return yaml.safe_load(collector_config_snippet("http://opamp.example:4320", **kwargs))[
+        "extensions"
+    ]["opamp"]["server"]
+
+
+def test_a_token_server_gets_the_headers_block_and_an_open_one_does_not():
+    """#124: the server's mode decides whether the pasted config can authenticate.
+
+    `OPAMP_AGENT_AUTH=token` answers 401 to the unauthenticated shape, and every server
+    that can push config must be in `token` mode — so the UI's default snippet was wrong
+    on exactly the deployments that were working.
+    """
+    assert _opamp_server_block(agent_auth="token")["http"]["headers"] == {
+        "Authorization": "Bearer ${env:OPAMP_AGENT_TOKEN}"
+    }
+    # `off` must be byte-for-byte what it always was: nothing to migrate for a default
+    # install, and no credential invented for a server that would ignore it.
+    assert "headers" not in _opamp_server_block(agent_auth="off")["http"]
+    assert "headers" not in _opamp_server_block()["http"]
+
+
+def test_the_credential_is_read_from_the_environment_not_the_file():
+    """A literal token in the snippet would be pasted into git, and into the report.
+
+    `configopaque` keeps `${env:…}` out of the agent's own effective-config report, which
+    this server stores and shows — so the indirection is a storage guarantee, not style.
+    """
+    value = _opamp_server_block(agent_auth="token")["http"]["headers"]["Authorization"]
+    assert value.startswith("Bearer ${env:") and value.endswith("}")
+    assert "opamp_agent_" not in value
+
+
+def test_the_mode_comes_from_the_public_posture_block_and_never_defaults_to_open():
+    pytest.importorskip("streamlit")
+    from ui.shared import AGENT_AUTH_UNKNOWN, agent_auth_mode
+
+    assert agent_auth_mode({"config_push": {"agent_auth": "token"}}) == "token"
+    assert agent_auth_mode({"config_push": {"agent_auth": "off"}}) == "off"
+    assert agent_auth_mode({"config_push": {"agent_auth": "mtls"}}) == "mtls"
+    # Unreachable, empty, or a mode this build does not know: `unknown`, because assuming
+    # "open" is how the snippet ends up 401ing (#124).
+    for payload in ({}, None, {"config_push": {}}, {"config_push": {"agent_auth": "nope"}}):
+        assert agent_auth_mode(payload) == AGENT_AUTH_UNKNOWN
+
+
+def test_every_mode_gets_a_sentence_and_an_unknown_mode_admits_it():
+    pytest.importorskip("streamlit")
+    from ui.shared import AGENT_AUTH_UNKNOWN, agent_auth_note
+
+    token_note = agent_auth_note("token")
+    assert "instance_uid" in token_note and "agents token create" in token_note
+    assert "off" in agent_auth_note("off")
+    assert "not enforced" in agent_auth_note("mtls")
+    assert "Could not read" in agent_auth_note(AGENT_AUTH_UNKNOWN)
+    # Nothing to say is a real answer, and the pages read `if note := ...`.
+    assert agent_auth_note("something-else") is None
+
+
+def test_both_snippet_pages_pass_the_server_mode_through():
+    """One helper, two pages: no second copy of the YAML (#116), no second mode read."""
+    agents = source(AGENTS_PAGE)
+    help_page = source(UI_DIR / "pages" / "4_Help.py")
+    for page in (agents, help_page):
+        assert "agent_auth_mode()" in page
+        assert "agent_auth=auth_mode" in page
+        assert "agent_auth_note(" in page
+
+
+# --------------------------------------------------- agent type badge (#118)
+
+
+class TestAgentTypeBadge:
+    """The badge is the point of keeping the provenance: a wrong guess must be visible.
+
+    Imported inside the tests (not at module level) so this file keeps working in an
+    environment without the UI dependencies — the rest of the file is source-level.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _shared(self):
+        pytest.importorskip("streamlit")
+        from ui import shared
+
+        return shared
+
+    def test_a_pin_says_so(self, _shared):
+        assert _shared.agent_type_badge(
+            {"agent_type": "generic", "agent_type_source": "pinned"}
+        ).endswith("(pinned)")
+
+    def test_an_inference_says_which_inference(self, _shared):
+        assert _shared.agent_type_badge(
+            {"agent_type": "otelcol", "agent_type_source": "sniffed"}
+        ).endswith("(sniffed)")
+        assert _shared.agent_type_badge(
+            {"agent_type": "otelcol", "agent_type_source": "declared"}
+        ).endswith("(declared)")
+
+    def test_a_fallback_is_not_dressed_up_as_a_decision(self, _shared):
+        assert _shared.agent_type_badge(
+            {"agent_type": "generic", "agent_type_source": "fallback"}
+        ) == "📦 generic"
+
+    def test_a_missing_type_does_not_crash_the_fleet_view(self, _shared):
+        assert _shared.agent_type_badge(None) == "⚪ unknown"
+        # A payload from before #118 (or a half-built dict): say "unknown", never a
+        # guess dressed up as a detection.
+        assert _shared.agent_type_badge({}) == "⚪ unknown"
+
+    def test_the_agents_page_shows_the_badge_and_the_warning(self):
+        source = AGENTS_PAGE.read_text()
+        assert "agent_type_badge" in source
+        assert "agent_type_warning" in source
+        # The table column and the detail panel both need it, or "generic" is only
+        # discoverable by opening an agent.
+        assert source.count("agent_type_badge(") >= 3

@@ -525,6 +525,8 @@ PRIVILEGED_ROUTES = [
     ("POST", "/alerts/test", "operator", {"event_type": "new_agent"}),
     ("POST", "/compliance/reload", "admin", {}),
     ("POST", "/compliance/check/" + "ab" * 16, "operator", {}),
+    # #118: pinning changes what the server claims about an agent, so it is operator+
+    ("PUT", "/agent/" + "ab" * 16 + "/type", "operator", {"agent_type": None}),
     ("POST", "/agents/" + "ab" * 16 + "/token", "admin", {}),
     ("DELETE", "/agents/" + "ab" * 16 + "/token", "admin", None),
 ]

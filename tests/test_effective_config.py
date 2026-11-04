@@ -16,6 +16,7 @@ import yaml
 
 from server import effective_config
 from server.effective_config import (
+    content_types,
     parse_effective_config,
     preferred_document,
     objects,
@@ -116,6 +117,40 @@ class TestSkippingNotCrashing:
         )
         assert result["receiver"] == {"otlp"}
 
+    def test_msg_to_dict_spelling_of_content_type_is_read(self):
+        """#118: agents report `contentType`, hand-written revisions say `content_type`.
+
+        Reading one spelling was a silent, dangerous hole: a missing content type
+        means "assume YAML", so a body declared `application/json` by an agent was
+        parsed as YAML and skipped for a misleading reason.
+        """
+        camel = objects(
+            _doc(**{"junk": {"body": "{}", "contentType": "application/json"}})
+        )[0]
+        assert camel.content_type == "application/json"
+        assert "not YAML" in camel.skipped
+
+        snake = objects(
+            _doc(**{"junk": {"body": "{}", "content_type": "application/json"}})
+        )[0]
+        assert (camel.content_type, camel.skipped) == (snake.content_type, snake.skipped)
+
+    def test_content_types_are_reported_without_parsing(self):
+        """#118: identity inference needs the labels, not a parse."""
+        document = _doc(
+            **{
+                "": {"body": _b64(CONFIG), "contentType": "text/yaml"},
+                "raw": {"body": _b64(RAW), "content_type": "application/json; charset=utf-8"},
+                "undeclared": {"body": _b64(RAW)},
+            }
+        )
+        assert content_types(document) == ("text/yaml", "application/json")
+
+    def test_content_types_is_empty_when_nothing_is_declared(self):
+        assert content_types(_doc(**{"": CONFIG})) == ()
+        assert content_types(None) == ()
+        assert content_types("not json") == ()
+
     def test_body_that_is_not_yaml_is_skipped(self):
         result = parse_effective_config(_doc(**{"": "not: valid: yaml: [[[", "raw": RAW}))
         # The unparseable object does not take the readable one down with it.
@@ -215,17 +250,21 @@ class TestAgentStateComponents:
 class TestComponentReadCost:
     def test_usage_is_parsed_once_per_reported_config(self, monkeypatch):
         """`GET /agents` walks every agent; reading the map must not re-parse each time."""
-        from server import state as state_module
+        # #118: the cart went with the horse — component extraction (and therefore this
+        # parse) moved from `server.state` into `server/profiles/otelcol.py`, which
+        # calls the shared reader in `server.effective_config`. The assertion is
+        # unchanged: one parse per reported config, whoever does the parsing.
+        from server import effective_config as effective_config_module
         from server.state import AgentState
 
         calls = []
-        original = state_module.parse_effective_config
+        original = effective_config_module.parse_effective_config
 
         def counting(document):
             calls.append(document)
             return original(document)
 
-        monkeypatch.setattr(state_module, "parse_effective_config", counting)
+        monkeypatch.setattr(effective_config_module, "parse_effective_config", counting)
 
         agent = AgentState(instance_uid=b"\x00" * 16, agent_id="c" * 32)
         agent.effective_config = json.dumps(_doc(collector=CONFIG))

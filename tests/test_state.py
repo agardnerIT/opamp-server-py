@@ -2,7 +2,9 @@ import pytest
 import tempfile
 from pathlib import Path
 from tests.uids import uid
-from server.state import AgentRegistry, AgentState, utcnow, CAPABILITY_TAGS, COMPONENT_TYPES, parse_effective_config, SQLiteAgentStore
+# #118: `COMPONENT_TYPES` (and the other collector tables) moved to
+# `server/profiles/otelcol.py`; the `_detect_type` tests moved to tests/test_profiles.py.
+from server.state import AgentRegistry, AgentState, utcnow, CAPABILITY_TAGS, parse_effective_config, SQLiteAgentStore
 from datetime import datetime, timedelta
 
 
@@ -70,30 +72,6 @@ class TestAgentState:
         labels = [t["label"] for t in tags]
         assert "Reports Status" in labels
         assert "Reports Own Metrics" in labels
-
-    def test_detect_type_receiver(self):
-        state = AgentState(instance_uid=uid("test"), agent_id="test")
-        assert state._detect_type("receivers/otlp") == "receiver"
-
-    def test_detect_type_processor(self):
-        state = AgentState(instance_uid=uid("test"), agent_id="test")
-        assert state._detect_type("processors/batch") == "processor"
-
-    def test_detect_type_exporter(self):
-        state = AgentState(instance_uid=uid("test"), agent_id="test")
-        assert state._detect_type("exporters/otlp") == "exporter"
-
-    def test_detect_type_extension(self):
-        state = AgentState(instance_uid=uid("test"), agent_id="test")
-        assert state._detect_type("extensions/zpages") == "extension"
-
-    def test_detect_type_connector(self):
-        state = AgentState(instance_uid=uid("test"), agent_id="test")
-        assert state._detect_type("connectors/forward") == "connector"
-
-    def test_detect_type_unknown(self):
-        state = AgentState(instance_uid=uid("test"), agent_id="test")
-        assert state._detect_type("some/random") == "unknown"
 
     def test_components_groups_by_type(self):
         state = AgentState(

@@ -1527,6 +1527,41 @@ def agents_metrics(agent_id: str = typer.Argument(..., help="Agent instance UID 
     _run(lambda oc: oc.get_agent_metrics(agent_id))
 
 
+@agents_app.command("types")
+def agents_types() -> None:
+    """List the agent types this server recognises (#118), and what each one implies.
+
+    `validates_structure` is the one that matters before a push: `false` means the
+    server stores the agent's config without interpreting it, so a collector-specific
+    finding (or a pass) does not describe it.
+    """
+    _run(lambda oc: oc.agent_types())
+
+
+@agents_app.command("set-type")
+def agents_set_type(
+    agent_id: str = typer.Argument(..., help="Agent instance UID (hex)"),
+    agent_type: Optional[str] = typer.Argument(
+        None, help="Profile name from `opampctl agents types` (omit with --auto)"
+    ),
+    auto: bool = typer.Option(
+        False, "--auto", help="Clear the pin and let the server detect the type again"
+    ),
+) -> None:
+    """Pin an agent's type (operator), or return it to auto-detection with --auto.
+
+    Every automatic signal is the agent's own claim, so this is how an operator says
+    "I know what this is". The pin is server-side, survives restarts and is audited.
+    Unknown names are refused (HTTP 422) rather than silently treated as `generic`.
+    """
+    if auto and agent_type:
+        _fail("Pass either a type or --auto, not both")
+    if not auto and not agent_type:
+        _fail("Pass a type (see `opampctl agents types`) or --auto")
+    pinned = None if auto else agent_type
+    _run(lambda oc: oc.set_agent_type(agent_id, pinned))
+
+
 @agents_app.command("manifest")
 def agents_manifest(
     agent_id: str = typer.Argument(..., help="Agent instance UID (hex)"),

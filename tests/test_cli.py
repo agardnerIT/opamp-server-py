@@ -300,6 +300,15 @@ class TestOffline:
         data = parse(run("--db", str(offline_db), "agents", "list", "--status", "APPLIED"))
         assert data["count"] == 1 and data["agents"][0]["remote_config_status"] == "APPLIED"
 
+    def test_agents_list_carries_the_agent_type(self, offline_db):
+        """#118: the type and its provenance come from `to_dict`, so `--db` has them."""
+        data = parse(run("--db", str(offline_db), "agents", "list"))
+        by_id = {agent["id"]: agent for agent in data["agents"]}
+        assert by_id["aaaa1111aaaa1111"]["agent_type"] == "otelcol"
+        assert by_id["aaaa1111aaaa1111"]["agent_type_source"] in ("declared", "sniffed")
+        assert by_id["bbbb2222bbbb2222"]["agent_type"] == "generic"
+        assert by_id["bbbb2222bbbb2222"]["agent_type_warning"]
+
     def test_agents_get_with_metrics(self, offline_db):
         data = parse(run("--db", str(offline_db), "agents", "get", "aaaa1111aaaa1111"))
         # Same shape as the API: data['metrics'] is the persisted entry.

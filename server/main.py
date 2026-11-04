@@ -75,6 +75,7 @@ from server import (
     custom_messages,
     groups,
     posture,
+    profiles,
     protocol,
     redaction,
     remote_config,
@@ -2166,6 +2167,104 @@ def list_agents(
     return {"agents": agents, "count": len(agents), "filters": filters}
 
 
+@app.get(
+    "/agent/types",
+    tags=["agents"],
+    summary="List the agent types this build can recognise",
+)
+def list_agent_types():
+    """Every registered agent profile, in match order (#118). Unauthenticated.
+
+    `otelcol` is what this server used to assume about *everything*; `generic` is
+    the spec's baseline — an agent whose configuration the server stores and relays
+    without interpreting. Each entry carries `validates_structure` (may the server
+    judge a body's structure for this agent?), the `content_types` and download
+    filename it accepts, which `reports` apply, and whether it can be `detectable`
+    at all (a profile with no matchers can only be reached by a pin).
+
+    This route is declared before `/agent/{agent_id}` so `types` is not read as an
+    agent id.
+    """
+    return {"types": profiles.describe(), "count": len(profiles.PROFILES)}
+
+
+class AgentTypeRequest(BaseModel):
+    """Pin an agent's type, or return it to auto-detection."""
+
+    agent_type: Optional[str] = Field(
+        default=None,
+        description="A registered profile name (see GET /agent/types), or null for auto",
+    )
+
+
+@app.put(
+    "/agent/{agent_id}/type",
+    tags=["agents"],
+    summary="Pin (or unpin) an agent's type (operator)",
+)
+def put_agent_type(agent_id: str, request: Request, body: AgentTypeRequest):
+    """Tell the server what this agent is, instead of letting it guess. Requires `operator`.
+
+    **Why this exists**: every automatic signal is the agent's own claim —
+    `service.name`, `content_type`, the shape of its payloads — and the OpAMP server
+    authenticates the *channel*, not the payload. A pin is the server-side answer:
+    it outranks detection, survives restarts (it is a column on the agent row) and is
+    audited (`agent.type.pinned` / `agent.type.auto`).
+
+    Body: `{"agent_type": "otelcol"}` to pin, `{"agent_type": null}` (or `""`) to
+    return to auto-detection. Responds 404 for an unknown agent, **422 for a name no
+    registered profile provides** — never a silent fall back to `generic`, because
+    "pinned to a typo" and "deliberately opaque" must not look the same — and 403
+    without an operator role.
+
+    Returns the same four `agent_type*` fields `GET /agent/{id}` carries, so the
+    caller sees the resolution and its provenance rather than just the value it sent.
+    """
+    principal = require_roles(request, ROLE_OPERATOR)
+
+    agent = AGENT_REGISTRY.get(agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail="Agent not found")
+
+    requested = (body.agent_type or "").strip() or None
+    if requested is not None:
+        # Store the canonical spelling: a pin arrives from a human as often as from
+        # code, and two spellings of one profile in the database is a bug waiting for
+        # a comparison.
+        canonical = profiles.canonical(requested)
+        if canonical is None:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"unknown agent type {requested!r}; known types: "
+                    f"{', '.join(profiles.names())}"
+                ),
+            )
+        requested = canonical
+
+    previous = agent.agent_type
+    # #97: validated, then recorded, then acted. A pin changes what the server is
+    # willing to claim about an agent, so it is a privileged mutation — and the audit
+    # row names both ends of the change, because "changed" is not actionable.
+    audit_action(
+        principal,
+        "agent.type.pinned" if requested else "agent.type.auto",
+        target_kind="agent",
+        target_id=agent_id,
+        agent_type=requested,
+        previous=previous,
+    )
+    AGENT_REGISTRY.update(agent_id, agent_type=requested)
+
+    info = agent.type_info()
+    return {
+        "agent_id": agent_id,
+        "changed": previous != requested,
+        "previous": previous,
+        **info,
+    }
+
+
 @app.get("/agent/{agent_id}", tags=["agents"], summary="Full details for one agent")
 def get_agent(agent_id: str):
     """Return full details for a single agent, including its latest OTLP metrics.
@@ -2264,7 +2363,14 @@ def create_agent_token(
         "token": token,
         "label": record.get("label", ""),
         "created_at": record.get("created_at"),
-        "collector_snippet": agent_auth.collector_snippet(token),
+        "collector_snippet": agent_auth.collector_snippet(
+            token,
+            agent_type=(
+                AGENT_REGISTRY.get(agent_id).type_info()["agent_type"]
+                if AGENT_REGISTRY.get(agent_id) is not None
+                else None
+            ),
+        ),
         "note": (
             "Shown once and not recoverable: put it in the agent's config now. "
             "The token's hash is all this server keeps."
@@ -3487,6 +3593,10 @@ def validate_config(body: ValidateConfigRequest, request: Request):
             else None,
             "size_bytes": _config_size(verdict.normalised),
             "objects": len(verdict.normalised) or None,
+            # #118: which profile's rules produced this verdict, and how it was
+            # decided. `""` means the request named no agent, so nothing was assumed.
+            "profile": verdict.profile,
+            "profile_source": verdict.profile_source,
         }
     size = _config_size(verdict.normalised)
     return {
@@ -3500,6 +3610,8 @@ def validate_config(body: ValidateConfigRequest, request: Request):
         "config_hash": remote_config.compute_hash(verdict.normalised),
         "size_bytes": size,
         "objects": len(verdict.normalised),
+        "profile": verdict.profile,
+        "profile_source": verdict.profile_source,
     }
 
 

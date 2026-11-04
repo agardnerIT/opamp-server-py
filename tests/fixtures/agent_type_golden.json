@@ -1,0 +1,379 @@
+{
+  "agents": [
+    {
+      "available_components": {
+        "components": {
+          "exporters": {
+            "subComponentMap": {
+              "debug": {
+                "metadata": [
+                  {
+                    "key": "code.namespace",
+                    "value": {
+                      "stringValue": "go.opentelemetry.io/collector/receiver/otlpreceiver v0.149.0"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "extensions": {
+            "subComponentMap": {
+              "opamp": {
+                "metadata": [
+                  {
+                    "key": "code.namespace",
+                    "value": {
+                      "stringValue": "go.opentelemetry.io/collector/receiver/otlpreceiver v0.149.0"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "processors": {
+            "subComponentMap": {
+              "batch": {
+                "metadata": [
+                  {
+                    "key": "code.namespace",
+                    "value": {
+                      "stringValue": "go.opentelemetry.io/collector/receiver/otlpreceiver v0.149.0"
+                    }
+                  }
+                ]
+              }
+            }
+          },
+          "receivers": {
+            "subComponentMap": {
+              "otlp": {
+                "metadata": [
+                  {
+                    "key": "code.namespace",
+                    "value": {
+                      "stringValue": "go.opentelemetry.io/collector/receiver/otlpreceiver v0.149.0"
+                    }
+                  }
+                ]
+              },
+              "prometheus": {
+                "metadata": [
+                  {
+                    "key": "code.namespace",
+                    "value": {
+                      "stringValue": "go.opentelemetry.io/collector/receiver/otlpreceiver v0.140.0"
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "hash": "aGFzaA=="
+      },
+      "capabilities": 2571,
+      "capability_tags": [
+        {
+          "icon": "\ud83d\udcca",
+          "label": "Reports Status"
+        },
+        {
+          "icon": "\u2699\ufe0f",
+          "label": "Accepts Remote Config"
+        },
+        {
+          "icon": "\ud83d\udce6",
+          "label": "Accepts Packages"
+        },
+        {
+          "icon": "\ud83c\udf10",
+          "label": "Accepts Other Connections"
+        },
+        {
+          "icon": "\u2764\ufe0f",
+          "label": "Reports Health"
+        }
+      ],
+      "command_delivered_at": null,
+      "compliance": null,
+      "components": {
+        "exporter": [
+          {
+            "id": "debug",
+            "used": true,
+            "version": "0.149.0"
+          }
+        ],
+        "extension": [
+          {
+            "id": "opamp",
+            "used": true,
+            "version": "0.149.0"
+          }
+        ],
+        "processor": [
+          {
+            "id": "batch",
+            "used": true,
+            "version": "0.149.0"
+          }
+        ],
+        "receiver": [
+          {
+            "id": "otlp",
+            "used": true,
+            "version": "0.149.0"
+          },
+          {
+            "id": "prometheus",
+            "used": false,
+            "version": "0.140.0"
+          }
+        ]
+      },
+      "components_request_ignored": 0,
+      "config_error": null,
+      "connected_at": "2025-01-02T03:04:05+00:00",
+      "custom_capabilities": [],
+      "custom_message_delivered_at": null,
+      "description": {
+        "identifyingAttributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "otelcol-contrib"
+            }
+          },
+          {
+            "key": "service.version",
+            "value": {
+              "stringValue": "0.149.0"
+            }
+          }
+        ],
+        "nonIdentifyingAttributes": [
+          {
+            "key": "os.type",
+            "value": {
+              "stringValue": "linux"
+            }
+          },
+          {
+            "key": "environment",
+            "value": {
+              "stringValue": "prod"
+            }
+          }
+        ]
+      },
+      "effective_config": "{\"configMap\": {\"configMap\": {\"\": {\"body\": \"cmVjZWl2ZXJzOgogIG90bHA6CiAgICBwcm90b2NvbHM6CiAgICAgIGdycGM6IHt9CiAgcHJvbWV0aGV1czoKICAgIGNvbmZpZzoKICAgICAgc2NyYXBlX2NvbmZpZ3M6IFtdCnByb2Nlc3NvcnM6CiAgYmF0Y2g6IHt9CmV4cG9ydGVyczoKICBkZWJ1Zzoge30KICBvdGxwaHR0cDoKICAgIGVuZHBvaW50OiBodHRwOi8vZXhhbXBsZS5pbnZhbGlkOjQzMTgKZXh0ZW5zaW9uczoKICBvcGFtcDoge30KICBoZWFsdGhfY2hlY2s6IHt9CnNlcnZpY2U6CiAgZXh0ZW5zaW9uczogW29wYW1wLCBoZWFsdGhfY2hlY2tdCiAgcGlwZWxpbmVzOgogICAgdHJhY2VzOgogICAgICByZWNlaXZlcnM6IFtvdGxwXQogICAgICBwcm9jZXNzb3JzOiBbYmF0Y2hdCiAgICAgIGV4cG9ydGVyczogW2RlYnVnXQo=\", \"contentType\": \"text/yaml\"}}}}",
+      "effective_config_redacted": false,
+      "healthy": true,
+      "id": "11111111111111111111111111111111",
+      "last_heartbeat": "2025-01-02T03:04:05+00:00",
+      "last_remote_config_hash": null,
+      "last_requested_components_hash": null,
+      "last_sequence_num": null,
+      "package_statuses": {
+        "packages": {
+          "collector": {
+            "agentHasVersion": "0.149.0",
+            "name": "collector"
+          }
+        }
+      },
+      "pending_command": null,
+      "pending_custom_message": null,
+      "redacted_paths": [],
+      "remote_config_error": null,
+      "remote_config_status": "APPLIED",
+      "report_interval_seconds": null,
+      "uid_reissue_reason": null,
+      "uid_reissued_from": null
+    },
+    {
+      "available_components": {},
+      "capabilities": 4,
+      "capability_tags": [
+        {
+          "icon": "\ud83d\udccb",
+          "label": "Reports Effective Config"
+        }
+      ],
+      "command_delivered_at": null,
+      "compliance": null,
+      "components": {},
+      "components_request_ignored": 0,
+      "config_error": null,
+      "connected_at": "2025-01-02T03:04:05+00:00",
+      "custom_capabilities": [],
+      "custom_message_delivered_at": null,
+      "description": {
+        "identifyingAttributes": [
+          {
+            "key": "service.name",
+            "value": {
+              "stringValue": "my-collector"
+            }
+          },
+          {
+            "key": "service.version",
+            "value": {
+              "stringValue": "0.149.0"
+            }
+          }
+        ],
+        "nonIdentifyingAttributes": [
+          {
+            "key": "os.type",
+            "value": {
+              "stringValue": "linux"
+            }
+          },
+          {
+            "key": "environment",
+            "value": {
+              "stringValue": "prod"
+            }
+          }
+        ]
+      },
+      "effective_config": "{\"configMap\": {\"configMap\": {\"\": {\"body\": \"cmVjZWl2ZXJzOgogIG90bHA6CiAgICBwcm90b2NvbHM6CiAgICAgIGdycGM6IHt9CiAgcHJvbWV0aGV1czoKICAgIGNvbmZpZzoKICAgICAgc2NyYXBlX2NvbmZpZ3M6IFtdCnByb2Nlc3NvcnM6CiAgYmF0Y2g6IHt9CmV4cG9ydGVyczoKICBkZWJ1Zzoge30KICBvdGxwaHR0cDoKICAgIGVuZHBvaW50OiBodHRwOi8vZXhhbXBsZS5pbnZhbGlkOjQzMTgKZXh0ZW5zaW9uczoKICBvcGFtcDoge30KICBoZWFsdGhfY2hlY2s6IHt9CnNlcnZpY2U6CiAgZXh0ZW5zaW9uczogW29wYW1wLCBoZWFsdGhfY2hlY2tdCiAgcGlwZWxpbmVzOgogICAgdHJhY2VzOgogICAgICByZWNlaXZlcnM6IFtvdGxwXQogICAgICBwcm9jZXNzb3JzOiBbYmF0Y2hdCiAgICAgIGV4cG9ydGVyczogW2RlYnVnXQo=\", \"contentType\": \"text/yaml\"}}}}",
+      "effective_config_redacted": false,
+      "healthy": false,
+      "id": "22222222222222222222222222222222",
+      "last_heartbeat": "2025-01-02T03:04:05+00:00",
+      "last_remote_config_hash": null,
+      "last_requested_components_hash": null,
+      "last_sequence_num": null,
+      "package_statuses": {},
+      "pending_command": null,
+      "pending_custom_message": null,
+      "redacted_paths": [],
+      "remote_config_error": null,
+      "remote_config_status": "UNSET",
+      "report_interval_seconds": null,
+      "uid_reissue_reason": null,
+      "uid_reissued_from": null
+    },
+    {
+      "available_components": {},
+      "capabilities": 0,
+      "capability_tags": [],
+      "command_delivered_at": null,
+      "compliance": null,
+      "components": {},
+      "components_request_ignored": 0,
+      "config_error": null,
+      "connected_at": "2025-01-02T03:04:05+00:00",
+      "custom_capabilities": [],
+      "custom_message_delivered_at": null,
+      "description": {
+        "identifyingAttributes": [],
+        "nonIdentifyingAttributes": []
+      },
+      "effective_config": null,
+      "effective_config_redacted": false,
+      "healthy": null,
+      "id": "33333333333333333333333333333333",
+      "last_heartbeat": "2025-01-02T03:04:05+00:00",
+      "last_remote_config_hash": null,
+      "last_requested_components_hash": null,
+      "last_sequence_num": null,
+      "package_statuses": {},
+      "pending_command": null,
+      "pending_custom_message": null,
+      "redacted_paths": [],
+      "remote_config_error": null,
+      "remote_config_status": "UNSET",
+      "report_interval_seconds": null,
+      "uid_reissue_reason": null,
+      "uid_reissued_from": null
+    }
+  ],
+  "components": [
+    {
+      "exporter": [
+        {
+          "id": "debug",
+          "used": true,
+          "version": "0.149.0"
+        }
+      ],
+      "extension": [
+        {
+          "id": "opamp",
+          "used": true,
+          "version": "0.149.0"
+        }
+      ],
+      "processor": [
+        {
+          "id": "batch",
+          "used": true,
+          "version": "0.149.0"
+        }
+      ],
+      "receiver": [
+        {
+          "id": "otlp",
+          "used": true,
+          "version": "0.149.0"
+        },
+        {
+          "id": "prometheus",
+          "used": false,
+          "version": "0.140.0"
+        }
+      ]
+    },
+    {},
+    {}
+  ],
+  "fleet_report": "# Agent Report\nGenerated: <captured>\n\nTotal Agents: 3\n\n## Component Versions\n- **0.140.0**: 1 components\n- **0.149.0**: 4 components\n\n## Outdated Collectors\nAll collectors are up to date.\n## Heavy Collectors (Unused Components)\n- **1111111111111111**: 1/5 components unused (20%)\n\n## Detailed Agent List\n### 1111111111111111...\n\n- Healthy: True\n- Receiver: 2 total, 1 in use\n- Processor: 1 total, 1 in use\n- Exporter: 1 total, 1 in use\n- Extension: 1 total, 1 in use\n\n### 2222222222222222...\n\n- Healthy: False\n\n### 3333333333333333...\n\n- Healthy: None\n\n",
+  "heavy_report": "# Heavy Collectors Report\nGenerated: <captured>\nShowing collectors with >50% unused components\n\nFound 0 heavy collector(s)\n\n",
+  "outdated_report": "# Outdated Collectors Report\nGenerated: <captured>\nLatest version: v0.149.0\n\nFound 1 outdated collector(s)\n\n## Outdated Collectors\n### 1111111111111111\n- Oldest component: v0.140.0\n- Outdated components:\n  - receiver/prometheus: v0.140.0\n\n",
+  "verdict": {
+    "checked_at": "<captured>",
+    "errors": [],
+    "fingerprint": "9e5a9000f7a54a69e9a8a0a231c21d50d25a8fdd4310e88e5bb1cdbd22d62ea7",
+    "ok": true,
+    "policy": {
+      "status": "skipped",
+      "violations": []
+    },
+    "warnings": [
+      {
+        "hint": "the agent will keep its local endpoint; state it explicitly if the control channel must be verifiable",
+        "message": "no endpoint is set for the `opamp` extension in this config",
+        "path": "extensions.opamp",
+        "severity": "warning"
+      },
+      {
+        "hint": "keeping telemetry is how you find out a rollout went wrong",
+        "message": "`service.telemetry` is not set: the collector's own logs/metrics are not configured",
+        "path": "service.telemetry",
+        "severity": "warning"
+      },
+      {
+        "hint": "without it a collector under load is OOM-killed, which looks like a crash loop",
+        "message": "no `memory_limiter` processor is used in any pipeline",
+        "path": "processors.memory_limiter",
+        "severity": "warning"
+      },
+      {
+        "hint": "the config will fail to start on that agent; check the collector distribution (`ocb` manifest) shipped there",
+        "message": "`otlphttp` is not in the available components of 1 target agent(s): 11111111",
+        "path": "exporters.otlphttp",
+        "severity": "warning"
+      },
+      {
+        "hint": "the config will fail to start on that agent; check the collector distribution (`ocb` manifest) shipped there",
+        "message": "`health_check` is not in the available components of 1 target agent(s): 11111111",
+        "path": "extensions.health_check",
+        "severity": "warning"
+      }
+    ]
+  }
+}

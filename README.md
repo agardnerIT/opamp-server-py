@@ -209,6 +209,11 @@ running fleet — the token is bound to one `instance_uid`, so mint it *after* t
 agent has registered. `${env:…}` is expanded by the collector and the value is
 `configopaque`, so the agent's own effective-config report redacts it.
 
+The UI's connect snippet (Help page and the Agents empty state) is not hardcoded: it
+reads `config_push.agent_auth` from `GET /health` and renders the `headers:` block
+whenever the server reports `token`, so copy-paste cannot hand you a config that
+401s. When it cannot read the mode it claims no credential and says so (#124).
+
 **TLS** — terminate it in front of the server rather than in it: set
 `TLS_TERMINATED_UPSTREAM=true` (this asserts the posture; see
 [Before you expose this server](#before-you-expose-this-server)), keep port 4320
@@ -1514,7 +1519,9 @@ The UI signs in the same way the CLI does — `POST /auth/session` — and then 
 | WS | `/v1/opamp` | 🔑 | Same endpoint over WebSocket when `OPAMP_WS_ENABLED=true`; credential checked before `accept()`, refusals close `1008`. Malformed messages (including an empty `instance_uid`) get a `BAD_REQUEST` error frame then close `1002`; oversized frames close `1009`; an overloaded server refuses the upgrade with `503` + `Retry-After` (#78) |
 | POST | `/v1/metrics` | | OTLP/HTTP metrics ingestion from collectors (JSON or protobuf) |
 | GET | `/agents` | | List agents. Filters: `healthy=true\|false\|unknown`, `status=` (remote config status, or alias `remote_config_status=`), or any description attribute, e.g. `?environment=prod`. Repeated params are OR. Each agent carries a `credential` block |
-| GET | `/agent/{id}` | | Agent details incl. latest OTLP metrics and `credential` state (`enrolled`, `active`, `last_seen_at`, `revoked_at` — never a token) |
+| GET | `/agent/types` | | The agent types (profiles) this build recognises, in match order: `name`, `display_name`, `validates_structure`, `content_types`, `default_filename`, `reports`, `detectable`. `otelcol` is an OpenTelemetry Collector; `generic` is any other OpAMP agent, whose config is stored and relayed **without being interpreted** |
+| PUT | `/agent/{id}/type` | operator | **Pin** the agent's type (`{"agent_type": "otelcol"}`) or clear the pin (`null`). A pin outranks every signal the agent sends (`service.name`, `content_type`, payload shape), survives restarts and is audited (`agent.type.pinned` / `agent.type.auto`). 422 for an unknown name (never a silent `generic`), 404 for an unknown agent. Returns the four `agent_type*` fields with provenance |
+| GET | `/agent/{id}` | | Agent details incl. latest OTLP metrics, `credential` state (`enrolled`, `active`, `last_seen_at`, `revoked_at` — never a token) and `agent_type` / `agent_type_source` (`pinned`\|`declared`\|`sniffed`\|`fallback`) / `agent_type_pinned` / `agent_type_warning` |
 | GET | `/agent/{id}/metrics` | | Latest OTLP metric values for the agent (persisted across restarts) |
 | POST | `/agents/{id}/token` | admin | Mint/rotate an agent credential. Returns the token **once** plus a paste-ready collector snippet. Optional body `{"label", "retire_previous"}`. 422 if `id` is not a hex instance UID |
 | DELETE | `/agents/{id}/token` | admin | Revoke every live credential for the agent (idempotent). Blocks delivery, keeps the agent's state |
@@ -1542,7 +1549,7 @@ The UI signs in the same way the CLI does — `POST /auth/session` — and then 
 | POST | `/config/revisions/{id}/approve` | approver | Re-resolve the selector, **re-run validation**, supersede and activate. 409 `re-validate: …` when the config no longer passes, and 409 when the selector now matches *more* agents (repeat with `confirm_scope_change: true`); `override_reason` overrides a policy violation (audited as `config.override`) |
 | POST | `/config/revisions/{id}/reject` | approver | Refuse a proposal; the revision is kept as evidence |
 | POST | `/config/revisions/{id}/reactivate` | approver | Resume a **poisoned** revision after a fresh validation pass. Nothing retries on a timer |
-| POST | `/config/validate` | viewer | Validate a config map without storing it: `{"config_map", "agent_id"?, "allow_endpoint_change"?}`. Always 200: `{valid, errors, details, warnings, policy, fingerprint, config_hash, size_bytes, objects}` |
+| POST | `/config/validate` | viewer | Validate a config map without storing it: `{"config_map", "agent_id"?, "allow_endpoint_change"?}`. Always 200: `{valid, errors, details, warnings, policy, fingerprint, config_hash, size_bytes, objects, profile, profile_source}` — the last two name the agent profile whose rules produced the verdict |
 | GET | `/reports/fleet` | | Full fleet summary report (markdown, same as the UI Reports page) |
 | GET | `/reports/heavy-collectors` | | Collectors with many unused components. Param: `threshold` (0–1, default 0.5) |
 | GET | `/reports/outdated-collectors` | | Collectors with components older than `version` (default `0.149.0`) |
@@ -1693,8 +1700,8 @@ opampctl --show-completion      # show the install command/instructions
 ## MCP Server (for AI agents)
 
 An [MCP](https://modelcontextprotocol.io) server (`opamp-mcp` / `python -m mcp_server`)
-exposes 35 typed tools mirroring the API (40 with `OPAMP_MCP_ALLOW_WRITES=true`):
-`list_agents`, `get_agent`,
+exposes 36 typed tools mirroring the API (41 with `OPAMP_MCP_ALLOW_WRITES=true`):
+`list_agents`, `get_agent`, `list_agent_types`,
 `get_agent_metrics`, `generate_manifest`, `fleet_report`, `heavy_collectors_report`,
 `outdated_collectors_report`, `get_compliance`, `check_compliance`,
 `compliance_summary`, `list_policies`, `validate_policies`, `reload_policies`,
@@ -1712,8 +1719,8 @@ before suggesting a privileged step.
 `audit_export` are read-only tools and are never gated: an AI agent asked "who
 pushed this" must be able to answer from evidence, not from its own summary.
 
-**Write tools are absent, not failing.** `create_agent_token`, `revoke_agent_token`
-and `propose_config` only exist when the MCP process is started with
+**Write tools are absent, not failing.** `create_agent_token`, `revoke_agent_token`,
+`set_agent_type` and `propose_config` only exist when the MCP process is started with
 `OPAMP_MCP_ALLOW_WRITES=true` (#94 introduced this gate for credential minting;
 #106 applies it to every write tool). An agent that cannot see a tool will not
 try to use it.

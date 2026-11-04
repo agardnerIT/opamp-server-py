@@ -629,6 +629,25 @@ def _compliance_badge(compliance):
     return "⚪"
 
 
+def agent_type_badge(agent):
+    """How the server reads an agent's type, and how sure it is (#118).
+
+    `otelcol` / `generic` with the *provenance* in brackets: an operator's pin is a
+    fact, a declaration is the agent's claim, and a sniff is inference. The badge is
+    the whole point of keeping `agent_type_source` — a wrong guess has to be visible
+    before it becomes a config push.
+    """
+    if not agent:
+        return "⚪ unknown"
+    name = agent.get("agent_type") or "unknown"
+    source = agent.get("agent_type_source") or ""
+    icon = "🧩" if name == "otelcol" else "📦"
+    label = f"{icon} {name}"
+    if source and source != "fallback":
+        label += f" ({source})"
+    return label
+
+
 @st.cache_data(ttl=3600)
 def get_collector_versions():
     try:

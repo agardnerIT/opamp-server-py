@@ -7,6 +7,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from ui.shared import (
     ROLE_OPERATOR,
     SERVER_URL,
+    agent_auth_mode,
+    agent_auth_note,
+    agent_type_badge,
     collector_config_snippet,
     format_local_time,
     get_agents,
@@ -63,7 +66,13 @@ def _empty_fleet():
         key="empty_fleet_in_container",
         help="Rewrites the endpoint to host.docker.internal, the host as seen from a container.",
     )
-    snippet = collector_config_snippet(get_server_url(), in_container=in_container)
+    # #124: the server's own mode decides whether the snippet carries a credential. The
+    # page used to print the unauthenticated shape on every server, which 401s on any
+    # deployment that requires a token — including every one that can push config.
+    auth_mode = agent_auth_mode()
+    snippet = collector_config_snippet(
+        get_server_url(), in_container=in_container, agent_auth=auth_mode
+    )
     st.code(snippet, language="yaml")
     st.download_button(
         "Download config.yaml",
@@ -77,6 +86,11 @@ def _empty_fleet():
             "On Linux, start the container with "
             "`--add-host=host.docker.internal:host-gateway` so that name resolves."
         )
+    # A required credential is an instruction, not a footnote: it changes the order the
+    # operator has to do things in.
+    note = agent_auth_note(auth_mode)
+    if note:
+        (st.warning if auth_mode == "token" else st.caption)(note)
     st.caption(
         "Still nothing after a minute? Check that `service.extensions` lists `opamp` "
         f"and that the collector can reach `{get_server_url()}` — the server sees "
@@ -159,6 +173,17 @@ if agent_id_param:
         total = sum(len(c) for c in comps.values()) if comps else 0
         used = sum(1 for cl in comps.values() for c in cl if c.get("used")) if comps else 0
         st.metric("Components", f"{used}/{total} in use")
+        # #118: what the server thinks this agent is, and how it decided — a wrong
+        # guess has to be visible *before* it becomes a config push. A `generic`
+        # agent gets no component inventory at all, so "0/0 in use" needs its reason
+        # next to it rather than looking like a collector with nothing installed.
+        st.markdown("**Type**")
+        st.caption(agent_type_badge(detailed_agent if "error" not in detailed_agent else fleet_agent))
+        type_warning = (detailed_agent or {}).get("agent_type_warning") or (
+            fleet_agent or {}
+        ).get("agent_type_warning")
+        if type_warning:
+            st.warning(type_warning)
         st.divider()
         st.markdown("**Attributes**")
         desc = description or {}
@@ -494,6 +519,9 @@ else:
             rows.append({
                 "Agent": link,
                 "Healthy": "✅" if a.get("healthy") else "❌" if a.get("healthy") is False else "⚪",
+                # #118: the type and its provenance, so a mis-detection is visible in
+                # the fleet view rather than only after a config push goes wrong.
+                "Type": agent_type_badge(a),
                 "Compliance": _compliance_badge(a.get("compliance")),
                 "Last Heartbeat": format_local_time(a.get("last_heartbeat")),
             })
@@ -577,4 +605,7 @@ else:
             st.subheader(f"{group_name} ({len(group_agents)})")
             for agent in group_agents:
                 health_icon = "✅" if agent.get("healthy") else "❌" if agent.get("healthy") is False else "⚪"
-                st.markdown(f"**{health_icon}** [{agent['id'][:16]}...](?agent_id={agent['id']})")
+                st.markdown(
+                    f"**{health_icon}** [{agent['id'][:16]}...](?agent_id={agent['id']})"
+                    f" — {agent_type_badge(agent)}"
+                )

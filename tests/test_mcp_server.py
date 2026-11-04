@@ -99,6 +99,9 @@ class TestRegistry:
             # #111: groups are propose-side. Reading them is how an agent picks a
             # target instead of inventing a filter; creating one is write-gated.
             "list_groups", "get_group", "preview_group", "attribute_keys",
+            # #118: an agent's type decides whether its component list or a verdict
+            # means anything, so the type catalogue has to be readable.
+            "list_agent_types",
         }
         assert expected <= tools
 

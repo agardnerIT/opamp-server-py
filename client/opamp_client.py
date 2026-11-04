@@ -424,6 +424,38 @@ class OpampClient:
         """``GET /agent/{id}`` — full details for one agent (incl. metrics)."""
         return self._get(f"/agent/{agent_id}")
 
+    # ------------------------------------------------------- agent type (#118)
+
+    def agent_types(self) -> Dict[str, Any]:
+        """``GET /agent/types`` — the agent profiles this server can recognise.
+
+        Each entry has ``name``, ``display_name``, ``validates_structure`` (may the
+        server judge a config body's structure for this agent?), the ``content_types``
+        it accepts, which ``reports`` apply and whether it is ``detectable`` at all.
+        Read this before pinning: a name not in this list is a 422.
+        """
+        return self._get("/agent/types")
+
+    def set_agent_type(
+        self, agent_id: str, agent_type: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """``PUT /agent/{id}/type`` — pin an agent's type, or return it to auto (operator).
+
+        Every automatic signal is the agent's own claim (``service.name``,
+        ``content_type``, the shape of its payloads), so a pin is the server-side
+        answer: it outranks detection, survives a restart and is audited. Pass
+        ``agent_type=None`` to let the server decide again.
+
+        Returns ``agent_type``, ``agent_type_source`` (``pinned``/``declared``/
+        ``sniffed``/``fallback``), ``agent_type_pinned`` and ``agent_type_warning``
+        — the resolution *and* its provenance, not just the value you sent. 422 for a
+        name no registered profile provides, 404 for an unknown agent, 403 without
+        the ``operator`` role.
+        """
+        return self._put(
+            f"/agent/{agent_id}/type", json={"agent_type": agent_type or None}
+        )
+
     def get_agent_metrics(self, agent_id: str) -> Dict[str, Any]:
         """``GET /agent/{id}/metrics`` — latest ingested OTLP metric values."""
         return self._get(f"/agent/{agent_id}/metrics")

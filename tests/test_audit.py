@@ -609,6 +609,10 @@ AUDITED_ROUTES = {
     # #84: a restart is a privileged action against a live machine; the queue write
     # happens after the row, and a refusal records `result="error"`.
     ("POST", "/agent/{agent_id}/restart"): "agent.restart",
+    # #118: a pin changes what the server is willing to claim about an agent (and how
+    # its configs are judged), so it is recorded before it is applied. Two actions:
+    # `agent.type.pinned` and `agent.type.auto` (clearing the pin).
+    ("PUT", "/agent/{agent_id}/type"): "agent.type.pinned",
     # #85: a custom message is an imperative to a live collector. The audit row names
     # the capability and type — never the payload, which is capability-defined binary.
     ("POST", "/agent/{agent_id}/custom-message"): "agent.custom_message",

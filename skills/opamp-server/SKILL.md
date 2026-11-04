@@ -21,7 +21,7 @@ Control plane for OpenTelemetry collectors speaking the
 | Layer | When |
 |-------|------|
 | **`opampctl` CLI** | Default choice for shell agents. JSON output by default; `--raw` prints markdown/YAML. |
-| **MCP server** (`opamp-mcp`) | When running as an MCP client (Claude Desktop/Code, etc.). 35 typed tools by default (40 with `OPAMP_MCP_ALLOW_WRITES=true`), stdio by default. |
+| **MCP server** (`opamp-mcp`) | When running as an MCP client (Claude Desktop/Code, etc.). 36 typed tools by default (41 with `OPAMP_MCP_ALLOW_WRITES=true`), stdio by default. |
 | **`opamp_client` Python lib** | Inside Python code. One client for all HTTP/auth/error handling. |
 | **Raw REST API** | Only when the above don't cover it. Self-documenting: `GET /openapi.json`, `/docs`. |
 
@@ -81,6 +81,8 @@ opampctl agents compliance <agent-id>
 | List/filter agents | `agents list [--healthy] [--status] [--attr k=v]` | `list_agents` | `GET /agents` |
 | Agent details | `agents get <id>` | `get_agent` | `GET /agent/{id}` |
 | Agent metrics | `agents metrics <id>` | `get_agent_metrics` | `GET /agent/{id}/metrics` |
+| Agent types this build recognises | `agents types` | `list_agent_types` | `GET /agent/types` |
+| Pin an agent's type (operator) | `agents set-type <id> <type>` / `--auto` | `set_agent_type` (write-gated) | `PUT /agent/{id}/type` |
 | OCB manifest | `agents manifest <id> [--raw]` | `generate_manifest` | `POST /agent/{id}/manifest` |
 | Compliance (read) | `agents compliance <id>` | `get_compliance` | `GET /agent/{id}/compliance` |
 | Compliance (admin) | `compliance check <id>` | `check_compliance` | `POST /compliance/check/{id}` |
@@ -159,6 +161,42 @@ Rules that matter when acting on this:
   Don't "clean up" by deleting agents you revoked.
 - Minting needs the admin password, and the MCP tools for it are **absent** unless
   the MCP process runs with `OPAMP_MCP_ALLOW_WRITES=true`. That is intentional.
+
+
+## Agent types (#118)
+
+Every agent carries `agent_type` plus the evidence behind it:
+
+| Field | Meaning |
+|---|---|
+| `agent_type` | `otelcol` (an OpenTelemetry Collector — components, reports and structural validation are meaningful) or `generic` (any other OpAMP agent) |
+| `agent_type_source` | `pinned` (an operator decided), `declared` (the agent's `service.name`/`content_type`), `sniffed` (its payloads look like it), `fallback` (nothing matched) |
+| `agent_type_pinned` | the pin, or `null` for auto-detect |
+| `agent_type_warning` | non-null exactly when the server is **not** interpreting this agent's config |
+
+`generic` is not an error. The OpAMP protocol is type-blind by design — the spec
+leaves a config body's "content, format and encoding" to the agent — so `generic`
+is the protocol baseline, and only `otelcol` adds interpretation on top.
+
+**Before reading an agent's components, manifest or validation verdict, check
+`agent_type`.** For `generic`:
+- `components` is `{}` — that is "no component concept", not "a collector with nothing installed";
+- the heavy/outdated reports and the `otelcol_*` telemetry view do not describe it;
+- a config verdict's `profile`/`profile_source` says `generic`, so a collector-shaped
+  "pass" is not a claim about this agent (#119 makes the structural rules
+  profile-owned).
+
+```bash
+opampctl agents types                                     # what this build recognises
+opampctl agents set-type <id> otelcol                     # pin (operator; audited)
+opampctl agents set-type <id> --auto                      # back to auto-detection
+```
+
+Pin when detection is wrong or the agent's claim cannot be trusted: every automatic
+signal is the agent's own claim (`service.name`, `content_type`, payload shape) and
+the server authenticates the *channel*, not the payload. Pinning `generic` is the
+honest way to say "stop interpreting this agent" — it can only ever remove claims,
+never add a permission.
 
 
 ## Audit log (#97)

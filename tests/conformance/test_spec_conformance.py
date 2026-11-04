@@ -25,6 +25,8 @@ rather than line numbers.
 
 from __future__ import annotations
 
+import json
+
 import gzip
 
 import pytest
@@ -489,6 +491,49 @@ def test_a_remote_config_status_is_recorded_with_its_hash(opamp):
     )
     assert agent["remote_config_status"] == applied
     assert agent["last_remote_config_hash"] == reported_hash.hex()
+
+
+# --- §Agent Description: any legal agent, not just a collector ---------------
+
+
+def test_a_non_collector_agent_is_stored_and_displayed_as_opaque(opamp):
+    """§Agent Description / §EffectiveConfig: the protocol is type-blind (#118).
+
+    Nothing in the spec says an agent is an OpenTelemetry Collector, and
+    `AgentConfigObject` explicitly leaves "the content, format and encoding" to the
+    agent type. So an agent with a config body this server does not understand must
+    register, list, store and display it — with no error, no empty-component report,
+    and no invented interpretation. `server/profiles/` says so once, in the
+    `generic` profile; the server says so in `agent_type_warning`.
+
+    Detail: `tests/test_profiles.py` (precedence, attribution),
+    `tests/test_agent_types.py` (the pin surface).
+    """
+    uid = spec.uid("generic-agent")
+    message = spec.agent_message(uid, sequence_num=1)
+    attribute = message.agent_description.identifying_attributes.add()
+    attribute.key = "service.name"
+    attribute.value.string_value = "fluent-bit"
+    message.health.healthy = True
+    # Not YAML, and not a config fragment: only the agent knows what this means.
+    message.effective_config.config_map.config_map["main"].body = b"\x00\x01binary\xff"
+    message.effective_config.config_map.config_map["main"].content_type = "application/octet-stream"
+    opamp.expect(message)
+
+    agent = opamp.agent(uid.hex())
+    assert agent["agent_type"] == "generic"
+    assert agent["agent_type_source"] == "fallback"
+    assert agent["agent_type_warning"]
+    # No components is the honest answer; an empty collector would be a lie.
+    assert agent["components"] == {}
+    # The body round-trips untouched, because the server never interpreted it.
+    # (`effective_config` is the JSON text the agent sent, redacted in place.)
+    config = json.loads(agent["effective_config"])
+    assert config["configMap"]["configMap"]["main"]["contentType"] == (
+        "application/octet-stream"
+    )
+    listed = opamp.get("/agents").json()["agents"]
+    assert [entry["id"] for entry in listed] == [uid.hex()]
 
 
 # --- helpers ----------------------------------------------------------------

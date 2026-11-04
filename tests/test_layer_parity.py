@@ -37,6 +37,8 @@ from server.main import app
 ROUTE_TO_CLIENT = {
     ("GET", "/health"): "health",
     ("GET", "/agents"): "list_agents",
+    ("GET", "/agent/types"): "agent_types",
+    ("PUT", "/agent/{agent_id}/type"): "set_agent_type",
     ("GET", "/agent/{agent_id}"): "get_agent",
     ("GET", "/agent/{agent_id}/config"): "get_agent_config",
     ("PUT", "/agent/{agent_id}/config"): "set_agent_config",
@@ -101,6 +103,8 @@ CLI_COMMANDS = {
     "config rollout abort": ("config", "rollout", "abort"),
     "config rollout rollback": ("config", "rollout", "rollback"),
     "agents config restart": ("agents", "config", "restart"),
+    "agents types": ("agents", "types"),
+    "agents set-type": ("agents", "set-type"),
     "agents custom send": ("agents", "custom", "send"),
     "agents config withdraw": ("agents", "config", "withdraw"),
     "agents config deliver": ("agents", "config", "deliver"),
@@ -121,6 +125,9 @@ MCP_READ_TOOLS = {
     "get_config_rollout",
     "agent_config",
     "validate_config",
+    # #118: reading the recognised agent types is how a client decides whether a
+    # component list or a verdict means anything for a given agent.
+    "list_agent_types",
     # #111: groups are propose-side. Reading them is how an agent picks a target
     # instead of inventing a filter; `create_group` is gated, never a read tool.
     "list_groups",
@@ -140,6 +147,9 @@ MCP_FORBIDDEN_TOOLS = {
     "deliver_agent_config",
     "set_agent_config",
     "send_custom_message",
+    # #118: pinning could have gone either way; it is write-gated rather than
+    # forbidden (an operator may legitimately want an agent to fix a typo'd
+    # detection), so it is asserted as gated in tests/test_mcp_server.py instead.
 }
 
 

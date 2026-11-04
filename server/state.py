@@ -12,10 +12,11 @@ from typing import Optional, Dict, Any, List, Mapping, Sequence
 from loguru import logger
 
 from server import crypto, redaction
+from server import profiles
 # #68: effective-config reading lives in one shared module so `server/` and the UI
 # cannot drift again. Re-exported here because `from server.state import
 # parse_effective_config` is the old import path.
-from server.effective_config import parse_effective_config
+from server.effective_config import parse_effective_config  # noqa: F401 (re-export)
 
 
 def utcnow():
@@ -92,7 +93,8 @@ class SQLiteAgentStore:
                     components_request_ignored INTEGER DEFAULT 0,
                     custom_capabilities TEXT,
                     pending_custom_message TEXT,
-                    custom_message_delivered_at TEXT
+                    custom_message_delivered_at TEXT,
+                    agent_type TEXT
                 )
             """)
 
@@ -149,6 +151,11 @@ class SQLiteAgentStore:
                     "ALTER TABLE agents ADD COLUMN components_request_ignored INTEGER"
                     " DEFAULT 0"
                 )
+            # #118: an operator's pin of the agent's *type*. NULL means auto-detect,
+            # which is what every pre-#118 row (and every unpinned agent) gets, so no
+            # backfill is needed and nothing behaves differently after the upgrade.
+            if "agent_type" not in columns:
+                conn.execute("ALTER TABLE agents ADD COLUMN agent_type TEXT")
 
     def load_all(self) -> Dict[str, "AgentState"]:
         agents = {}
@@ -169,8 +176,9 @@ class SQLiteAgentStore:
                                    command_delivered_at, uid_reissued_from,
                                    uid_reissue_reason, last_requested_components_hash,
                                    components_request_ignored, custom_capabilities,
-                                   pending_custom_message, custom_message_delivered_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                   pending_custom_message, custom_message_delivered_at,
+                                   agent_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(agent_id) DO UPDATE SET
                     last_heartbeat=excluded.last_heartbeat,
                     healthy=excluded.healthy,
@@ -194,7 +202,8 @@ class SQLiteAgentStore:
                     components_request_ignored=excluded.components_request_ignored,
                     custom_capabilities=excluded.custom_capabilities,
                     pending_custom_message=excluded.pending_custom_message,
-                    custom_message_delivered_at=excluded.custom_message_delivered_at
+                    custom_message_delivered_at=excluded.custom_message_delivered_at,
+                    agent_type=excluded.agent_type
                 WHERE excluded.updated_at > agents.updated_at
             """, self._state_to_row(state))
 
@@ -232,6 +241,7 @@ class SQLiteAgentStore:
             if state.pending_custom_message
             else None,
             state.custom_message_delivered_at,
+            state.agent_type,
         )
 
     @staticmethod
@@ -298,6 +308,9 @@ class SQLiteAgentStore:
             custom_message_delivered_at=_optional_column(
                 row, "custom_message_delivered_at"
             ),
+            # #118: NULL on every row written before this column existed, which is
+            # exactly "auto-detect".
+            agent_type=_optional_column(row, "agent_type"),
             sealed_effective_config=sealed if config_error else None,
             config_error=config_error,
         )
@@ -2585,50 +2598,6 @@ def _checkpoint_anchor(rows: List[Dict[str, Any]], first_prev: str) -> Optional[
     return None
 
 
-COMPONENT_TYPES = {
-    "receivers/": "receiver",
-    "processors/": "processor",
-    "exporters/": "exporter",
-    "extensions/": "extension",
-    "connectors/": "connector",
-}
-
-COMPONENT_SHORT_NAMES = {
-    "receiver": "receiver",
-    "receivers": "receiver",
-    "processor": "processor",
-    "processors": "processor",
-    "exporter": "exporter",
-    "exporters": "exporter",
-    "extension": "extension",
-    "extensions": "extension",
-    "connector": "connector",
-    "connectors": "connector",
-}
-
-KNOWN_COMPONENTS = {
-    "otlp": "receiver",
-    "jaeger": "receiver",
-    "prometheus": "receiver",
-    "zipkin": "receiver",
-    "statsd": "receiver",
-    "host_metrics": "receiver",
-    "batch": "processor",
-    "memory_limiter": "processor",
-    "filter": "processor",
-    "transform": "processor",
-    "resourcedetection": "processor",
-    "debug": "exporter",
-    "logging": "exporter",
-    "prometheusremotewrite": "exporter",
-    "otlphttp": "exporter",
-    "opamp": "extension",
-    "zpages": "extension",
-    "health_check": "extension",
-    "pprof": "extension",
-}
-
-
 CAPABILITY_TAGS = {
     0x00000001: ("Reports Status", "📊"),
     0x00000002: ("Accepts Remote Config", "⚙️"),
@@ -2728,6 +2697,17 @@ class AgentState:
     # opened with the keys this process has (see SQLiteAgentStore._sealed_...).
     sealed_effective_config: Optional[str] = field(default=None, repr=False)
     config_error: Optional[str] = None
+    # #118: an operator's pin of this agent's type (`otelcol`, `generic`, ...). `None`
+    # means "let the server decide", which is the state of every agent nobody has
+    # pinned. It is part of the resolution fingerprint, so pinning invalidates the
+    # cache without any explicit invalidation call.
+    agent_type: Optional[str] = None
+    # (fingerprint, Resolution) — resolution and its evidence, re-derived when a
+    # report changes the fingerprint (see server/profiles/registry.py).
+    _profile_cache: Optional[tuple] = field(default=None, repr=False, compare=False)
+    # (the description object, flattened attrs) — the strong reference is what makes
+    # `is` comparison safe (see registry.identity_attrs).
+    _profile_attrs_cache: Optional[tuple] = field(default=None, repr=False, compare=False)
     # (raw json, redacted json, paths) — redaction is a per-request cost otherwise,
     # and `GET /agents` walks every agent (#98, #109).
     _redacted_effective_config: Optional[tuple] = field(default=None, repr=False, compare=False)
@@ -2797,114 +2777,60 @@ class AgentState:
         ]
 
     def _detect_type(self, comp_id: str) -> str:
-        for prefix, type_name in COMPONENT_TYPES.items():
-            if comp_id.startswith(prefix):
-                return type_name
-        
-        if comp_id in KNOWN_COMPONENTS:
-            return KNOWN_COMPONENTS[comp_id]
-        
-        if '/' in comp_id:
-            first_part = comp_id.split('/')[0]
-            if first_part in COMPONENT_SHORT_NAMES:
-                return COMPONENT_SHORT_NAMES[first_part]
-            if first_part in KNOWN_COMPONENTS:
-                return KNOWN_COMPONENTS[first_part]
-        
-        return "unknown"
+        """Deprecated alias for `server.profiles.otelcol.detect_type` (#118).
 
-    def _extract_version(self, comp_data: dict) -> str:
-        try:
-            metadata = comp_data.get("metadata", [])
-            for meta in metadata:
-                if meta.get("key") == "code.namespace":
-                    value = meta.get("value", {})
-                    string_value = value.get("stringValue", "")
-                    if string_value:
-                        parts = string_value.rsplit(" v", 1)
-                        if len(parts) == 2:
-                            return parts[1]
-                    return string_value.split(" v")[-1] if " v" in string_value else ""
-            return ""
-        except Exception:
-            return ""
+        Kept because it was semi-public and the move is meant to be invisible; the
+        collector knowledge itself lives in the profile.
+        """
+        from server.profiles import otelcol
+
+        return otelcol.detect_type(comp_id)
+
+    # -- #118: which profile is this agent? -------------------------------
+
+    def profile_resolution(self) -> "profiles.Resolution":
+        """The agent's profile and the evidence for it, memoised on the report."""
+        return profiles.resolve_cached(self)
+
+    @property
+    def profile(self) -> "profiles.AgentProfile":
+        """The profile whose rules apply to this agent right now."""
+        return self.profile_resolution().profile
+
+    def type_info(self) -> Dict[str, Any]:
+        """The four `agent_type*` fields every read surface shows (#118).
+
+        `agent_type_source` is what makes the value honest: `pinned` is an operator's
+        decision, `declared`/`sniffed` are the agent's own claims or evidence, and
+        `fallback` means nothing matched. `agent_type_warning` is non-null exactly
+        when the server is **not** interpreting this agent's config, which is the
+        thing an operator needs to know before pushing one.
+        """
+        resolution = self.profile_resolution()
+        profile = resolution.profile
+        return {
+            "agent_type": profile.name,
+            "agent_type_source": resolution.source,
+            "agent_type_pinned": self.agent_type,
+            "agent_type_warning": (
+                None
+                if profile.validates_structure
+                else (
+                    f"this agent resolves to the {profile.name!r} profile, so the "
+                    "server does not interpret its configuration: collector-specific "
+                    "checks, reports and telemetry views do not describe it"
+                )
+            ),
+        }
 
     @property
     def components(self) -> dict:
-        groups = defaultdict(list)
-        
-        type_mapping = {
-            "receivers": "receiver",
-            "processors": "processor",
-            "exporters": "exporter",
-            "extensions": "extension",
-            "connectors": "connector",
-        }
-        
-        used_by_type = self._config_usage()
-        
-        if not used_by_type:
-            used_by_type = self._parse_health_components()
-        
-        components_container = self.available_components.get("components", {})
-        for comp_type_key, comp_type in type_mapping.items():
-            if comp_type_key in components_container:
-                comps_dict = components_container[comp_type_key].get("subComponentMap", {})
-                used_in_pipeline = used_by_type.get(comp_type, set())
-                for comp_id, comp_data in comps_dict.items():
-                    is_used = comp_id in used_in_pipeline
-                    version = self._extract_version(comp_data)
-                    groups[comp_type].append({
-                        "id": comp_id,
-                        "version": version,
-                        "used": is_used
-                    })
-        
-        for comp_type in groups:
-            groups[comp_type].sort(key=lambda c: (not c["used"], c["id"]))
-        
-        return dict(groups)
-    
-    def _config_usage(self) -> Dict[str, set]:
-        """Components used by the reported config, cached against its exact text (#68).
+        """Component inventory, as the agent's profile defines it (#118).
 
-        Reading every config object is more work than reading `configMap[""]`, and
-        `components` is recomputed for every agent on every `GET /agents`. The cache is
-        keyed on the stored JSON itself, so a new report invalidates it and nothing
-        else has to remember to.
+        `{}` for a profile that has no such concept — which is the honest answer, not
+        an empty collector.
         """
-        if not self.effective_config:
-            return {}
-        cached = self._usage_cache
-        if cached is not None and cached[0] == self.effective_config:
-            return cached[1]
-        try:
-            usage = parse_effective_config(json.loads(self.effective_config))
-        except Exception as exc:  # a malformed report must not 500 a listing
-            logger.warning(f"Failed to parse effective_config: {exc}")
-            usage = {}
-        self._usage_cache = (self.effective_config, usage)
-        return usage
-
-    def _parse_health_components(self) -> Dict[str, set]:
-        used_by_type = defaultdict(set)
-        health_map = self.health.get("componentHealthMap", {})
-        
-        for key, value in health_map.items():
-            if key.startswith("pipeline:"):
-                nested_map = value.get("componentHealthMap", {})
-                for comp_key in nested_map:
-                    if ":" in comp_key:
-                        comp_type, comp_id = comp_key.split(":", 1)
-                        used_by_type[comp_type].add(comp_id)
-            elif key == "extensions":
-                nested_map = value.get("componentHealthMap", {})
-                for comp_key in nested_map:
-                    if ":" in comp_key:
-                        _, comp_id = comp_key.split(":", 1)
-                        used_by_type["extension"].add(comp_id)
-        
-        return dict(used_by_type)
+        return self.profile.extract_components(self)
 
     def get_attr(self, key: str) -> Optional[str]:
         """Return the stringified value of a description attribute.
@@ -3050,6 +2976,12 @@ class AgentState:
             "available_components": self.available_components,
             "components": self.components,
             "compliance": self.compliance,
+            # #118: what the server believes this agent is, how it decided, and the
+            # operator's pin if there is one. `agent_type_pinned` is kept separate from
+            # `agent_type` because they differ on every auto-detected agent, and "pinned
+            # to generic" and "fell back to generic" are different facts. `offline
+            # opampctl --db` inherits all four for free.
+            **self.type_info(),
         }
 
 

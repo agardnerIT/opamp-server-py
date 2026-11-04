@@ -181,6 +181,12 @@ def capture() -> Dict[str, Any]:
         },
         agents=built[:1],
         run_policy=False,
+        # The fixture agent reports the very config this revision contains, because the
+        # server is the source that pushed it. Without this the merge-collision warning
+        # would fire by construction (every address would look like "another source's")
+        # and the move snapshot would stop being a byte comparison of unrelated output;
+        # the stage itself is covered in `test_config_validation` and `test_rollout`.
+        previous_bodies={"1" * 32: [COLLECTOR_CONFIG]},
     )
     verdict_dict = verdict.to_dict()
     verdict_dict["checked_at"] = "<captured>"

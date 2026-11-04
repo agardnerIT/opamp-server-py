@@ -3150,6 +3150,14 @@ class RolloutAbortRequest(BaseModel):
     reason: Optional[str] = None
 
 
+class RolloutResumeRequest(BaseModel):
+    """Body for `POST /config/rollouts/{id}/resume`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: Optional[str] = None
+
+
 class RolloutRollbackRequest(BaseModel):
     """Body for `POST /config/rollouts/{id}/rollback`."""
 
@@ -4967,6 +4975,42 @@ def abort_config_rollout(
     principal = require_roles(request, ROLE_OPERATOR)
     try:
         return rollout.abort(rollout_id, principal=principal, reason=body.reason)
+    except rollout.RolloutError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+@app.post(
+    "/config/rollouts/{rollout_id}/resume",
+    tags=["config"],
+    summary="Re-open a paused rollout after fixing the cause (approver)",
+)
+def resume_config_rollout(
+    rollout_id: str,
+    body: RolloutResumeRequest,
+    request: Request,
+    _gate=Depends(posture.config_push_gate),
+    _audit=Depends(require_audit("config.rollout.resume")),
+):
+    """Resume a paused rollout. Requires `approver`, because it can release the next batch.
+
+    A pause is terminal until a human decides (D6), and until now the only decisions were
+    abort or roll back. A `config_conflict` pause is neither: the revision applied and is
+    the one we want — the agent host had a second config source scheduling the same
+    query, which the operator fixes there (osquery: run with `--config_plugin=opamp`, or
+    delete the duplicate from the local file). Resume clears the pause and re-runs the
+    **same** gate over the same facts within one tick (`CONFIG_PUSH_TICK_SECONDS`).
+
+    Nothing is re-delivered and no revision is edited; if the conflict is still present
+    the gate pauses again immediately, with the agent's own words in `pause_detail`.
+
+    **409** when the rollout is not paused, when the pause reason is the revision itself
+    (`failed`/`auto_reverted` are poisoned — reactivate or roll back — and `superseded`
+    has nothing left to promote), or when the TTL has passed. The transition is audited by
+    the engine (`config.rollout.resume`); this route only preflights the log.
+    """
+    principal = require_roles(request, ROLE_APPROVER)
+    try:
+        return rollout.resume(rollout_id, principal=principal, reason=body.reason)
     except rollout.RolloutError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail)
 

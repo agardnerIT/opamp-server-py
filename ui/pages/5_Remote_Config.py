@@ -80,7 +80,8 @@ PAUSE_HELP = {
         "An agent applied the config, but its daemon is merging a second config source "
         "that schedules the same query names — so the effective config is not what this "
         "server thinks it is. Manage the query in one place (usually "
-        "`--config_plugin=opamp`, so the agent is the only source)."
+        "`--config_plugin=opamp`, so the agent is the only source), then **Resume**: the "
+        "revision is fine, so nothing has to be re-proposed."
     ),
     "delivery_unconfirmed": "An agent never acknowledged its delivery (attempt budget exhausted).",
     "superseded": "Another revision replaced this one on at least one agent.",
@@ -632,6 +633,25 @@ if rollout_id:
             )
             if rollout.get("pause_detail"):
                 st.caption(rollout["pause_detail"])
+            # A pause whose cause was on the agent (a second config source, a failed
+            # health report that has cleared) can be re-opened instead of aborted and
+            # re-proposed. A poisoned revision cannot: that is reactivate or rollback.
+            if reason not in ("failed", "auto_reverted", "superseded"):
+                resume_reason = st.text_input(
+                    "What changed on the agent? (goes in the audit log)", key="rc_resume_reason"
+                )
+                if st.button("Resume this rollout", disabled=not session.can(ROLE_APPROVER)):
+                    response = admin_request(
+                        "POST", f"/config/rollouts/{rollout_id}/resume",
+                        required_role=ROLE_APPROVER, json={"reason": resume_reason or None},
+                    )
+                    if response is not None and response.status_code == 200:
+                        st.success(
+                            "Resumed. Nothing is re-delivered; the gate re-runs on the next "
+                            "tick and pauses again if the conflict is still there."
+                        )
+                    elif response is not None:
+                        st.error(f"Resume refused ({response.status_code}): {_detail(response)}")
         elif status == "completed":
             st.success("Every agent applied the config and stayed healthy through its gate.")
         elif status == "cancelled":

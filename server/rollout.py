@@ -1420,6 +1420,118 @@ def abort(
     return view(rollout_id)
 
 
+#: Pause reasons a resume cannot clear, because the cause is not on the agent's side:
+#: the revision itself is poisoned (reactivate or roll back) or another revision took
+#: its place (there is nothing left to promote).
+NON_RESUMABLE_PAUSES = frozenset({PAUSE_FAILED, PAUSE_AUTO_REVERTED, PAUSE_SUPERSEDED})
+
+
+def resume(
+    rollout_id: str,
+    *,
+    principal: Any = None,
+    reason: Optional[str] = None,
+    now: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """Re-open a paused rollout once the operator has fixed the cause **on the agent**.
+
+    A pause is terminal in the engine by design ("nothing is retried automatically"),
+    but until now the only way forward was `abort` plus a brand-new proposal — which
+    re-delivers the same config to agents that already applied it and leaves the audit
+    trail with an "aborted" rollout that in fact succeeded. A `config_conflict` pause is
+    the clearest case: the revision is fine, the agent host had a second config source,
+    and nothing on the server side changed.
+
+    Resume does **not** re-deliver and does not touch a revision: it clears the pause and
+    lets the next tick re-run the same gate over the same facts. If the cause is still
+    there, the gate pauses again immediately — an honest "still conflicting", not a
+    silent second attempt — and nothing beyond the batch already in flight is released.
+
+    Refused (409) for the three pauses whose cause is the revision itself:
+    `failed`/`auto_reverted` mean poisoned (reactivate it, or start a rollback) and
+    `superseded` means this rollout's revision is no longer assigned to that agent. Also
+    refused once the rollout's TTL has passed, because the engine would cancel it within
+    one tick anyway.
+    """
+    now = now or utcnow()
+    store = _store()
+    rollout = store.get(rollout_id)
+    if rollout is None:
+        raise RolloutError(404, f"rollout {rollout_id} not found")
+    status = rollout.get("status")
+    if status != SQLiteRolloutStore.STATUS_PAUSED:
+        raise RolloutError(
+            409,
+            f"rollout {rollout_id} is {status}; only a paused rollout can be resumed",
+        )
+    paused_reason = rollout.get("paused_reason")
+    if paused_reason in NON_RESUMABLE_PAUSES:
+        raise RolloutError(
+            409,
+            {
+                "message": f"rollout {rollout_id} is paused ({paused_reason}); that cause "
+                "is the revision, not the agent, so re-opening it would only pause again",
+                "next": (
+                    "start a rollback (`POST /config/rollouts/{id}/rollback`)"
+                    if paused_reason == PAUSE_SUPERSEDED
+                    else "reactivate the revision (`POST /config/revisions/{id}/reactivate`) "
+                    "if the failure is fixed, otherwise roll back the agents it reached"
+                ),
+            },
+        )
+    expires_at = _parse_time(rollout.get("expires_at"))
+    if expires_at is not None and now >= expires_at:
+        raise RolloutError(
+            409,
+            {
+                "message": f"rollout {rollout_id} is past its TTL and is about to be "
+                "cancelled, so resuming it would not run",
+                "next": "propose again; the config is unchanged and the rollout is new",
+            },
+        )
+
+    store.update(
+        rollout_id,
+        status=SQLiteRolloutStore.STATUS_RUNNING,
+        paused_reason=None,
+        pause_detail=None,
+        paused_at=None,
+    )
+    # The blocked agents were *recorded* paused; the facts have not changed, so let the
+    # next tick derive their state again instead of leaving them frozen at "paused".
+    for row in store.agents(rollout_id):
+        if row.get("state") == "paused":
+            store.set_agent(rollout_id, row["agent_id"], state="pending", detail=None)
+
+    actor = getattr(principal, "name", None) or "system"
+    logger.bind(
+        event="config.rollout.resumed",
+        rollout_id=rollout_id,
+        actor=actor,
+        resumed_from=paused_reason,
+        batch=rollout.get("current_batch"),
+    ).info(
+        f"rollout {rollout_id} resumed by {actor} (was paused: {paused_reason}); the "
+        "gate re-runs at batch "
+        f"{int(rollout.get('current_batch') or 0) + 1}/{rollout.get('batch_count')} and "
+        "nothing is re-delivered"
+    )
+    audit.audit_event(
+        "config.rollout.resume",
+        principal=actor,
+        role=getattr(principal, "role", None),
+        actor_kind="human" if principal is not None else "system",
+        target_kind="rollout",
+        target_id=rollout_id,
+        config_hash=rollout.get("config_hash"),
+        reason=reason,
+        resumed_from=paused_reason,
+        batch=int(rollout.get("current_batch") or 0),
+    )
+    publish_metrics()
+    return view(rollout_id)
+
+
 # ------------------------------------------------------------------------ views
 
 

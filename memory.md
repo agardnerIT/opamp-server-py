@@ -574,3 +574,44 @@ push fails with `FAILED: expected a single osquery.json object, got ['']`. The a
 direction stands: the server infers the object name for a single unnamed object from the
 target agent's evidence (prior active revision key first, then the single key it
 reports), and the page keeps offering no manual key field.
+
+## A conflict pause that warns before delivery and can be re-opened, 2026-11-05
+
+A rollout on a real osquery agent paused with `config_conflict`: revision
+`2662e975…` **applied**, `healthy: true`, and the daemon still refused — "the same query
+name is scheduled more than once: battery_stats". A local config file and the pushed
+source both define it, so the merge is ambiguous and the effective config is not the one
+approved. The pause (#135) was correct; what was missing was everything on either side
+of it.
+
+- **Nothing warned before delivery.** The server had the evidence all along: the agent
+  reports its *merged* effective config, so a `config_map` that re-defines an address in
+  it collides. New stage 7, `config_validation.check_merge_collisions`: for each target,
+  take the addresses in its report (osquery `schedule.<name>`/`packs.<name>`, collector
+  component sections and `service.pipelines.<id>` — `ADDRESS_SECTIONS`), subtract the
+  addresses in the revision this server **already pushes** (so re-pushing our own key is
+  an update, silent), and warn on the remainder. Pure and evidence-based like the
+  object-name check next to it; a warning, because an agent may implement
+  last-source-wins. `config_control._assigned_bodies()` supplies the "ours" half from
+  `REGISTRY.get()`, which is why the check never touches SQLite itself.
+- **A pause with the right revision had no way forward.** `resume()` +
+  `POST /config/rollouts/{id}/resume` (approver; it can release the next batch) clears
+  the pause and lets the **same** gate re-run on the next tick. Nothing is re-delivered
+  and no revision is edited: still-conflicted agents pause again immediately, with their
+  own words in `pause_detail`. The previously paused agent rows are reset to `pending`
+  so they are re-derived rather than frozen. Refused (409) for `failed`/`auto_reverted`
+  (poisoned — reactivate or roll back), `superseded`, and any rollout past its TTL (the
+  engine would cancel it within a tick). Layers: client `resume_config_rollout`,
+  `opampctl config rollout resume`, UI button in the pause panel, **no MCP tool** (like
+  abort), README/skill tables, parity + audit maps.
+- `tests/test_profiles.py`'s move snapshot needed a `previous_bodies` argument in
+  `golden_payloads.capture()`: its fixture agent reports the config the snapshot push
+  contains, so without it every address looked like "another source's" and a stage that
+  did not exist when the golden was captured would fire by construction.
+
+**Still open.** (a) The Remote Config page's Prefill loads the agent's *merged* config,
+which is exactly the document that collides when pushed back — it should say so, or
+offer the subtract-our-own-source view. (b) The object-name inference from the previous
+entry is still not implemented, so an osquery push is still keyed `""`.
+- Suite: **1538 passed**, 0 failed (the 6 posture failures noted earlier did not
+  reproduce in this run; push posture was on).

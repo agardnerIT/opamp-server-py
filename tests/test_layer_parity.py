@@ -86,6 +86,7 @@ ROUTE_TO_CLIENT = {
     ("GET", "/config/rollouts"): "list_config_rollouts",
     ("GET", "/config/rollouts/{rollout_id}"): "get_config_rollout",
     ("POST", "/config/rollouts/{rollout_id}/abort"): "abort_config_rollout",
+    ("POST", "/config/rollouts/{rollout_id}/resume"): "resume_config_rollout",
     ("POST", "/config/rollouts/{rollout_id}/rollback"): "rollback_config_rollout",
 }
 
@@ -105,6 +106,7 @@ CLI_COMMANDS = {
     "config rollout create": ("config", "rollout", "create"),
     "config rollout show": ("config", "rollout", "show"),
     "config rollout abort": ("config", "rollout", "abort"),
+    "config rollout resume": ("config", "rollout", "resume"),
     "config rollout rollback": ("config", "rollout", "rollback"),
     "agents config restart": ("agents", "config", "restart"),
     "agent-tokens create": ("agent-tokens", "create"),
@@ -149,6 +151,7 @@ MCP_FORBIDDEN_TOOLS = {
     "create_config_rollout",
     "plan_config_rollout",
     "abort_config_rollout",
+    "resume_config_rollout",
     "rollback_config_rollout",
     "approve_config",
     "reject_config",

@@ -23,8 +23,9 @@ hundred structural complaints about a tree that does not exist:
 4. protected invariants (:func:`check_invariants`)
 5. inventory warnings (:func:`check_inventory`)
 6. config-object-name warnings (:func:`check_object_names`)
-7. policy gate (:func:`check_policy`)
-8. a :class:`Verdict` that the caller stores on the revision
+7. merge-collision warnings (:func:`check_merge_collisions`)
+8. policy gate (:func:`check_policy`)
+9. a :class:`Verdict` that the caller stores on the revision
 
 Severity policy, because "everything is an error" is how a validator gets switched off:
 
@@ -76,6 +77,18 @@ PIPELINE_SECTIONS = {
 }
 
 OPAMP_EXTENSION = "opamp"
+
+#: Sections whose children are **addresses** in the merged config rather than plain
+#: settings: a component id, a pipeline id, a scheduled query name. Two config sources
+#: that define the same address do not override each other — the daemon refuses the
+#: merge and reports `config_conflict` — which is why this set drives the collision
+#: warning. `service.telemetry.logs` is deliberately *not* one of these: a scalar leaf
+#: supplied by a second source is merged, not duplicated.
+ADDRESS_SECTIONS = frozenset(COMPONENT_SECTIONS) | {
+    "pipelines",  # collector: service.pipelines.<id>
+    "schedule",  # osquery: schedule.<query name>
+    "packs",  # osquery: packs.<pack name>
+}
 
 REDACTION_MARKER = "<redacted>"
 
@@ -877,6 +890,150 @@ def check_object_names(
         )
 
 
+# ------------------------------------------------------------- merge collisions
+
+
+def _addresses(document: Any, path: str = "") -> set:
+    """Every address a document defines, as dotted paths (see `ADDRESS_SECTIONS`)."""
+    found: set = set()
+    if isinstance(document, Mapping):
+        for key, value in document.items():
+            child = f"{path}.{key}" if path else str(key)
+            if path.rsplit(".", 1)[-1] in ADDRESS_SECTIONS:
+                found.add(child)
+            found |= _addresses(value, child)
+    elif isinstance(document, (list, tuple)):
+        for item in document:
+            found |= _addresses(item, path)
+    return found
+
+
+def _parse_or_none(body: Any) -> Any:
+    """Parse a body for comparison only — anything unreadable is no evidence."""
+    if not isinstance(body, (str, bytes, bytearray)):
+        return None
+    try:
+        return parse_document(bytes(body).decode("utf-8") if isinstance(body, (bytes, bytearray)) else body)
+    except (ConfigParseError, yaml.YAMLError, UnicodeDecodeError):
+        return None
+
+
+def _reported_documents(agent: Any) -> List[Any]:
+    """The documents an agent reports as its effective config, JSON included.
+
+    `accept_json=True` is what makes this check work for osquery: it reports its
+    config as `application/json`, and `schedule.<query name>` is exactly the address
+    that collides with a local config file.
+    """
+    report = getattr(agent, "effective_config", None)
+    if not report:
+        return []
+    if isinstance(report, (str, bytes, bytearray)):
+        try:
+            report = json.loads(report)
+        except (ValueError, TypeError):
+            return []
+    if not isinstance(report, Mapping):
+        return []
+    from server import effective_config as effective_config_module
+
+    try:
+        return [
+            obj.document
+            for obj in effective_config_module.objects(report, accept_json=True)
+            if obj.parsed
+        ]
+    except Exception:  # a damaged report is not a reason to fail a validation
+        return []
+
+
+def check_merge_collisions(
+    normalised: Mapping[str, Dict[str, Any]],
+    verdict: Verdict,
+    agents: Sequence[Any],
+    previous_bodies: Optional[Mapping[str, Sequence[str]]] = None,
+) -> None:
+    """Warn when this revision defines an address another source already provides.
+
+    Remote config is **per source and additive** (opamp-spec §Configuration Objects):
+    the agent merges every source it is handed, so an address defined twice is not an
+    override, it is an ambiguity. osquery reports `config_conflict` with "the same
+    query name is scheduled more than once: battery_stats"; the collector refuses the
+    duplicate component id. Either way the config applied, the agent may still report
+    `healthy: true`, and the effective config is **not** the one approved here — the
+    rollout pauses with no config to blame.
+
+    The server cannot remove a key it does not own, but it does have the evidence to
+    warn before delivery: the agent's reported effective config, minus the addresses
+    *this* server already pushes (`previous_bodies`, the assignment currently in
+    force). Whatever is left in the report was supplied by someone else — a local
+    flag, a mounted file, another controller — and re-defining it here collides.
+
+    A warning, not an error: a server-side `config_map` mutation may legitimately
+    address an agent whose merge semantics *is* last-source-wins, and the evidence is
+    only as fresh as the last report.
+    """
+    present = [agent for agent in (agents or ()) if agent is not None]
+    if not present:
+        return
+
+    proposed: Dict[str, set] = {}
+    for key, entry in normalised.items():
+        document = _parse_or_none(entry.get("body"))
+        addresses = _addresses(document) if document is not None else set()
+        if addresses:
+            proposed[str(key)] = addresses
+    if not proposed:
+        return
+
+    previous = previous_bodies or {}
+    # key -> address -> agent ids that define it from another source
+    collisions: Dict[str, Dict[str, List[str]]] = {}
+    compared = 0
+    for agent in present:
+        documents = _reported_documents(agent)
+        if not documents:
+            continue
+        compared += 1
+        agent_id = str(getattr(agent, "agent_id", "") or "")
+        reported: set = set()
+        for document in documents:
+            reported |= _addresses(document)
+        owned: set = set()
+        for body in previous.get(agent_id, ()) or ():
+            document = _parse_or_none(body)
+            if document is not None:
+                owned |= _addresses(document)
+        foreign = reported - owned
+        for key, addresses in proposed.items():
+            for address in addresses & foreign:
+                collisions.setdefault(key, {}).setdefault(address, []).append(agent_id)
+
+    if not compared or not collisions:
+        return
+
+    for key in sorted(collisions):
+        by_address = collisions[key]
+        addresses = sorted(by_address)
+        agent_ids = sorted({agent for ids in by_address.values() for agent in ids})
+        shown = ", ".join(f"`{address}`" for address in addresses[:3])
+        shown += f" (+{len(addresses) - 3} more)" if len(addresses) > 3 else ""
+        affected = ", ".join(agent_id[:8] for agent_id in agent_ids[:3])
+        affected += f" (+{len(agent_ids) - 3} more)" if len(agent_ids) > 3 else ""
+        verdict.add_warning(
+            key or "<empty key>",
+            f"{len(addresses)} address(es) in this config are also defined by a config "
+            f"source the server does not manage, on {len(agent_ids)} target agent(s): "
+            f"{shown} ({affected})",
+            "the agent merges every source it is handed, so the same address in two of "
+            "them is a conflict rather than an override: it applies this revision and "
+            "reports `config_conflict` (osquery: 'the same query name is scheduled "
+            "more than once'), then the rollout pauses. Remove the address from the "
+            "other source — a local config file or flag on the agent host — or from "
+            "this revision; this server cannot delete a key it does not own",
+        )
+
+
 # ------------------------------------------------------------------------ policy
 
 
@@ -1134,11 +1291,15 @@ def check_config_map(
     allowed_exporters: Optional[Sequence[str]] = None,
     agents: Optional[Sequence[Any]] = None,
     run_policy: bool = True,
+    previous_bodies: Optional[Mapping[str, Sequence[str]]] = None,
 ) -> Verdict:
     """Run the whole pipeline and return the verdict. **Never raises.**
 
     `agents` is a sequence of `AgentState` (or anything with `agent_id` and
     `available_components`) so the inventory warnings are per-target.
+    `previous_bodies` maps an agent id to the config bodies this server already
+    pushes to it (its current assignment), so :func:`check_merge_collisions` can tell
+    *our* keys from another source's.
     """
     verdict = Verdict()
     normalised = check_shape(config_map, verdict, allow_empty=allow_empty)
@@ -1148,6 +1309,7 @@ def check_config_map(
     agent_list = list(agents or ())
     _annotate_profile(verdict, *_target_profile(agent_list), agent_list)
     check_object_names(normalised, verdict, agent_list)
+    check_merge_collisions(normalised, verdict, agent_list, previous_bodies)
 
     for key, entry in normalised.items():
         body = entry["body"]
@@ -1336,6 +1498,7 @@ __all__ = [
     "check_config_map",
     "check_invariants",
     "check_inventory",
+    "check_merge_collisions",
     "check_policy",
     "check_shape",
     "check_structure",

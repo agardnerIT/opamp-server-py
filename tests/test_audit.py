@@ -609,6 +609,7 @@ AUDITED_ROUTES = {
     ("POST", "/config/rollouts"): "config.rollout.create",
     ("POST", "/config/revisions/{proposal_id}/apply"): "config.rollout.create",
     ("POST", "/config/rollouts/{rollout_id}/abort"): "config.rollout.abort",
+    ("POST", "/config/rollouts/{rollout_id}/resume"): "config.rollout.resume",
     ("POST", "/config/rollouts/{rollout_id}/rollback"): "config.rollout.rollback",
     # #84: a restart is a privileged action against a live machine; the queue write
     # happens after the row, and a refusal records `result="error"`.

@@ -462,6 +462,57 @@ def test_the_agent_view_reports_command_state(client, registered):
     assert detail["command_delivered_at"] is not None
 
 
+def test_resume_reopens_a_paused_rollout_and_is_approver_only(client, registered):
+    """#135 follow-up: a conflict pause was a dead end (`abort` plus a new proposal, which
+    re-delivers the canary). The route re-arms the same gate; the operator fixes the agent
+    host, the approver decides to continue."""
+    proposal_id = propose(client)
+    created = client.post(
+        "/config/rollouts",
+        params={"proposal_id": proposal_id},
+        json={"health_gate_seconds": 0},
+        headers=admin_headers(),
+    )
+    assert created.status_code == 200, created.text
+    rollout_id = created.json()["rollout_id"]
+
+    # Not paused → 409, and nothing changes.
+    refused = client.post(
+        f"/config/rollouts/{rollout_id}/resume", json={}, headers=admin_headers()
+    )
+    assert refused.status_code == 409
+    assert "only a paused rollout" in json.dumps(refused.json())
+
+    # The engine pauses it (the conflict itself is covered end-to-end in
+    # test_rollout.py); re-open it through the route.
+    rollout.STORE.update(
+        rollout_id, status="paused", paused_reason="config_conflict", pause_detail="battery_stats"
+    )
+    # Resuming releases the next batch, so it is an approver decision, not a viewer's.
+    from tests.support import basic
+
+    assert client.post(
+        "/auth/principals",
+        json={"name": "watcher", "role": "viewer", "password": "viewer-pw-123456"},
+        headers=admin_headers(),
+    ).status_code == 201
+    viewer = client.post(
+        f"/config/rollouts/{rollout_id}/resume",
+        json={},
+        headers=basic("watcher", "viewer-pw-123456"),
+    )
+    assert viewer.status_code == 403
+
+    resumed = client.post(
+        f"/config/rollouts/{rollout_id}/resume",
+        json={"reason": "local config source removed"},
+        headers=admin_headers(),
+    )
+    assert resumed.status_code == 200, resumed.text
+    assert resumed.json()["status"] == "running"
+    assert resumed.json()["paused_reason"] is None
+
+
 # ------------------------------------------------------------------ #79: /health
 
 
@@ -502,6 +553,14 @@ def test_the_client_can_drive_the_whole_rollout_surface(client, registered):
         assert oc.list_config_rollouts()["count"] == 1
         assert oc.get_config_rollout(rollout_id)["rollout_id"] == rollout_id
         assert oc.abort_config_rollout(rollout_id, reason="client parity")["status"] == "aborted"
+
+        # Resume is refused for anything that is not paused, and the client surfaces the
+        # 409 with the engine's explanation (#135's follow-up).
+        from client.opamp_client import OpampApiError
+
+        with pytest.raises(OpampApiError) as resume_refused:
+            oc.resume_config_rollout(rollout_id, reason="client parity")
+        assert resume_refused.value.status_code == 409
 
         # A restart is refused for an agent without the capability, and the client
         # surfaces the 409 with its explanation rather than a bare error.

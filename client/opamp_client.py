@@ -857,6 +857,26 @@ class OpampClient:
             body["reason"] = reason
         return self._post(f"/config/rollouts/{rollout_id}/abort", json=body)
 
+    def resume_config_rollout(
+        self, rollout_id: str, reason: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """``POST /config/rollouts/{id}/resume`` — re-open a paused rollout (approver).
+
+        For a pause whose cause was on the agent and is now fixed — the ordinary case is
+        ``config_conflict``: the revision applied, but a second config source on the host
+        scheduled the same query names, and the operator removed it. Nothing is
+        re-delivered: the engine re-runs the same gate on the next tick, and pauses again
+        if the cause is still there.
+
+        Refused (409) when the rollout is not paused, when the pause reason is the
+        revision itself (``failed``/``auto_reverted`` are poisoned — reactivate or roll
+        back — and ``superseded`` has nothing left to promote), or once the TTL passed.
+        """
+        body: Dict[str, Any] = {}
+        if reason:
+            body["reason"] = reason
+        return self._post(f"/config/rollouts/{rollout_id}/resume", json=body)
+
     def rollback_config_rollout(
         self,
         rollout_id: str,

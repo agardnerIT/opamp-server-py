@@ -278,7 +278,33 @@ def validate_for_targets(
         allow_endpoint_change=allow_endpoint_change,
         agents=present,
         run_policy=run_policy,
+        previous_bodies=_assigned_bodies(present),
     )
+
+
+def _assigned_bodies(agents: Sequence[AgentState]) -> Dict[str, List[str]]:
+    """The bodies this server already pushes to each agent (its current assignment).
+
+    The raw material for the merge-collision warning: anything an agent reports that
+    is *not* here came from another config source, so re-defining it in a revision
+    collides instead of updating.
+    """
+    bodies: Dict[str, List[str]] = {}
+    for agent in agents:
+        record = remote_config.REGISTRY.get(agent.agent_id)
+        if not record:
+            continue
+        config_map = record.get("config_map") or {}
+        if not isinstance(config_map, Mapping):
+            continue
+        decoded = [
+            entry.get("body")
+            for entry in config_map.values()
+            if isinstance(entry, Mapping) and isinstance(entry.get("body"), str)
+        ]
+        if decoded:
+            bodies[agent.agent_id] = decoded
+    return bodies
 
 
 def _require_approvable(

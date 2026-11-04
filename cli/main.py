@@ -1051,6 +1051,20 @@ def config_rollout_abort(
     _run(lambda oc: oc.abort_config_rollout(rollout_id, reason=reason))
 
 
+@rollout_app.command("resume")
+def config_rollout_resume(
+    rollout_id: str = typer.Argument(..., help="Rollout id (ro-…)"),
+    reason: Optional[str] = typer.Option(None, "--reason"),
+) -> None:
+    """Re-open a paused rollout once the cause is fixed on the agent (approver).
+
+    Nothing is re-delivered: the same gate re-runs within one tick and pauses again if
+    the conflict is still there. Refused for a poisoned revision (reactivate or roll
+    back) and for a rollout past its TTL.
+    """
+    _run(lambda oc: oc.resume_config_rollout(rollout_id, reason=reason))
+
+
 @rollout_app.command("rollback")
 def config_rollout_rollback(
     rollout_id: str = typer.Argument(..., help="Rollout id (ro-…)"),

@@ -486,3 +486,165 @@ def test_agents_that_report_no_config_are_not_compared():
         {"": {"body": "a: 1\n", "content_type": "text/yaml"}}, agents=[Silent()]
     )
     assert _object_name_warnings(verdict) == []
+
+
+# ------------------------------------------------ merge collisions (two sources)
+
+
+def _collision_warnings(verdict):
+    """Only this stage's findings, so unrelated warnings are not asserted."""
+    return [
+        finding for finding in verdict.warnings if "also defined by a config source" in finding.message
+    ]
+
+
+def _osquery_agent(agent_id="ab" * 16, schedule=None, key="osquery.json"):
+    """An osquery agent that reports the *merged* config it is running.
+
+    osquery reports `application/json`, which is why this stage opts into JSON: the
+    colliding address here is `schedule.battery_stats`, and a schedule name defined
+    by both a local config file and a pushed source is `config_conflict`, not an
+    override.
+    """
+    document = json.dumps({"schedule": schedule or {"battery_stats": {"query": "select 1;"}}})
+    return _AgentWithConfig(agent_id, key, document=document)
+
+
+def test_a_scheduled_query_the_agent_already_runs_from_another_source_is_flagged():
+    """The incident (#135): APPLIED, healthy, and the effective config was not ours.
+
+    The agent reports `schedule.battery_stats` because a local file schedules it; the
+    revision schedules the same name; the daemon refuses the merge and reports
+    `config_conflict`, which pauses the rollout *after* the canary. The server has the
+    evidence before delivery — the agent's own report — so it warns now.
+    """
+    verdict = config_validation.check_config_map(
+        {
+            "osquery.json": {
+                "body": json.dumps(
+                    {"schedule": {"battery_stats": {"query": "select 2;", "interval": 60}}}
+                ),
+                "content_type": "application/json",
+            }
+        },
+        agents=[_osquery_agent()],
+    )
+    assert verdict.ok, "a warning: an address can legitimately be redefined on some agents"
+    findings = _collision_warnings(verdict)
+    assert len(findings) == 1
+    assert findings[0].path == "osquery.json"
+    assert "`schedule.battery_stats`" in findings[0].message
+    assert "config_conflict" in findings[0].hint
+    assert "abababab" in findings[0].message
+
+
+def test_an_address_this_server_already_pushes_is_an_update_not_a_collision():
+    """Re-pushing a key we own is the ordinary rollout: no warning, or every second
+    revision of a query would be flagged and the warning would be noise."""
+    agent = _osquery_agent()
+    verdict = config_validation.check_config_map(
+        {
+            "osquery.json": {
+                "body": json.dumps(
+                    {"schedule": {"battery_stats": {"query": "select 2;", "interval": 60}}}
+                ),
+                "content_type": "application/json",
+            }
+        },
+        agents=[agent],
+        previous_bodies={
+            agent.agent_id: [
+                json.dumps({"schedule": {"battery_stats": {"query": "select 1;", "interval": 30}}})
+            ]
+        },
+    )
+    assert _collision_warnings(verdict) == []
+
+
+def test_a_second_source_supplying_a_new_address_is_still_clean():
+    """Only the addresses in *both* documents collide; a new query name is fine."""
+    verdict = config_validation.check_config_map(
+        {
+            "osquery.json": {
+                "body": json.dumps({"schedule": {"disk_usage": {"query": "select 2;"}}}),
+                "content_type": "application/json",
+            }
+        },
+        agents=[_osquery_agent()],
+    )
+    assert _collision_warnings(verdict) == []
+
+
+def test_a_collector_component_id_from_another_source_is_flagged_too():
+    """The same rule, collector-shaped: a duplicate component id is refused by the
+    merge, so a second source's `receivers.hostmetrics` collides with ours."""
+    agent = _AgentWithConfig(
+        "cd" * 16,
+        "",
+        document=(
+            "receivers:\n"
+            "  hostmetrics:\n"
+            "    collection_interval: 30s\n"
+            "exporters:\n"
+            "  debug: {}\n"
+            "service:\n"
+            "  pipelines:\n"
+            "    metrics:\n"
+            "      receivers: [hostmetrics]\n"
+            "      exporters: [debug]\n"
+        ),
+    )
+    verdict = config_validation.check_config_map(
+        {
+            "": {
+                "body": (
+                    "receivers:\n  hostmetrics:\n    collection_interval: 10s\n"
+                    "exporters:\n  debug: {}\n"
+                ),
+                "content_type": "text/yaml",
+            }
+        },
+        agents=[agent],
+    )
+    findings = _collision_warnings(verdict)
+    assert [finding.path for finding in findings] == ["<empty key>"]
+    assert "`receivers.hostmetrics`" in findings[0].message
+
+
+def test_a_scalar_leaf_supplied_by_another_source_is_a_merge_not_a_collision():
+    """`service.telemetry.logs.level` is a setting, not an address: a second source
+    changing it is merged by the daemon, so a warning would be noise. (A duplicate
+    `exporters.debug` *would* be flagged — that is the component-id case above.)"""
+    agent = _AgentWithConfig(
+        "cd" * 16,
+        "",
+        document="service:\n  telemetry:\n    logs:\n      level: info\n",
+    )
+    verdict = config_validation.check_config_map(
+        {
+            "": {
+                "body": "service:\n  telemetry:\n    logs:\n      level: debug\n",
+                "content_type": "text/yaml",
+            }
+        },
+        agents=[agent],
+    )
+    assert _collision_warnings(verdict) == []
+
+
+def test_an_agent_that_reports_nothing_is_no_evidence_for_a_collision():
+    class Silent:
+        agent_id = "ef" * 16
+        available_components = {}
+        effective_config = None
+
+    verdict = config_validation.check_config_map(
+        {
+            "osquery.json": {
+                "body": json.dumps({"schedule": {"battery_stats": {"query": "select 1;"}}}),
+                "content_type": "application/json",
+            }
+        },
+        agents=[Silent()],
+    )
+    assert _collision_warnings(verdict) == []

@@ -440,6 +440,7 @@ class TestRemoteConfigTools:
             "create_config_rollout",
             "plan_config_rollout",
             "abort_config_rollout",
+            "resume_config_rollout",
             "rollback_config_rollout",
             "restart_agent",
         }

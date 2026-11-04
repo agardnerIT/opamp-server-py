@@ -9,6 +9,7 @@ statement about values rather than about wall time.
 from __future__ import annotations
 
 import base64
+import json
 from datetime import timedelta
 
 import pytest
@@ -84,6 +85,7 @@ def agent_message(
     reported_hash_b64: str | None = None,
     error: str = "",
     healthy: bool = True,
+    health_status: str = "",
 ) -> bytes:
     msg = opamp_pb2.AgentToServer()
     msg.instance_uid = bytes.fromhex(agent_id)
@@ -93,6 +95,10 @@ def agent_message(
         | opamp_pb2.AgentCapabilities.AgentCapabilities_ReportsHealth
     )
     msg.health.healthy = healthy
+    if health_status:
+        # Agent-defined (#135): `config_conflict` is osquery's word for "applied, and
+        # the merged config is ambiguous", so it rides alongside `healthy: true`.
+        msg.health.status = health_status
     if not healthy:
         # proto3 drops a false scalar from MessageToDict, so an unhealthy report needs
         # a second field or the server never sees a `health` block at all.
@@ -115,6 +121,7 @@ def poll(
     hash_b64: str | None = None,
     healthy: bool = True,
     error: str = "",
+    health_status: str = "",
 ) -> bool:
     """One agent poll; True when the reply carries a config."""
     return reply(
@@ -124,6 +131,7 @@ def poll(
             reported_hash_b64=hash_b64,
             healthy=healthy,
             error=error,
+            health_status=health_status,
         )
     ).HasField("remote_config")
 
@@ -321,6 +329,155 @@ def test_a_healthy_status_that_is_not_a_conflict_still_promotes():
         health_status="ok",
     )
     assert rollout.batch_gate([gate], gate_seconds=0).ok is True
+
+
+def _pause_on_config_conflict(client, agent_id):
+    """Drive one agent to the #135 pause: APPLIED with our hash, healthy, but conflicting."""
+    assert poll(agent_id) is True
+    poll(
+        agent_id,
+        status="APPLIED",
+        hash_b64=our_hash_b64(agent_id),
+        health_status="config_conflict",
+        error="the same query name is scheduled more than once: battery_stats",
+    )
+    rolled = rollout.tick(now=utcnow())
+    assert rolled["events"][0]["action"] == "paused"
+    return rolled
+
+
+def test_resume_re_runs_the_conflict_gate_without_redelivering(client):
+    """#135's follow-up: a conflict pause used to be a dead end.
+
+    The revision is right and the agent applied it; the cause is a second config source
+    on the agent host. Once the operator removes it, `resume` clears the pause and the
+    **same** gate decides again — nothing is re-delivered and no revision is edited.
+    """
+    agent_ids = _register(client, 1)
+    created = _create(_propose(client, agent_ids), now=utcnow())
+    rollout_id = created["rollout_id"]
+    agent_id = agent_ids[0]
+
+    _pause_on_config_conflict(client, agent_id)
+    view = rollout.view(rollout_id)
+    assert view["status"] == "paused" and view["paused_reason"] == "config_conflict"
+    assert view["agents"]["states"].get("paused") == 1
+
+    # Resumed while the host is still unfixed: the gate sees the same facts and pauses
+    # again immediately — an honest retry, not a silent second delivery.
+    resumed = rollout.resume(rollout_id)
+    assert resumed["status"] == "running"
+    assert resumed["paused_reason"] is None
+    # Still unfixed, and the agent already has our hash: nothing is re-sent, the gate
+    # simply pauses again.
+    assert (
+        poll(
+            agent_id,
+            status="APPLIED",
+            hash_b64=our_hash_b64(agent_id),
+            health_status="config_conflict",
+            error="the same query name is scheduled more than once: battery_stats",
+        )
+        is False
+    ), "resume must not re-deliver the config"
+    blocked = rollout.tick(now=utcnow())
+    assert blocked["events"][0]["reason"] == rollout.PAUSE_CONFIG_CONFLICT
+
+    # The operator fixes the agent host (`--config_plugin=opamp`, or delete the local
+    # schedule entry); the agent reports clean health for the config it already has.
+    poll(agent_id, status="APPLIED", hash_b64=our_hash_b64(agent_id), health_status="ok")
+    rollout.resume(rollout_id)
+    assert poll(agent_id, status="APPLIED", hash_b64=our_hash_b64(agent_id)) is False
+    promoted = rollout.tick(now=utcnow())
+    assert promoted["events"][0]["action"] in ("promoted", "completed")
+    final = rollout.view(rollout_id)
+    if final["status"] == "running":
+        final = rollout.view(rollout_id)
+    assert final["status"] == "completed"
+    assert final["agents"]["states"].get("applied") == 1
+
+
+def test_a_poisoned_revision_pause_cannot_be_resumed(client):
+    """`failed` and `auto_reverted` are about the revision, not the agent: re-opening the
+    rollout would only pause again, so the engine names the decision that can help."""
+    agent_ids = _register(client, 1)
+    created = _create(_propose(client, agent_ids), now=utcnow())
+    agent_id = agent_ids[0]
+    assert poll(agent_id) is True
+    poll(agent_id, status="FAILED", hash_b64=our_hash_b64(agent_id), error="bad config")
+    assert rollout.tick(now=utcnow())["events"][0]["reason"] == rollout.PAUSE_FAILED
+
+    with pytest.raises(rollout.RolloutError) as excinfo:
+        rollout.resume(created["rollout_id"])
+    assert excinfo.value.status_code == 409
+    assert "reactivate" in excinfo.value.detail["next"]
+
+
+def test_only_a_paused_rollout_can_be_resumed(client):
+    agent_ids = _register(client, 1)
+    created = _create(_propose(client, agent_ids), now=utcnow())
+    with pytest.raises(rollout.RolloutError) as excinfo:
+        rollout.resume(created["rollout_id"])
+    assert excinfo.value.status_code == 409
+    assert "running" in str(excinfo.value.detail)
+
+
+def test_an_expired_rollout_does_not_pretend_to_resume(client):
+    """The engine cancels a paused rollout past its TTL within one tick, so resuming it
+    would report success and then cancel — refuse and say why instead."""
+    agent_ids = _register(client, 1)
+    created = _create(_propose(client, agent_ids), now=utcnow())
+    _pause_on_config_conflict(client, agent_ids[0])
+    past = utcnow() + timedelta(minutes=rollout.ttl_minutes() + 1)
+    with pytest.raises(rollout.RolloutError) as excinfo:
+        rollout.resume(created["rollout_id"], now=past)
+    assert excinfo.value.status_code == 409
+    assert "TTL" in excinfo.value.detail["message"]
+
+
+def test_the_collision_check_learns_what_we_own_from_the_current_assignment(monkeypatch):
+    """End to end over the seam that matters: `validate_for_targets` hands the #100
+    pipeline the bodies this server already pushes, so a query name in *our* current
+    revision is an update (silent) while the same name from a local file warns."""
+    schedule = {"battery_stats": {"query": "select 1;", "interval": 30}}
+    config_map = {"osquery.json": {"body": json.dumps({"schedule": schedule}), "content_type": "application/json"}}
+
+    class Agent:
+        agent_id = "ab" * 16
+        available_components = {}
+        effective_config = json.dumps(
+            {
+                "configMap": {
+                    "configMap": {
+                        "osquery.json": {
+                            "body": base64.b64encode(
+                                json.dumps({"schedule": schedule}).encode()
+                            ).decode(),
+                            "contentType": "application/json",
+                        }
+                    }
+                }
+            }
+        )
+
+    def collisions(verdict):
+        return [finding for finding in verdict.warnings if "also defined by a config source" in finding.message]
+
+    # No assignment yet: the agent's schedule came from somewhere else, so re-defining
+    # it here collides (#135).
+    monkeypatch.setattr(remote_config.REGISTRY, "get", lambda agent_id: None)
+    verdict = config_control.validate_for_targets(config_map, agents=[Agent()])
+    assert len(collisions(verdict)) == 1
+    assert "`schedule.battery_stats`" in collisions(verdict)[0].message
+
+    # The assignment already carries that name: this is our key to change, not a
+    # collision with another source.
+    monkeypatch.setattr(
+        remote_config.REGISTRY,
+        "get",
+        lambda agent_id: {"config_map": {"osquery.json": {"body": json.dumps({"schedule": schedule})}}},
+    )
+    assert collisions(config_control.validate_for_targets(config_map, agents=[Agent()])) == []
 
 
 def test_facts_for_reads_the_reported_health_status():

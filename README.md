@@ -1043,17 +1043,19 @@ before it runs.
 because one failed is a second outage. The pause carries one reason
 (`failed`, `auto_reverted`, `agent_went_silent`, `unhealthy`,
 `config_conflict`, `delivery_unconfirmed`, `superseded`) and the summary is "N applied, K failed,
-paused at batch 2". The two decisions stay human: retry the failed agents (an
-approver `reactivate`, #99) or roll back the applied ones — which runs as its own
-rollout, canary first, gated the same way.
+paused at batch 2". The decisions stay human: retry the failed agents (an approver
+`reactivate`, #99), re-open a pause whose cause was on the agent (`resume` — the
+revision is fine, a second config source on the host was not) or roll back the
+applied ones — which runs as its own rollout, canary first, gated the same way.
 - **The HTTP surface** (#103): `POST /config/rollouts?proposal_id=…` creates a rollout
   (approver; `dry_run: true` plans without approving), `GET /config/rollouts` and
   `GET /config/rollouts/{id}` read it (viewer), `POST /config/rollouts/{id}/abort`
-  stops it (operator) and `POST /config/rollouts/{id}/rollback` undoes it as its own
-  gated rollout (approver). `POST /config/revisions/{id}/apply` is the same operation
+  stops it (operator), `POST /config/rollouts/{id}/resume` re-opens a paused one after
+  the cause is fixed on the agent (approver; nothing is re-delivered) and
+  `POST /config/rollouts/{id}/rollback` undoes it as its own gated rollout (approver). `POST /config/revisions/{id}/apply` is the same operation
   under the flow's own verb, and `POST /config/revisions/{id}/validate` re-runs the
   pipeline without changing anything. From the shell:
-  `opampctl config rollout plan|create|show|abort|rollback <id>`,
+  `opampctl config rollout plan|create|show|abort|resume|rollback <id>`,
   `opampctl config rollouts`, `opampctl config revalidate <proposal>`.
 - **Abort stops promotion immediately, and cannot recall.** `abort()` stops the
 next batch, leaves already-applied agents exactly as they are (the config is on

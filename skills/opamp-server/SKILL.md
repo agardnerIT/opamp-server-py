@@ -125,6 +125,7 @@ opampctl agents compliance <agent-id>
 | Create a rollout = approve + stage (approver) | `config rollout create prop-…` | — (never exposed) | `POST /config/rollouts` |
 | Rollout progress, per-agent state, pause reason | `config rollout show ro-…` / `config rollouts` | `get_config_rollout` / `list_config_rollouts` | `GET /config/rollouts[/{id}]` |
 | Stop promoting (operator) | `config rollout abort ro-… --reason …` | — | `POST /config/rollouts/{id}/abort` |
+| Resume a paused rollout (approver) | `config rollout resume ro-… --reason …` | — | `POST /config/rollouts/{id}/resume` |
 | Undo a rollout, staged (approver) | `config rollout rollback ro-…` | — | `POST /config/rollouts/{id}/rollback` |
 | Re-run validation for a proposal (read-only) | `config revalidate prop-…` | — | `POST /config/revisions/{id}/validate` |
 | Restart an agent (operator, needs the capability) | `agents config restart <id>` | — | `POST /agent/{id}/restart` |

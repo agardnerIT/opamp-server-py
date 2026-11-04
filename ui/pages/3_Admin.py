@@ -13,6 +13,7 @@ from ui.shared import (
     REAUTH_KEY,
     UPDATE_SUBSCRIBE_URL,
     admin_request,
+    agent_token_rows,
     get_agents,
     get_updates,
     logout,
@@ -63,6 +64,7 @@ st.divider()
 
 tab_names = ["Alerts", "Compliance"]
 if session.can(ROLE_ADMIN):
+    tab_names.append("Agent tokens")
     tab_names.append("Sessions")
 tab_names.append("Updates")
 tab_names.append("Release emails")
@@ -237,7 +239,65 @@ with admin_tabs[1]:
         st.info("No agents connected")
 
 if session.can(ROLE_ADMIN):
-    with admin_tabs[2]:
+    with admin_tabs[tab_names.index("Agent tokens")]:
+        st.markdown("**Agent tokens**")
+        st.caption(
+            "The credentials agents present on `/v1/opamp`. A **fleet** token is not "
+            "tied to an agent id and serves up to its cap; a **bound** token is one "
+            "agent's identity. Tokens are never shown here — only the handle used to "
+            "revoke them."
+        )
+        tokens_resp = admin_request("GET", "/agent-tokens", required_role=ROLE_ADMIN)
+        if tokens_resp is None or tokens_resp.status_code != 200:
+            st.error("Failed to list agent tokens.")
+        else:
+            tokens = tokens_resp.json().get("tokens") or []
+            if not tokens:
+                st.info(
+                    "No tokens yet. Agents cannot connect until one exists — mint the "
+                    "first one from the **Agents** page (or `opampctl agent-tokens "
+                    "create`)."
+                )
+            else:
+                st.dataframe(
+                    pd.DataFrame(agent_token_rows(tokens)),
+                    width="stretch",
+                    hide_index=True,
+                )
+                revocable = [t for t in tokens if not t.get("revoked_at")]
+                if revocable:
+                    labels = {
+                        f"{t['token_id']} · {t.get('label') or 'unlabelled'} · "
+                        f"{t.get('agents_used') or 0} agent(s)": t
+                        for t in revocable
+                    }
+                    chosen = st.selectbox(
+                        "Revoke a token", list(labels), key="admin_revoke_token_choice"
+                    )
+                    confirmed = st.checkbox(
+                        "I understand this blocks those agents immediately (their state "
+                        "and config are kept)",
+                        key="admin_revoke_token_confirm",
+                    )
+                    if st.button(
+                        "Revoke token",
+                        key="admin_revoke_token_button",
+                        disabled=not confirmed,
+                        type="primary",
+                    ):
+                        token_id = labels[chosen]["token_id"]
+                        revoke_resp = admin_request(
+                            "DELETE",
+                            f"/agent-tokens/{token_id}",
+                            required_role=ROLE_ADMIN,
+                        )
+                        if revoke_resp is not None and revoke_resp.status_code == 200:
+                            st.success(f"Revoked `{token_id}`.")
+                            st.rerun()
+                        elif revoke_resp is not None:
+                            st.error(f"Revoking failed: {revoke_resp.text}")
+
+    with admin_tabs[tab_names.index("Sessions")]:
         st.markdown("**Active admin sessions**")
         st.caption(
             "Every session the server currently honours, including other browsers. "

@@ -50,11 +50,13 @@ services:
       - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-opamp-server}
       - OTEL_TRACES_SAMPLER=${OTEL_TRACES_SAMPLER:-parentbased_always_on}
       - OPAMP_ALLOW_INSECURE_CONFIG_PUSH=${OPAMP_ALLOW_INSECURE_CONFIG_PUSH:-false}
-      # Agent auth (#94): off by default. Set to token and mint a credential per
-      # agent (`opampctl agents token create <agent-id>`, then paste the returned
-      # headers block into the collector config). Config push refuses to start
-      # while this is off.
-      - OPAMP_AGENT_AUTH=${OPAMP_AGENT_AUTH:-off}
+      # Agent tokens (#126): required. Mint one with
+      #   opampctl agent-tokens create --expires-in-days 30 --max-agents 50
+      # and paste the returned headers block into each agent's config. Leaving this
+      # unset is the secure default; OPAMP_ALLOW_UNAUTHENTICATED_AGENTS=true is the
+      # explicit (and loudly reported) way to run a tokenless endpoint locally.
+      - OPAMP_AGENT_AUTH=${OPAMP_AGENT_AUTH:-token}
+      - OPAMP_ALLOW_UNAUTHENTICATED_AGENTS=${OPAMP_ALLOW_UNAUTHENTICATED_AGENTS:-false}
       - PUBLIC_URL=${PUBLIC_URL:-}
       - TLS_TERMINATED_UPSTREAM=${TLS_TERMINATED_UPSTREAM:-false}
       - OPA_ENABLED=${OPA_ENABLED:-false}

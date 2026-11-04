@@ -106,6 +106,7 @@ def collector_config_snippet(
     poll_interval="5s",
     in_container=False,
     agent_auth="off",
+    token_literal=None,
 ):
     """#116: the copy-paste collector config, in one place.
 
@@ -123,6 +124,11 @@ def collector_config_snippet(
     `agent_auth` is the server's mode (#124). With `token` the snippet carries the
     `headers:` block the endpoint now demands; without it the copy-paste path ended in a
     401 the page never mentioned. `off` prints exactly the bytes it printed before.
+
+    `token_literal` (#126) is the token that was *just minted on this page*: the operator
+    is pasting it into a file they own, and a snippet they cannot run without editing is
+    not a snippet. The `${env:…}` form stays the documented practice, and is what the
+    snippet shows whenever no token is passed.
     """
     base = (server_url or SERVER_URL).rstrip("/")
     endpoint = f"{base}/v1/opamp"
@@ -131,9 +137,12 @@ def collector_config_snippet(
             endpoint = endpoint.replace(f"//{local}", "//host.docker.internal")
     headers = ""
     if agent_auth == "token":
+        credential = (
+            f"Bearer {token_literal}" if token_literal else f"Bearer ${{env:{AGENT_TOKEN_ENV}}}"
+        )
         headers = (
             "        headers:\n"
-            f'          Authorization: "Bearer ${{env:{AGENT_TOKEN_ENV}}}"\n'
+            f'          Authorization: "{credential}"\n'
         )
     return f"""extensions:
   opamp:
@@ -216,6 +225,61 @@ def agent_auth_note(mode):
             "exposing it."
         )
     return None
+
+
+#: The expiry presets the token form offers (#126). Keys are what an operator reads,
+#: values are what the API takes (`None` = never).
+EXPIRY_CHOICES = {"1 day": 1, "7 days": 7, "30 days": 30, "Never": None}
+
+#: The minted token lives in session state until the operator dismisses it. It is never
+#: written to disk, and a rerun that loses it means minting another one — which is the
+#: honest consequence of the server keeping only a hash.
+MINTED_TOKEN_KEY = "minted_agent_token"
+
+
+def agent_token_state(token):
+    """One token's state as a word: `revoked`, `expired`, `at cap` or `active`.
+
+    Ordered by what stops a connection first: a revoked token is dead however fresh it
+    is, and an expired one is dead even if it has slots left. `at cap` is not a failure
+    of the token — it is full — and an operator watching a fleet needs to tell those
+    apart without reading `agents_used` against `max_agents`.
+    """
+    if token.get("revoked_at"):
+        return "revoked"
+    if token.get("expired"):
+        return "expired"
+    cap = token.get("max_agents")
+    if cap is not None and int(token.get("agents_used") or 0) >= int(cap):
+        return "at cap"
+    return "active"
+
+
+def agent_token_rows(tokens):
+    """The Admin table: one row per token, never a token or a hash (#126)."""
+    rows = []
+    for token in tokens or []:
+        cap = token.get("max_agents")
+        rows.append(
+            {
+                "State": agent_token_state(token),
+                "Label": token.get("label") or "—",
+                "Token": token.get("token_id") or "",
+                "Bound to": token.get("agent_id") or "fleet",
+                "Expires": format_local_time(token.get("expires_at"))
+                if token.get("expires_at")
+                else "never",
+                "Agents": (
+                    f"{token.get('agents_used') or 0} of {cap}"
+                    if cap is not None
+                    else f"{token.get('agents_used') or 0} of unlimited"
+                ),
+                "Last used": format_local_time(token.get("last_seen_at"))
+                if token.get("last_seen_at")
+                else "never",
+            }
+        )
+    return rows
 
 
 def format_local_time(utc_str):

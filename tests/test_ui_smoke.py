@@ -74,6 +74,10 @@ class FakeServer:
         # #124: what `/health` reports as `config_push.agent_auth`, which decides whether
         # the connect snippet carries a credential.
         self.agent_auth_mode = "off"
+        # #126: the token surface. `minted` is what POST /agent-tokens returns, so a
+        # test can assert the page shows *that* token and not a placeholder.
+        self.agent_tokens = []
+        self.minted_token = "opamp_agent_smoketoken"
         self.calls = []
 
     # -- assertions helpers -----------------------------------------------
@@ -91,6 +95,47 @@ class FakeServer:
         # use it (Remote Config) need the agent listing here, not only in `.get()`.
         if method == "GET" and url.endswith("/agents"):
             return FakeResponse(200, {"agents": self.agents, "count": len(self.agents)})
+        # #126: fleet tokens.
+        if url.endswith("/agent-tokens"):
+            if method == "GET":
+                return FakeResponse(
+                    200, {"tokens": self.agent_tokens, "count": len(self.agent_tokens)}
+                )
+            if not authed:
+                return FakeResponse(401, {"detail": "invalid credentials"})
+            body = kwargs.get("json") or {}
+            minted = {
+                "token": self.minted_token,
+                "token_id": "agtok_smoke",
+                "label": body.get("label") or "",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "expires_at": None,
+                "max_agents": body.get("max_agents"),
+                "collector_snippet": "extensions:\n  opamp: ...",
+                "note": "shown once",
+            }
+            self.agent_tokens.append(
+                {
+                    "token_id": minted["token_id"],
+                    "label": minted["label"],
+                    "agent_id": None,
+                    "bound": False,
+                    "created_at": minted["created_at"],
+                    "expires_at": None,
+                    "expired": False,
+                    "max_agents": minted["max_agents"],
+                    "agents_used": 0,
+                    "last_seen_at": None,
+                    "revoked_at": None,
+                    "active": True,
+                }
+            )
+            return FakeResponse(201, minted)
+        if method == "DELETE" and "/agent-tokens/" in url:
+            if not authed:
+                return FakeResponse(401, {"detail": "invalid credentials"})
+            token_id = url.rsplit("/", 1)[-1]
+            return FakeResponse(200, {"token_id": token_id, "revoked": True})
         if "/alerts" in url:
             if not authed:
                 return FakeResponse(401, {"detail": "invalid credentials"})
@@ -287,6 +332,7 @@ class FakeServer:
 
     def post(self, url, json=None, headers=None, timeout=None, **kwargs):
         self.calls.append(("POST", url))
+        kwargs["json"] = json
         if url.endswith("/auth/session"):
             if self.login_status != 201:
                 return FakeResponse(
@@ -605,6 +651,72 @@ def signed_in(path, role="approver", **state):
     return app
 
 
+def token_row(**overrides):
+    """One `GET /agent-tokens` row in the shape the server serialises (#126)."""
+    row = {
+        "token_id": "agtok_abc123",
+        "label": "prod",
+        "agent_id": None,
+        "bound": False,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "expires_at": None,
+        "expired": False,
+        "max_agents": 15,
+        "agents_used": 3,
+        "last_seen_at": None,
+        "revoked_at": None,
+        "active": True,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_the_admin_page_shows_the_token_table_with_cap_and_expiry(server):
+    """#126: "which token is about to expire / has hit its cap" is the whole point."""
+    server.agent_tokens = [
+        token_row(),
+        token_row(token_id="agtok_full", label="old", agents_used=15),
+        token_row(token_id="agtok_dead", label="leaked", revoked_at="2026-02-01T00:00:00+00:00"),
+    ]
+    app = signed_in(ADMIN_PAGE, role="admin").run()
+    assert not app.exception, app.exception
+    assert "Agent tokens" in [tab.label for tab in app.tabs]
+
+    table = app.dataframe[0].value
+    states = list(table["State"])
+    # A cap that is full and a token that was revoked are different problems, so the
+    # table names them differently instead of making the reader compare numbers.
+    assert states == ["active", "at cap", "revoked"]
+    assert list(table["Agents"])[0] == "3 of 15"
+    assert "never" in list(table["Expires"])[0]
+    # The handle is shown (it is what revocation takes); the token is not, and cannot be.
+    assert "agtok_full" in "\n".join(table["Token"])
+
+
+def test_revoking_a_token_needs_a_confirmation_and_is_audited_by_the_server(server):
+    server.agent_tokens = [token_row()]
+    app = signed_in(ADMIN_PAGE, role="admin").run()
+    revoke = [button for button in app.button if (button.label or "") == "Revoke token"][0]
+    assert revoke.disabled is True, "revoking blocks a fleet — it must not be one click"
+
+    app.checkbox(key="admin_revoke_token_confirm").set_value(True).run()
+    [button for button in app.button if (button.label or "") == "Revoke token"][0].click().run()
+    assert not app.exception, app.exception
+    # The page reruns after a revoke so the table reflects the new state; the proof is
+    # the request, and the server's audit entry is what actually records it.
+    assert any(
+        method == "DELETE" and url.endswith("/agent-tokens/agtok_abc123")
+        for method, url in server.calls
+    )
+
+
+def test_a_non_admin_does_not_see_the_token_tab(server):
+    """The server re-checks the role; the tab is the courtesy, not the control."""
+    app = signed_in(ADMIN_PAGE, role="operator").run()
+    assert not app.exception, app.exception
+    assert "Agent tokens" not in [tab.label for tab in app.tabs]
+
+
 def test_remote_config_page_asks_for_sign_in_before_showing_the_flow(server):
     app = run(REMOTE_CONFIG_PAGE, server)
     assert not app.exception, app.exception
@@ -804,24 +916,46 @@ def test_the_docker_toggle_rewrites_the_endpoint_for_a_containerised_collector(s
     assert "host-gateway" in texts(app)
 
 
-def test_the_empty_fleet_snippet_carries_a_credential_when_the_server_requires_one(server):
-    """#124: a token server 401s the unauthenticated shape, so the snippet must not print it.
+def test_a_token_server_offers_to_mint_the_token_instead_of_printing_a_placeholder(server):
+    """#124/#126: a token server 401s the unauthenticated shape, and the operator has
+    no token to put in it — so the first screen has to produce one.
 
-    The old snippet was generated from `SERVER_URL` alone, which made the UI's first
-    instruction wrong on every deployment that can push config (push requires `token`).
+    #124 made the snippet honest about the mode; #126 made it *usable*, by minting the
+    fleet token here. Printing `Bearer ${env:...}` at someone who has no token yet is
+    the same dead end in a nicer font.
     """
     server.agent_auth_mode = "token"
     app = empty_agents_page(server)
-    snippet = "\n".join(element.value for element in app.code)
-    assert "headers:" in snippet
-    assert 'Authorization: "Bearer ${env:OPAMP_AGENT_TOKEN}"' in snippet
     body = texts(app)
-    assert "requires an agent credential" in body
-    # The trap is the ordering, so the page has to say it: the token is bound to a uid
-    # the agent has not revealed yet, which is why a fresh token-mode server cannot
-    # onboard anything by itself.
-    assert "instance_uid" in body
-    assert "agents token create" in body
+    assert "Generate a token for this fleet" in body
+    assert "not tied to an agent id" in body
+    # No snippet yet: there is nothing runnable to show until a token exists.
+    assert not [code for code in app.code if "Authorization" in code.value]
+
+
+def test_minting_shows_the_token_once_and_a_runnable_snippet(server):
+    """The token is the whole point: the snippet must contain the one just minted."""
+    server.agent_auth_mode = "token"
+    server.agents = []
+    app = signed_in(REPO / "ui/pages/1_Agents.py", role="admin")
+    app.run()
+    assert not app.exception, app.exception
+
+    submit = next(button for button in app.button if button.label == "Generate token")
+    submit.click().run()
+    assert not app.exception, app.exception
+
+    snippet = "\n".join(element.value for element in app.code)
+    assert server.minted_token in snippet
+    assert 'Authorization: "Bearer ' + server.minted_token + '"' in snippet
+    body = texts(app)
+    assert "only time it is shown" in body
+    assert "agtok_smoke" in body
+    # The form is gone once a token exists — a second mint would be a second secret.
+    assert "Generate a token for this fleet" not in body
+    # Minting went through the one admin transport, with a cap and an expiry by default
+    # (the form's defaults are the safe ones, not "never"/"unlimited").
+    assert any(method == "POST" and url.endswith("/agent-tokens") for method, url in server.calls)
 
 
 def test_the_empty_fleet_snippet_claims_no_credential_on_an_open_server(server):

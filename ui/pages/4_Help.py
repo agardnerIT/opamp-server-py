@@ -44,6 +44,30 @@ if note := agent_auth_note(auth_mode):
 
 st.divider()
 
+st.markdown("### Agent tokens")
+st.markdown("""
+Agents authenticate with `Authorization: Bearer <token>`; the server refuses a
+connection without one, and the token belongs in the agent's own config
+(`extensions.opamp.server.http.headers`, or `server.ws.headers` for the WebSocket
+transport).
+
+| Kind | Mint | What it is |
+|---|---|---|
+| **fleet** | `opampctl agent-tokens create --expires-in-days 30 --max-agents 50` | One token for many agents, capped at `max_agents`. Not tied to an agent id, so it works before any agent has connected — which is what an empty fleet needs |
+| **bound** | `opampctl agents token create <agent-id>` | The credential **is** that one agent's identity: another `instance_uid` is refused |
+
+Give a fleet token an expiry and a cap. They are what bounds the damage from a leak:
+an expired token stops working on its own, and the agent that would exceed the cap is
+refused (`agent_limit`) with a line in the server log. Revoking one (`Admin → Agent
+tokens`, or `opampctl agent-tokens revoke <agtok_…>`) blocks connections immediately
+and keeps every agent's record and config.
+
+The token is shown **once** — the server stores only its SHA-256 — so paste it
+somewhere safe when it is minted. A lost token costs one re-mint, not an outage.
+""")
+
+st.divider()
+
 st.markdown("### Admin console security")
 st.markdown("""
 This UI is an **admin console**, not a public site:

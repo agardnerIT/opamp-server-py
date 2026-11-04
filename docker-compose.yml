@@ -19,6 +19,19 @@ services:
     # of this mapping to 0.0.0.0 and firewall 4320 to the proxy only.
     ports:
       - "127.0.0.1:4320:4320"
+    # `.env` is read twice, on purpose, and the two reads are not redundant:
+    #   1. Compose itself loads `.env` to expand the `${VAR:-default}` references in
+    #      `environment:` below, which is why the documented defaults live here.
+    #   2. `env_file` passes the *whole* file into the container. Without this, `.env`
+    #      only sets the variables spelled out below and silently drops the rest —
+    #      CONFIG_AT_REST_KEY, the CONFIG_PUSH_* bounds, OPAMP_AUDIT_*, UPDATE_CHECK
+    #      and ~40 others you would reasonably expect to work.
+    # `environment:` wins over `env_file:`, and both read the same file, so the two
+    # cannot disagree. `required: false` keeps the secure default intact: no `.env`
+    # is a supported posture (read-only, random admin password), not a boot failure.
+    env_file:
+      - path: .env
+        required: false
     environment:
       - SERVER_HTTP_SCHEME=http
       - SERVER_ADDRESS=0.0.0.0
@@ -105,6 +118,12 @@ services:
     # 8501 unpublished.
     ports:
       - "127.0.0.1:8501:8501"
+    # Same `.env`, same rules as the server above: the UI reads a handful of the
+    # server's settings (posture, reports, update checks) through imported helpers,
+    # so a variable added to `.env` must not be invisible to it.
+    env_file:
+      - path: .env
+        required: false
     environment:
       - SERVER_HTTP_SCHEME=http
       - SERVER_ADDRESS=server

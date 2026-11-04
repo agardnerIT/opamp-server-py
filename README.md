@@ -88,6 +88,15 @@ Access:
 - Server: http://localhost:4320
 - OPA (if enabled): http://localhost:8181
 
+Configuration comes from `.env` (copy `.env.sample` to get one with every
+setting commented). Compose loads it for the `${VAR:-default}` defaults written
+in `docker-compose.yml`, and both services also declare `env_file: .env`, so any
+variable you add there reaches the container even if the compose file never
+mentions it. `environment:` wins where the two overlap, and both read the same
+file, so they cannot disagree. With no `.env` at all the stack still starts in
+read-only mode with a generated admin password — `required: false` keeps that a
+supported posture rather than a boot error.
+
 There is no default admin password. On first start the server generates a random
 one, prints it once in the logs (`docker compose logs server | grep -i "admin
 password"`), and stores it at `$DATA_DIR/admin_password` (mode 0600) — inside the
@@ -1342,6 +1351,11 @@ a value that matches the body written as plain ascii is accepted too, which is h
 this project's own fixtures name their agents.
 
 ## Environment Variables
+
+Under Compose, set any of these in `.env`: both services declare `env_file: .env`,
+so the whole file reaches the container even when `docker-compose.yml` never names
+the variable. Running the server directly, `server/main.py` loads the same file with
+`python-dotenv` (shell variables win, matching Compose).
 
 | Variable | Default | Description |
 |----------|---------|-------------|

@@ -536,7 +536,7 @@ Nothing is ever upgraded automatically.
 
 - **On by default.** `UPDATE_CHECK=off` disables it for the deployment and wins
   over the admin toggle. Off is not recommended: you may miss security fixes.
-- **Admin → Updates** has the toggle, "Check now", and "Use deployment default".
+- **Updates** (Admin section) has the toggle, "Check now", and "Use deployment default".
   The admin override is stored in `data/update-settings.json`; the deployer's
   `off` always wins.
 - **The request is anonymous.** One `GET` to GitHub's releases API, with no
@@ -551,7 +551,8 @@ Nothing is ever upgraded automatically.
 
 ## Release emails (optional)
 
-The Admin page can show a signup box for project release announcements. It is an
+The **Release emails** page can show a signup box for project release
+announcements. It is an
 iframe to a Cloudflare Worker; the address goes browser → Worker → the project's
 Resend segment. This server never receives or stores it, and the Worker has no
 endpoint to list subscribers.
@@ -1290,7 +1291,7 @@ this project's own fixtures name their agents.
 | `ADMIN_LOGIN_BACKOFF_SECONDS` | `30` | First lockout wait; doubles per further failure |
 | `ADMIN_LOGIN_MAX_BACKOFF_SECONDS` | `900` | Cap on the exponential lockout backoff |
 | `TRUST_PROXY_HEADERS` | `false` | Believe `X-Forwarded-For` for the lockout key and audit client. Only behind a proxy you control — otherwise it is forgeable |
-| `UPDATE_SUBSCRIBE_URL` | *(empty)* | Public URL of the release-email Worker. When set, the Admin page shows a signup box; the server stores no address. Empty hides it (#46) |
+| `UPDATE_SUBSCRIBE_URL` | *(empty)* | Public URL of the release-email Worker. When set, the Release emails page shows a signup box; the server stores no address. Empty hides it (#46) |
 | `UPDATE_CHECK` | `on` | Automatic release check (#46). `on` or `off`; `off` wins over the admin toggle and is not recommended |
 | `UPDATE_CHECK_INTERVAL_HOURS` | `24` | Minimum time between automatic checks |
 | `UPDATE_CHECK_JITTER` | `0.1` | Fractional jitter added to the interval so installs do not synchronise |

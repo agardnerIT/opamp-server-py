@@ -16,7 +16,8 @@ the project becomes the data controller for a list of email addresses.
 - Worker deployed: `https://opamp-updates.tame-lamp8409.workers.dev`
 - KV namespace `UPDATES_KV` created; pending/dedupe/release-id keys are live.
 - `/health` reports `resend: false`, `github_webhook: false`, `turnstile: false`.
-- Admin page has a "Release emails" tab, gated on `UPDATE_SUBSCRIBE_URL` (empty
+- The **Release emails** page (Admin section) renders the box, gated on
+  `UPDATE_SUBSCRIBE_URL` (empty
   by default, so the box is hidden).
 - Privacy policy at `/privacy` and a two-step deletion flow at `/delete` are
   implemented; the policy is a draft in `src/privacy.ts`.

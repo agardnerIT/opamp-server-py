@@ -18,11 +18,6 @@ from ui.shared import (
     pd,
 )
 
-st.set_page_config(
-    page_title="Reports - OpAMP Server Dashboard",
-    page_icon="📊",
-    layout="wide"
-)
 
 render_sidebar()
 

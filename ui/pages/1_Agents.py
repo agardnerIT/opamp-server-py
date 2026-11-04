@@ -35,11 +35,6 @@ from ui.shared import (
     pd,
 )
 
-st.set_page_config(
-    page_title="Agents - OpAMP Server Dashboard",
-    page_icon="📡",
-    layout="wide"
-)
 
 render_sidebar()
 

@@ -45,7 +45,6 @@ from ui.shared import (  # noqa: E402
     render_sidebar,
 )
 
-st.set_page_config(page_title="Remote Config - OpAMP Server Dashboard", page_icon="⚙️", layout="wide")
 render_sidebar()
 
 TARGET_MODE_KEY = "rc_target_mode"

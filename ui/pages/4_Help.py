@@ -12,11 +12,6 @@ from ui.shared import (
     render_sidebar,
 )
 
-st.set_page_config(
-    page_title="Help - OpAMP Server Dashboard",
-    page_icon="❓",
-    layout="wide"
-)
 
 render_sidebar()
 

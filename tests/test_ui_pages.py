@@ -22,11 +22,20 @@ import pytest
 UI_DIR = Path(__file__).resolve().parent.parent / "ui"
 REPO = UI_DIR.parent
 
-PAGES = sorted(UI_DIR.glob("pages/*.py"))
+# Recursive: the Admin sections are pages in their own directory now, and a glob that
+# missed them would silently stop guarding them.
+PAGES = sorted(path for path in UI_DIR.glob("pages/**/*.py") if "__pycache__" not in str(path))
 UI_MODULES = sorted(p for p in UI_DIR.glob("*.py"))
 ALL_UI_FILES = UI_MODULES + PAGES
 
-ADMIN_PAGE = UI_DIR / "pages" / "3_Admin.py"
+ADMIN_DIR = UI_DIR / "pages" / "admin"
+ADMIN_PAGES = sorted(path for path in ADMIN_DIR.glob("*.py") if "__pycache__" not in str(path))
+ALERTS_PAGE = ADMIN_DIR / "alerts.py"
+COMPLIANCE_PAGE = ADMIN_DIR / "compliance.py"
+AGENT_TOKENS_PAGE = ADMIN_DIR / "agent_tokens.py"
+SESSIONS_PAGE = ADMIN_DIR / "sessions.py"
+UPDATES_PAGE = ADMIN_DIR / "updates.py"
+RELEASE_EMAILS_PAGE = ADMIN_DIR / "release_emails.py"
 AGENTS_PAGE = UI_DIR / "pages" / "1_Agents.py"
 SHARED = UI_DIR / "shared.py"
 SESSION = UI_DIR / "session.py"
@@ -52,7 +61,11 @@ def lines(path: Path):
 
 def test_the_ui_files_we_think_are_here():
     names = {path.name for path in ALL_UI_FILES}
-    assert {"shared.py", "session.py", "1_Agents.py", "3_Admin.py"} <= names
+    assert {"shared.py", "session.py", "admin_common.py", "1_Agents.py"} <= names
+    # The Admin page was split into subpages; if they move, these guards must follow.
+    assert {"alerts.py", "compliance.py", "agent_tokens.py", "sessions.py"} <= {
+        path.name for path in ADMIN_PAGES
+    }
 
 
 # ------------------------------------------------- "one login implementation"
@@ -74,9 +87,13 @@ def test_shared_owns_require_admin_and_admin_request():
         assert name in text, f"ui/shared.py must define {name}"
 
 
-@pytest.mark.parametrize("page", [ADMIN_PAGE, AGENTS_PAGE])
+@pytest.mark.parametrize("page", ADMIN_PAGES + [AGENTS_PAGE])
 def test_privileged_pages_use_require_admin(page):
-    assert "require_admin(" in source(page), f"{page.name} must gate on require_admin()"
+    """Every admin subpage is gated, directly or through the shared chrome."""
+    text = source(page)
+    assert "require_admin(" in text or "admin_section(" in text, (
+        f"{page.name} must gate on require_admin() (directly or via admin_section)"
+    )
 
 
 def test_pages_do_not_reimplement_login():
@@ -158,12 +175,12 @@ def test_no_bare_requests_call_to_a_privileged_route(page):
 
 
 def test_privileged_routes_are_reached_through_admin_request():
-    text = source(ADMIN_PAGE)
+    text = "\n".join(source(page) for page in ADMIN_PAGES)
     assert 'admin_request("GET", "/alerts"' in text
     assert 'admin_request("PUT", "/alerts"' in text
     assert 'admin_request("POST", "/compliance/reload"' in text
     assert 'admin_request("GET", "/auth/sessions"' in text
-    assert 'admin_request(\n                        "POST", f"/compliance/check/{agent_id}"' in text
+    assert 'admin_request(\n                    "POST", f"/compliance/check/{agent_id}"' in text
 
 
 def test_admin_request_is_the_only_place_that_attaches_the_token():
@@ -189,12 +206,17 @@ def test_admin_request_is_the_only_place_that_attaches_the_token():
 
 
 def test_admin_only_actions_are_hidden_from_lower_roles():
-    text = source(ADMIN_PAGE)
-    assert "if session.can(ROLE_ADMIN):" in text
-    assert "tab_names.append(\"Sessions\")" in text
-    # And they are still declared to the server, so a hidden button is not the boundary.
-    assert 'required_role=ROLE_ADMIN' in text
-    assert 'required_role=ROLE_OPERATOR' in text
+    """The gate is per page now, and still declared to the server on every call."""
+    for page in (AGENT_TOKENS_PAGE, SESSIONS_PAGE):
+        text = source(page)
+        assert "role=ROLE_ADMIN" in text, f"{page.name} must require the admin role"
+        assert "required_role=ROLE_ADMIN" in text, (
+            f"{page.name} must declare the role to the server, not just hide a button"
+        )
+    for page in (ALERTS_PAGE, COMPLIANCE_PAGE):
+        text = source(page)
+        assert "role=ROLE_OPERATOR" in text
+        assert "required_role=ROLE_OPERATOR" in text
 
 
 def test_pages_add_the_repository_root_to_sys_path():
@@ -222,16 +244,14 @@ def test_pages_add_the_repository_root_to_sys_path():
 
 
 def test_update_notice_and_admin_toggle_are_wired():
-    """#46: the sidebar reads /updates, and the Admin page owns the toggle."""
+    """#46: the sidebar reads /updates, and the Updates page owns the toggle."""
     shared = source(SHARED)
     assert 'requests.get(f"{SERVER_URL}/updates"' in shared
     assert "def update_commands(" in shared
     assert "def render_update_notice(" in shared
     assert "render_update_notice()" in shared
 
-    admin = source(ADMIN_PAGE)
-    assert 'tab_names.append("Updates")' in admin
-    assert 'admin_tabs[tab_names.index("Updates")]' in admin
+    admin = source(UPDATES_PAGE)
     assert "Check for updates automatically" in admin
     assert '"/updates/settings"' in admin
     assert '"/updates/check"' in admin
@@ -255,8 +275,7 @@ def test_update_commands_are_generated_only_from_a_valid_tag():
 
 def test_release_email_box_is_config_gated():
     """#46: the Worker URL is opt-in, and the box is an iframe, not a server POST."""
-    text = source(ADMIN_PAGE)
-    assert 'tab_names.append("Release emails")' in text
+    text = source(RELEASE_EMAILS_PAGE)
     assert "if not UPDATE_SUBSCRIBE_URL:" in text
     assert "components.iframe(UPDATE_SUBSCRIBE_URL" in text
 

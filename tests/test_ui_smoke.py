@@ -28,7 +28,23 @@ from pathlib import Path
 from ui import session as ui_session
 
 REPO = Path(__file__).resolve().parent.parent
-ADMIN_PAGE = REPO / "ui" / "pages" / "3_Admin.py"
+ADMIN_DIR = REPO / "ui" / "pages" / "admin"
+ALERTS_PAGE = ADMIN_DIR / "alerts.py"
+COMPLIANCE_PAGE = ADMIN_DIR / "compliance.py"
+AGENT_TOKENS_PAGE = ADMIN_DIR / "agent_tokens.py"
+SESSIONS_PAGE = ADMIN_DIR / "sessions.py"
+UPDATES_PAGE = ADMIN_DIR / "updates.py"
+RELEASE_EMAILS_PAGE = ADMIN_DIR / "release_emails.py"
+#: Every admin subpage. The Admin page used to be one file with tabs; these are its
+#: sections, one page each.
+ADMIN_PAGES = [
+    ALERTS_PAGE,
+    COMPLIANCE_PAGE,
+    AGENT_TOKENS_PAGE,
+    SESSIONS_PAGE,
+    UPDATES_PAGE,
+    RELEASE_EMAILS_PAGE,
+]
 HELP_PAGE = REPO / "ui" / "pages" / "4_Help.py"
 REMOTE_CONFIG_PAGE = REPO / "ui" / "pages" / "5_Remote_Config.py"
 TOKEN = "opamp_admin_smoketoken"
@@ -437,7 +453,7 @@ def session_state(app):
 
 
 def test_unsigned_admin_page_renders_the_shared_login_form(server):
-    app = run(ADMIN_PAGE, server)
+    app = run(ALERTS_PAGE, server)
     assert not app.exception, app.exception
     assert "Admin sign-in required" in texts(app)
     assert any(field.label == "Name" for field in app.text_input)
@@ -447,7 +463,7 @@ def test_unsigned_admin_page_renders_the_shared_login_form(server):
 
 
 def test_login_failure_message_survives_the_rerun(server):
-    app = run(ADMIN_PAGE, server)
+    app = run(ALERTS_PAGE, server)
     server.login_status = 401
     sign_in(app)
     assert not app.exception, app.exception
@@ -455,7 +471,7 @@ def test_login_failure_message_survives_the_rerun(server):
 
 
 def test_lockout_shows_the_retry_delay(server):
-    app = run(ADMIN_PAGE, server)
+    app = run(ALERTS_PAGE, server)
     server.login_status = 429
     server.login_headers = {"Retry-After": "300"}
     sign_in(app)
@@ -464,11 +480,11 @@ def test_lockout_shows_the_retry_delay(server):
 
 
 def test_successful_login_keeps_a_token_and_never_a_password(server):
-    app = run(ADMIN_PAGE, server)
+    app = run(ALERTS_PAGE, server)
     sign_in(app)
 
     assert not app.exception, app.exception
-    assert "Admin Panel" in texts(app)
+    assert "Alerts" in texts(app)
     assert "admin_session" in session_state(app)
     assert "admin_password" not in session_state(app)
     assert not any("password" in key for key in session_state(app))
@@ -480,7 +496,7 @@ def test_successful_login_keeps_a_token_and_never_a_password(server):
 
 
 def test_expired_session_returns_to_the_login_form_with_a_sentence(server):
-    app = run(ADMIN_PAGE, server)
+    app = run(ALERTS_PAGE, server)
     sign_in(app)
     server.token_valid = False
     app.run()
@@ -491,25 +507,31 @@ def test_expired_session_returns_to_the_login_form_with_a_sentence(server):
     assert "admin_session" not in session_state(app)
 
 
-def test_admin_only_actions_are_hidden_for_an_approver(server):
+def test_admin_only_pages_refuse_a_lower_role(server):
+    """The tab is gone, the gate is not: an approver cannot see session data."""
     server.role = "approver"
-    app = run(ADMIN_PAGE, server)
+    app = run(SESSIONS_PAGE, server)
     sign_in(app)
-    labels = [tab.label for tab in app.tabs]
-    assert "Sessions" not in labels
-    assert server.methods_for("/auth/sessions") == []
+
+    assert not app.exception, app.exception
+    assert "needs" in texts(app) and "admin" in texts(app)
+    assert server.methods_for("/auth/sessions") == [], (
+        "the page must not call the API for a role the server would refuse"
+    )
 
 
-def test_admin_sees_the_sessions_tab_and_can_list_them(server):
+def test_admin_sees_the_sessions_page_and_can_list_them(server):
     server.role = "admin"
-    app = run(ADMIN_PAGE, server)
+    app = run(SESSIONS_PAGE, server)
     sign_in(app)
-    assert "Sessions" in [tab.label for tab in app.tabs]
+
+    assert not app.exception, app.exception
+    assert "Sessions" in texts(app)
     assert "GET" in server.methods_for("/auth/sessions")
 
 
 def test_read_only_server_explains_itself_instead_of_asking_for_a_password(server, monkeypatch):
-    app = AppTest.from_file(str(ADMIN_PAGE), default_timeout=30)
+    app = AppTest.from_file(str(ALERTS_PAGE), default_timeout=30)
     # A server with no credential answers `password_required: false`.
     original = server.get
 
@@ -536,7 +558,7 @@ def test_read_only_server_explains_itself_instead_of_asking_for_a_password(serve
 
 
 def test_extend_is_an_audited_reauth_that_revokes_the_old_token(server):
-    app = run(ADMIN_PAGE, server)
+    app = run(ALERTS_PAGE, server)
     sign_in(app)
     before = len(server.calls)
 
@@ -546,7 +568,7 @@ def test_extend_is_an_audited_reauth_that_revokes_the_old_token(server):
 
     sign_in(app, attempts=1)
     assert not app.exception, app.exception
-    assert "Admin Panel" in texts(app)
+    assert "Alerts" in texts(app)
     during = server.calls[before:]
     assert any(method == "POST" and url.endswith("/auth/session") for method, url in during), (
         "the re-auth must mint a new token"
@@ -557,12 +579,12 @@ def test_extend_is_an_audited_reauth_that_revokes_the_old_token(server):
 
 
 def test_extend_can_be_cancelled(server):
-    app = run(ADMIN_PAGE, server)
+    app = run(ALERTS_PAGE, server)
     sign_in(app)
     [button for button in app.button if (button.label or "") == "Extend"][0].click().run()
     [button for button in app.button if (button.label or "") == "Cancel"][0].click().run()
     assert not app.exception, app.exception
-    assert "Admin Panel" in texts(app)
+    assert "Alerts" in texts(app)
 
 
 def test_sign_out_everywhere_revokes_sessions_then_drops_the_local_one(server):
@@ -612,11 +634,41 @@ def test_a_viewer_is_not_offered_sign_out_everywhere(server):
         # #104: the page that can take down a fleet must at least render in both
         # postures — an unsigned visit and a signed-in one lead to different code.
         "ui/pages/5_Remote_Config.py",
+        # The Admin sections: pages now, so each is a page that has to render.
+        "ui/pages/admin/alerts.py",
+        "ui/pages/admin/compliance.py",
+        "ui/pages/admin/agent_tokens.py",
+        "ui/pages/admin/sessions.py",
+        "ui/pages/admin/updates.py",
+        "ui/pages/admin/release_emails.py",
     ],
 )
 def test_every_page_renders(server, page):
     app = run(REPO / page, server)
     assert not app.exception, app.exception
+
+
+def test_the_router_registers_every_page_and_leaves_none_orphaned():
+    """The Admin sections are pages, so the navigation is the only way to reach them.
+
+    A page file that is not registered is a page nobody can visit — exactly the bug
+    the tabs had in reverse. Comparing the router's registrations to the directory
+    catches both a missing entry and a stale one.
+    """
+    import re
+
+    router = (REPO / "ui" / "app.py").read_text()
+    registered = set(re.findall(r'page\(\s*"([^"]+)"', router))
+    on_disk = {
+        str(path.relative_to(REPO / "ui" / "pages"))
+        for path in (REPO / "ui" / "pages").rglob("*.py")
+        if "__pycache__" not in str(path)
+    }
+
+    assert registered == on_disk
+    # The sections that used to be tabs are individual pages, not one Admin page.
+    assert not (REPO / "ui" / "pages" / "3_Admin.py").exists()
+    assert {"admin/alerts.py", "admin/agent_tokens.py"} <= registered
 
 
 def test_sidebar_labels_the_role_and_the_expiry(server):
@@ -671,16 +723,16 @@ def token_row(**overrides):
     return row
 
 
-def test_the_admin_page_shows_the_token_table_with_cap_and_expiry(server):
+def test_the_token_page_shows_the_table_with_cap_and_expiry(server):
     """#126: "which token is about to expire / has hit its cap" is the whole point."""
     server.agent_tokens = [
         token_row(),
         token_row(token_id="agtok_full", label="old", agents_used=15),
         token_row(token_id="agtok_dead", label="leaked", revoked_at="2026-02-01T00:00:00+00:00"),
     ]
-    app = signed_in(ADMIN_PAGE, role="admin").run()
+    app = signed_in(AGENT_TOKENS_PAGE, role="admin").run()
     assert not app.exception, app.exception
-    assert "Agent tokens" in [tab.label for tab in app.tabs]
+    assert "Agent tokens" in texts(app)
 
     table = app.dataframe[0].value
     states = list(table["State"])
@@ -695,7 +747,7 @@ def test_the_admin_page_shows_the_token_table_with_cap_and_expiry(server):
 
 def test_revoking_a_token_needs_a_confirmation_and_is_audited_by_the_server(server):
     server.agent_tokens = [token_row()]
-    app = signed_in(ADMIN_PAGE, role="admin").run()
+    app = signed_in(AGENT_TOKENS_PAGE, role="admin").run()
     revoke = [button for button in app.button if (button.label or "") == "Revoke token"][0]
     assert revoke.disabled is True, "revoking blocks a fleet — it must not be one click"
 
@@ -708,25 +760,29 @@ def test_revoking_a_token_needs_a_confirmation_and_is_audited_by_the_server(serv
         method == "DELETE" and url.endswith("/agent-tokens/agtok_abc123")
         for method, url in server.calls
     )
-    # The page reruns to refresh the table; it must not dump the operator on "Alerts".
-    assert app.session_state["admin_active_tab"] == "Agent tokens"
 
 
-def test_the_admin_page_can_mint_a_replacement_after_a_revocation(server):
-    """Revoking on this page must not leave the operator unable to mint a new one.
+def test_the_token_page_mints_a_replacement_after_a_revocation(server):
+    """Revoking here must not leave the operator unable to mint a new one.
 
-    The mint form used to exist only inside the empty-fleet branch of the Agents page,
-    which is unreachable as soon as a single agent has connected — so revoking your only
-    token locked you out of the UI entirely until you found `opampctl`. This is the
-    regression fence for that: one revoked token, one live fleet, and the form is here.
+    The form used to exist only inside the empty-fleet branch of the Agents page, which
+    is unreachable as soon as one agent has connected — so revoking your only token
+    locked you out of the UI until you found `opampctl`. Then it moved into a collapsed
+    expander inside a tab, which is the same failure with extra steps: you had to know
+    to look. It is a page-level form now, visible on arrival.
     """
     server.agent_auth_mode = "token"
     server.agent_tokens = [token_row(token_id="agtok_dead", revoked_at="2026-02-01T00:00:00+00:00")]
-    app = signed_in(ADMIN_PAGE, role="admin").run()
+    app = signed_in(AGENT_TOKENS_PAGE, role="admin").run()
     assert not app.exception, app.exception
 
     submit = [button for button in app.button if (button.label or "") == "Generate token"]
-    assert submit, "the Admin token tab has no way to mint a token"
+    assert submit, "the token page has no way to mint a token"
+    # Nothing has to be expanded or selected first: the form is the page.
+    assert "Mint a token" in texts(app)
+    assert not [element for element in app.expander], (
+        "the mint form must not be hidden behind a disclosure"
+    )
 
     submit[0].click().run()
     assert not app.exception, app.exception
@@ -734,18 +790,15 @@ def test_the_admin_page_can_mint_a_replacement_after_a_revocation(server):
     shown = "\n".join(element.value for element in app.code)
     assert server.minted_token in shown, "the new token must be shown once, in full"
     assert "only time it is shown" in texts(app)
-    # The rerun after a mint must not re-select the first tab: "Alerts" is first, so a
-    # plain `st.rerun()` hid the one-time token completely. This is the whole bug.
-    assert app.session_state["admin_active_tab"] == "Agent tokens"
     assert any(
         method == "POST" and url.endswith("/agent-tokens") for method, url in server.calls
     ), "minting must go through the shared admin transport"
 
 
-def test_the_admin_page_does_not_offer_minting_when_no_token_is_required(server):
+def test_the_token_page_does_not_offer_minting_when_no_token_is_required(server):
     """An open endpoint makes a token meaningless, and offering one would imply it is not."""
     server.agent_auth_mode = "off"
-    app = signed_in(ADMIN_PAGE, role="admin").run()
+    app = signed_in(AGENT_TOKENS_PAGE, role="admin").run()
     assert not app.exception, app.exception
 
     assert not [
@@ -754,11 +807,13 @@ def test_the_admin_page_does_not_offer_minting_when_no_token_is_required(server)
     assert "OPAMP_AGENT_AUTH=token" in texts(app)
 
 
-def test_a_non_admin_does_not_see_the_token_tab(server):
-    """The server re-checks the role; the tab is the courtesy, not the control."""
-    app = signed_in(ADMIN_PAGE, role="operator").run()
+def test_a_non_admin_cannot_see_the_token_page(server):
+    """The server re-checks the role; the page is the courtesy, not the control."""
+    app = signed_in(AGENT_TOKENS_PAGE, role="operator").run()
+
     assert not app.exception, app.exception
-    assert "Agent tokens" not in [tab.label for tab in app.tabs]
+    assert "needs" in texts(app) and "admin" in texts(app)
+    assert server.methods_for("/agent-tokens") == []
 
 
 def test_remote_config_page_asks_for_sign_in_before_showing_the_flow(server):

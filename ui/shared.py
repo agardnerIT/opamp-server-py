@@ -237,31 +237,12 @@ EXPIRY_CHOICES = {"1 day": 1, "7 days": 7, "30 days": 30, "Never": None}
 MINTED_TOKEN_KEY = "minted_agent_token"
 
 
-def rerun_in_tab(preserve_tab=None):
-    """``st.rerun()`` that does not throw the operator back to the first tab.
-
-    `st.tabs` is not stateful: every rerun re-renders with the first tab selected, so
-    any code that reruns from inside a later tab silently teleports the operator —
-    minting a token on Admin ended up showing the Alerts tab, with the one-time token
-    never rendered. Passing `key=` to `st.tabs` makes the selection survive a rerun, and
-    this writes the intent into that key first.
-
-    ``preserve_tab`` is ``(session_state_key, tab_label)`` or ``None`` for pages without
-    tabs.
-    """
-    if preserve_tab is not None:
-        key, label = preserve_tab
-        st.session_state[key] = label
-    st.rerun()
-
-
 def mint_agent_token_form(
     key_prefix,
     *,
     in_container=False,
     show_snippet=True,
     intro=None,
-    preserve_tab=None,
 ):
     """Mint a fleet token and show it once — the one implementation (#126).
 
@@ -275,11 +256,9 @@ def mint_agent_token_form(
     The form is the same form in both places, so the safe defaults do not depend on
     which page an operator landed on.
 
-    After a successful mint the page reruns so the form is replaced by the token, and
-    the rerun goes through `rerun_in_tab` for `preserve_tab`: on a tabbed page a plain
-    `st.rerun()` re-selects the first tab, which dropped an operator on "Alerts" with
-    the one-time secret never shown at all. A minted token that is not rendered is a
-    lost token, so that rerun is the part that must be right.
+    After a successful mint the page reruns so the form is replaced by the token. Every
+    page that renders this form is now a page in its own right (no tabs), so that rerun
+    cannot land the operator somewhere else — which is what used to hide the token.
     """
     minted = st.session_state.get(MINTED_TOKEN_KEY)
     if minted is None:
@@ -325,7 +304,7 @@ def mint_agent_token_form(
             st.error(f"Minting a token failed: {response.text}")
             return
         st.session_state[MINTED_TOKEN_KEY] = response.json()
-        rerun_in_tab(preserve_tab)
+        st.rerun()
         return
 
     st.success(
@@ -360,7 +339,7 @@ def mint_agent_token_form(
     )
     if st.button("Done", key=f"{key_prefix}_dismiss_token"):
         st.session_state.pop(MINTED_TOKEN_KEY, None)
-        rerun_in_tab(preserve_tab)
+        st.rerun()
 
 
 def agent_token_state(token):
@@ -1054,15 +1033,6 @@ def show_feedback_dialog():
 
 
 def render_sidebar():
-    # Hide default "app" pages header
-    st.markdown("""
-    <style>
-    [data-testid="stSidebarNav"] > div:first-child > div:first-child {
-        display: none;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-    
     ui_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     logo_path = f"{ui_dir}/ui/otel-logo.png"
     

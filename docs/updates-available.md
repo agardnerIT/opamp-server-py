@@ -23,7 +23,7 @@ reconfigured automatically.
 notice runs outdated software, including security fixes. It exists for
 air-gapped or policy-bound deployments.
 
-The admin toggle (Admin → Updates) is persisted in
+The admin toggle (Updates, in the Admin section) is persisted in
 `data/update-settings.json`. Precedence is:
 
 1. `UPDATE_CHECK=off` → disabled, whatever the admin chose.
@@ -104,7 +104,7 @@ No feed URL, credentials, or per-install identifier is returned.
   - Docker: `docker pull ghcr.io/agardnerit/opamp-server-py-server:<version>`
   - pip: `pip install --upgrade opamp-server-py==<version>`
   - source: `git fetch --tags && git checkout v<version>`
-- **Admin → Updates:** current/latest/last checked, the automatic-check toggle,
+- **Updates** (Admin section): current/latest/last checked, the automatic-check toggle,
   "Check now", and "Use deployment default". The toggle is disabled when the
   deployment has `UPDATE_CHECK=off` or the signed-in role is not `admin`.
 - Only the validated version string is rendered; no remote HTML or notes.

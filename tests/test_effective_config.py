@@ -326,3 +326,153 @@ class TestNoDriftBetweenCallers:
             if '.get("", {})' in text or "[''][\"body\"]" in text:
                 offenders.append(path.name)
         assert offenders == []
+
+
+#: What osquery reports as its effective config: `application/json`, a schedule, and
+#: no `service`/`receivers` — i.e. not a collector config at all.
+OSQUERY_CONFIG = json.dumps(
+    {
+        "schedule": {
+            "battery_percentage": {
+                "query": "SELECT percent_remaining FROM battery;",
+                "interval": 30,
+            }
+        }
+    }
+)
+
+
+def _osquery_doc():
+    return _doc(
+        **{
+            "osquery.osquery.conf.json": {
+                "body": _b64(OSQUERY_CONFIG),
+                "content_type": "application/json",
+            }
+        }
+    )
+
+
+class TestAJsonAgentConfigIsReadable:
+    """An osquery agent's config is JSON, and the panel used to show none of it.
+
+    The server only read bodies the agent declared as YAML, so the "Configuration"
+    panel said "No config object in this agent's report is readable as YAML" for an
+    agent that was demonstrably running a schedule. Display opts in to JSON; the
+    component/identity paths must not, or osquery looks like a collector profile.
+    """
+
+    def test_the_component_path_still_refuses_json(self):
+        assert parse_effective_config(_osquery_doc()) == {}
+        assert objects(_osquery_doc())[0].parsed is False
+
+    def test_display_accepts_the_json_body(self):
+        from ui.config_view import display_config_yaml
+
+        rendered = display_config_yaml(json.dumps(_osquery_doc()))
+
+        assert rendered is not None
+        shown = yaml.safe_load(rendered)
+        assert shown["schedule"]["battery_percentage"]["query"] == (
+            "SELECT percent_remaining FROM battery;"
+        )
+        assert shown["schedule"]["battery_percentage"]["interval"] == 30
+
+    def test_a_non_collector_config_is_not_rewritten_as_one(self):
+        from ui.config_view import display_config_yaml
+
+        shown = yaml.safe_load(display_config_yaml(json.dumps(_osquery_doc())))
+
+        # The collector augmentation would invent these. Showing (and offering for
+        # download) a config the agent never ran is worse than showing nothing.
+        for invented in ("receivers", "processors", "exporters", "service", "extensions"):
+            assert invented not in shown
+
+
+#: The body an operator copied out of the UI before #131 was fixed: base64, because
+#: that is how `MessageToDict` renders a protobuf `bytes` body. It is not a mistake
+#: the operator made — it is what the panel showed them.
+BATTERY_SCHEDULE = {
+    "schedule": {
+        "battery_stats": {
+            "query": "SELECT percent_remaining FROM battery;",
+            "interval": 32,
+        }
+    }
+}
+
+
+class TestTheEditorGetsDecodedText:
+    """Prefill must hand the editor the document, never the base64 of it (#131).
+
+    The prefill path read `configMap.configMap[*].body` straight off the report, so a
+    proposal made from a prefilled box stored and delivered the base64 line as the
+    agent's config. The decoded text is what an operator edits, and it is what the
+    API stores — base64 exists only at the protobuf boundary.
+    """
+
+    def _report(self, **entries):
+        return json.dumps(_doc(**entries))
+
+    def _json_object(self, document):
+        """A config object the agent declared as JSON, as the report renders it."""
+        return {"body": _b64(document), "content_type": "application/json"}
+
+    def test_the_body_is_the_document_not_the_base64(self):
+        from ui.config_view import editable_config
+
+        body = json.dumps(BATTERY_SCHEDULE)
+        editable = editable_config(self._report(**{"": self._json_object(body)}))
+
+        assert editable is not None
+        assert editable.body == body
+        assert "percent_remaining" in editable.body
+        # The whole point: nothing that only decodes as base64 survives into the box.
+        assert editable.body.strip().startswith("{")
+
+    def test_the_declared_content_type_is_carried_into_the_editor(self):
+        """A JSON body prefilled under `text/yaml` stores the wrong type (#118)."""
+        from ui.config_view import EDITOR_CONTENT_TYPES, editable_config
+
+        editable = editable_config(
+            self._report(**{"": self._json_object(json.dumps(BATTERY_SCHEDULE))})
+        )
+
+        assert editable.content_type == "application/json"
+        assert editable.content_type in EDITOR_CONTENT_TYPES
+
+    def test_a_collector_body_still_prefills_as_yaml(self):
+        from ui.config_view import editable_config
+
+        editable = editable_config(self._report(collector=CONFIG))
+
+        assert editable.content_type == "text/yaml"
+        assert "opamp" in yaml.safe_load(editable.body)["extensions"]
+
+    def test_the_object_shown_is_the_object_edited(self):
+        """The panel and the editor agree, or an operator edits a config they cannot see."""
+        from ui.config_view import editable_config
+
+        editable = editable_config(self._report(**{"": CONFIG, "raw": RAW}))
+
+        assert editable.key == ""
+        assert yaml.safe_load(editable.body)["service"]["extensions"] == ["opamp"]
+        # The other object is named, not silently dropped.
+        assert [key for key, _ in editable.others] == ["raw"]
+
+    def test_nothing_parseable_means_nothing_to_prefill(self):
+        from ui.config_view import editable_config
+
+        assert editable_config(self._report(**{"": "nope: [["})) is None
+        assert editable_config("") is None
+        assert editable_config("not json") is None
+        assert editable_config(None) is None
+
+    def test_a_dict_report_is_accepted(self):
+        """`GET /agent/{id}` hands back a string, but the fake and JSON paths a dict."""
+        from ui.config_view import editable_config
+
+        editable = editable_config(
+            _doc(**{"": self._json_object(json.dumps(BATTERY_SCHEDULE))})
+        )
+        assert editable is not None and "percent_remaining" in editable.body

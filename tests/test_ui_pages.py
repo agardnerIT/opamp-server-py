@@ -598,3 +598,62 @@ class TestAgentTypeBadge:
         # The table column and the detail panel both need it, or "generic" is only
         # discoverable by opening an agent.
         assert source.count("agent_type_badge(") >= 3
+
+
+# ------------------------------------- agent detail links and the empty-fleet refresh
+
+
+def test_the_agent_table_links_with_a_query_parameter_not_a_hardcoded_path():
+    """A case-mismatched path made the router show "Page not found" over a page that
+    had rendered fine.
+
+    The nav declares `url_path="agents"`; the table hardcoded `/Agents`, and
+    Streamlit matches paths case-sensitively. The router could not find the page, fell
+    back to the main page and raised the "Page not found" dialog — while the agent
+    detail rendered underneath, because the query parameter had already been applied.
+    A query-only link keeps whatever the current page is, which cannot mismatch.
+    """
+    text = source(AGENTS_PAGE)
+    assert 'href="/Agents?' not in text
+    assert 'href="/agents?' not in text
+    assert 'href="?agent_id=' in text
+
+
+def test_the_empty_fleet_offers_a_refresh():
+    """Streamlit re-runs on interaction only, and the empty state has no inputs.
+
+    The state is entered *before* the agent exists, so the page had no reason to run
+    again once one connected: it kept saying "no agents connected" until the operator
+    navigated away and came back.
+    """
+    tree = ast.parse(source(AGENTS_PAGE))
+    empty_fleet = next(
+        (
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "_empty_fleet"
+        ),
+        None,
+    )
+    assert empty_fleet is not None, "_empty_fleet is not defined in the Agents page"
+
+    buttons = [
+        inner
+        for inner in ast.walk(empty_fleet)
+        if isinstance(inner, ast.Call)
+        and getattr(inner.func, "attr", None) == "button"
+    ]
+    keys = [
+        keyword.value.value
+        for button in buttons
+        for keyword in button.keywords
+        if keyword.arg == "key" and isinstance(keyword.value, ast.Constant)
+    ]
+    assert "empty_fleet_refresh" in keys, "the empty fleet must offer a refresh button"
+
+    reruns = [
+        inner
+        for inner in ast.walk(empty_fleet)
+        if isinstance(inner, ast.Call) and getattr(inner.func, "attr", None) == "rerun"
+    ]
+    assert reruns, "the refresh button must re-run the page, not just render"

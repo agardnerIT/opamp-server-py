@@ -44,6 +44,7 @@ from ui.shared import (  # noqa: E402
     require_admin,
     render_sidebar,
 )
+from ui.config_view import EDITOR_CONTENT_TYPES, editable_config  # noqa: E402
 
 render_sidebar()
 
@@ -57,6 +58,7 @@ PLAN_KEY = "rc_plan"
 ROLLOUT_KEY = "rc_rollout"
 ROLLOUT_AUTOFILL_KEY = "rc_rollout_autofill"
 REVEAL_KEY = "rc_reveal"
+PREFILL_KEY = "rc_prefill_message"
 
 STATUS_ICON = {
     "pending": "⚪",
@@ -112,6 +114,53 @@ def _config_map(body, content_type, role=""):
 
 def _is_redacted(text):
     return "<redacted>" in (text or "")
+
+
+def _prefill_from_agent(agent_id):
+    """Load an agent's reported config into the editor, **decoded** (#131).
+
+    The report is protobuf `MessageToDict`, which renders every `bytes` body as
+    base64. Prefilling that verbatim filled the box with base64, so the next proposal
+    delivered base64 *as the config body* — an agent whose supervisor would then fail
+    to start the config it was just handed. The decode is the shared one
+    (`ui.config_view.editable_config` → `server.effective_config`), never a local one.
+
+    Deliberately a callback: it writes the content-type/role widgets as well, which is
+    only legal before those widgets are instantiated.
+    """
+    detail = _payload(
+        admin_request("GET", f"/agent/{agent_id}", required_role=ROLE_VIEWER), {}
+    ) or {}
+    if detail.get("effective_config_redacted"):
+        st.session_state[PREFILL_KEY] = (
+            "warning",
+            "That agent's reported config is **redacted** (`<redacted>` markers). It is "
+            "deliberately not loaded into the editor: pushing a redacted body back would "
+            "wipe the fleet's credentials (#98). Paste the real document, or read it with "
+            "`agents config get --reveal` as an approver.",
+        )
+        return
+
+    editable = editable_config(detail.get("effective_config"))
+    if editable is None:
+        st.session_state[PREFILL_KEY] = (
+            "info",
+            "That agent has not reported a readable effective config yet.",
+        )
+        return
+
+    st.session_state[BODY_KEY] = editable.body
+    st.session_state[CONTENT_TYPE_KEY] = editable.content_type
+    st.session_state[ROLE_KEY] = editable.role
+    message = (
+        f"Loaded object `{editable.key or '<empty key>'}` from {agent_id} as "
+        f"{editable.content_type}, decoded."
+    )
+    if editable.others:
+        message += " Not prefilled (one object per revision): " + ", ".join(
+            f"`{key or '<empty key>'}`" for key, _ in editable.others
+        )
+    st.session_state[PREFILL_KEY] = ("success", message)
 
 
 # ------------------------------------------------------------------ posture
@@ -303,56 +352,40 @@ st.header("2. Edit", divider="gray")
 edit_cols = st.columns([1, 1, 2])
 with edit_cols[0]:
     content_type = st.selectbox(
-        "Content type", ["text/yaml", "application/json"], key=CONTENT_TYPE_KEY
+        "Content type", list(EDITOR_CONTENT_TYPES), key=CONTENT_TYPE_KEY
     )
 with edit_cols[1]:
     object_role = st.text_input("Object role (optional)", key=ROLE_KEY, placeholder="")
 with edit_cols[2]:
     prefill_id = st.selectbox(
         "Prefill from agent", [""] + target_ids, key="rc_prefill",
-        help="Copies that agent's current effective config into the editor.",
+        help="Copies that agent's current effective config into the editor, decoded.",
     )
 
-if prefill_id and st.button("Prefill from this agent's effective config"):
-    detail = _payload(
-        admin_request(
-            "GET", f"/agent/{prefill_id}", required_role=ROLE_VIEWER
-        ),
-        {},
-    ) or {}
-    effective = detail.get("effective_config")
-    if isinstance(effective, str):
-        try:
-            effective = json.loads(effective)
-        except ValueError:
-            effective = None
-    config_map = ((effective or {}).get("configMap") or {}).get("configMap") or {}
-    bodies = []
-    for entry in config_map.values():
-        body = (entry or {}).get("body")
-        if isinstance(body, str) and body:
-            bodies.append(body)
-    if detail.get("effective_config_redacted"):
-        st.warning(
-            "That agent's reported config is **redacted** (`<redacted>` markers). It is "
-            "deliberately not loaded into the editor: pushing a redacted body back would "
-            "wipe the fleet's credentials (#98). Paste the real document, or read it with "
-            "`agents config get --reveal` as an approver."
-        )
-    elif not bodies:
-        st.info("That agent has not reported a readable effective config yet.")
-    else:
-        st.session_state[BODY_KEY] = "\n---\n".join(bodies)
-        st.success(f"Loaded {len(bodies)} config object(s) from {prefill_id}.")
+if prefill_id:
+    st.button(
+        "Prefill from this agent's effective config",
+        on_click=_prefill_from_agent,
+        args=(prefill_id,),
+    )
+
+prefill_message = st.session_state.pop(PREFILL_KEY, None)
+if prefill_message:
+    level, text = prefill_message
+    getattr(st, level)(text)
 
 if BODY_KEY not in st.session_state:
     st.session_state[BODY_KEY] = ""
 
 body = st.text_area(
-    "Config body (YAML)",
+    "Config body",
     key=BODY_KEY,
     height=320,
-    help="One object. Use `---` separators to paste several; the validated map keys them.",
+    help=(
+        "One config object, as text. Paste the document itself — a body that is base64 "
+        "(as a raw report renders it) would be delivered to the agent as base64, so "
+        "`Prefill` decodes it for you and `Validate` flags it if you paste it by hand."
+    ),
 )
 
 if _is_redacted(body):

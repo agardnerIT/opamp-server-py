@@ -89,6 +89,43 @@ def test_a_non_utf8_body_is_refused_by_shape_checks():
     assert "UTF-8" in messages(verdict)
 
 
+def test_a_base64_body_is_diagnosed_as_base64_not_as_bad_yaml():
+    """The body a report renders is base64; delivering it delivers the base64 (#131).
+
+    A base64 line is also a valid YAML *scalar*, so the structural rule already refuses
+    it ("must be a mapping") — with no clue why. Naming the cause is the difference
+    between an operator fixing their clipboard and one hunting for a YAML typo.
+    """
+    import base64
+    import json
+
+    document = json.dumps(
+        {"schedule": {"battery_stats": {"query": "SELECT 1;", "interval": 32}}}
+    )
+    encoded = base64.b64encode(document.encode()).decode()
+
+    verdict = config_validation.check_config_map(
+        {"": {"body": encoded, "content_type": "application/json"}}
+    )
+
+    assert not verdict.ok  # a scalar is not a config
+    assert any("base64" in finding.message for finding in verdict.warnings)
+
+
+def test_a_base64_body_with_no_content_type_is_warned_about():
+    """Undeclared bodies are only advisory, which is exactly where base64 survives."""
+    import base64
+    import json
+
+    encoded = base64.b64encode(
+        json.dumps({"schedule": {"battery_stats": {"interval": 32}}}).encode()
+    ).decode()
+
+    verdict = config_validation.check_config_map({"": {"body": encoded, "content_type": ""}})
+
+    assert any("base64" in finding.message for finding in verdict.warnings), verdict.warnings
+
+
 # ------------------------------------------------------------------------ stage 2
 
 

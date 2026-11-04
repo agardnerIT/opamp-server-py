@@ -2,26 +2,53 @@
 
 Deliberately **streamlit-free** so it can be tested without the UI dependency stack:
 `ui/shared.py` imports this and the Agents page calls it. The parsing itself lives
-in `server.effective_config` — this module only decides what the "Collector
-Configuration" panel shows and adds the telemetry pipeline the dashboard would
-configure for a downloadable config.
+in `server.effective_config` — this module only decides what the "Configuration"
+panel shows and adds the telemetry pipeline the dashboard would configure for a
+downloadable collector config.
+
+Two kinds of agent report through this server: collectors (YAML) and everything else
+— osquery reports `application/json` with a `schedule` and its `SELECT` statements.
+Both are displayed, but only a collector config gets the collector treatment below.
 """
 
 from __future__ import annotations
 
 import json
 import os
-from typing import Any, Optional
+from dataclasses import dataclass
+from typing import Any, Optional, Tuple
 
 import yaml
 
-from server.effective_config import preferred_document
+from server.effective_config import (
+    is_json_content_type,
+    objects,
+    preferred_document,
+    preferred_object,
+)
 
 DEFAULT_SERVER_URL = "{scheme}://{address}:{port}".format(
     scheme=os.environ.get("SERVER_HTTP_SCHEME", "http"),
     address=os.environ.get("SERVER_ADDRESS", "localhost"),
     port=os.environ.get("SERVER_PORT", "4320"),
 )
+
+#: Top-level sections only a collector config has. Their presence is what makes the
+#: augmentation below correct; their absence — osquery's `{"schedule": {...}}`, say —
+#: is what makes it wrong, because the panel would then show and offer for download a
+#: config the agent is not running.
+_COLLECTOR_SECTIONS = (
+    "service",
+    "receivers",
+    "processors",
+    "exporters",
+    "extensions",
+    "connectors",
+)
+
+
+def _is_collector_document(config: dict) -> bool:
+    return any(section in config for section in _COLLECTOR_SECTIONS)
 
 
 def _clean_config(value: Any) -> Any:
@@ -42,30 +69,112 @@ def _clean_config(value: Any) -> Any:
     return value
 
 
+#: What the push editor can declare. The protocol allows any content-type string;
+#: these are the two the form offers, so a prefill has to land inside them.
+EDITOR_CONTENT_TYPES = ("text/yaml", "application/json")
+
+
+@dataclass(frozen=True)
+class EditableConfig:
+    """One agent's reported config, **decoded**, ready for an editor (#131).
+
+    The report arrives as protobuf `MessageToDict`, whose `bytes` bodies are base64.
+    Prefilling that verbatim put base64 in the Remote Config box, so an operator
+    edited something that looked like a config, proposed it, and the server delivered
+    the base64 *string* as the agent's config body. `body` here is always text, decoded
+    by `server.effective_config` — the same reader the "Configuration" panel uses, so
+    what you read is what you edit.
+
+    Editing is text in, text out: the API stores bodies as text and base64 appears only
+    at the protobuf boundary, so nothing anywhere has to re-encode anything.
+    """
+
+    key: str
+    body: str
+    content_type: str
+    role: str = ""
+    #: `(key, reason)` for objects the agent also reported that the editor does not
+    #: hold — a revision stores one object per key, and the rest may be alternative
+    #: representations (`raw`) rather than something to push.
+    others: Tuple[Tuple[str, str], ...] = ()
+
+
+def _editor_content_type(declared: str) -> str:
+    """The editor's spelling of a declared content type (JSON only when declared)."""
+    return "application/json" if is_json_content_type(declared) else "text/yaml"
+
+
+def _parsed_report(effective_config: Any) -> Optional[dict]:
+    """`effective_config` as the `MessageToDict` document, whether str or already dict."""
+    if isinstance(effective_config, (bytes, bytearray)):
+        effective_config = bytes(effective_config).decode("utf-8", "replace")
+    if isinstance(effective_config, str):
+        try:
+            effective_config = json.loads(effective_config)
+        except (TypeError, ValueError):
+            return None
+    return effective_config if isinstance(effective_config, dict) else None
+
+
+def editable_config(effective_config: Any) -> Optional[EditableConfig]:
+    """The object an operator should edit, decoded, plus what was left out (#131).
+
+    The object chosen is `preferred_object`'s — the same one `display_config_yaml`
+    shows — so the panel an operator reads to decide on a change and the box they make
+    it in cannot disagree. `None` when nothing in the report parses, which is the one
+    case where there is nothing to prefill.
+    """
+    document = _parsed_report(effective_config)
+    if not document:
+        return None
+    chosen = preferred_object(document, accept_json=True)
+    if chosen is None or not (chosen.body or "").strip():
+        return None
+
+    others = tuple(
+        (obj.key, obj.skipped or "one object per revision")
+        for obj in objects(document, accept_json=True)
+        if obj.key != chosen.key
+    )
+    return EditableConfig(
+        key=chosen.key,
+        body=chosen.body,
+        content_type=_editor_content_type(chosen.content_type),
+        role=chosen.role,
+        others=others,
+    )
+
+
 def display_config_yaml(
     effective_config: Optional[str],
     server_url: Optional[str] = None,
 ) -> Optional[str]:
-    """The "Collector Configuration" YAML for one agent, or `None` (#68).
+    """The config YAML for one agent, or `None` (#68).
 
     Both panels that render an agent's config used to decode `configMap[""]` inline —
     the same 90 lines, twice — so an agent whose objects use any other key (or that
     also reports a `raw` object) showed nothing. The object displayed now comes from
     `server.effective_config.preferred_document`: `""` when it parses, otherwise the
     first parseable object.
+
+    JSON is accepted (`accept_json=True`) because an osquery agent reports its config
+    as `application/json`, and refusing it made the panel claim there was no config at
+    all. A document that is not collector-shaped is returned as-is: the telemetry
+    pipeline below is something this dashboard would add *to a collector*, not a
+    rewrite every agent's config should survive.
     """
-    if not effective_config:
-        return None
-    try:
-        document = json.loads(effective_config)
-    except (TypeError, ValueError):
+    document = _parsed_report(effective_config)
+    if not document:
         return None
 
-    config = preferred_document(document)
+    config = preferred_document(document, accept_json=True)
     if not config:
         return None
 
     config = _clean_config(config)
+
+    if not _is_collector_document(config):
+        return yaml.dump(config, default_flow_style=False, sort_keys=False)
 
     if "extensions" in config and "opamp" in config["extensions"]:
         opamp = config["extensions"]["opamp"]

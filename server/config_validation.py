@@ -935,7 +935,37 @@ def check_shape(
             "a redacted document is a display artefact and pushing it would wipe "
             "credentials across the fleet. Submit the real body.",
         )
+
+    # The mirror image of the check above, and it comes from the same place: the
+    # protocol's `AgentConfigFile.body` is `bytes`, so `MessageToDict` renders every
+    # body it is reported back as base64. A body copied from a raw report or an API
+    # response is therefore base64 *of* a config — stored as-is it is delivered as-is,
+    # and the agent boots a config that is one base64 line.
+    #
+    # A warning, not an error: by the protocol's letter the body is text, and a body
+    # that genuinely is base64 is not impossible for a non-collector agent. The point
+    # is that the operator reads why the config looks wrong before a rollout, not that
+    # the server guesses. `decode_text_body` is deliberately conservative (length,
+    # padding, printable ratio), so real YAML/JSON never matches.
+    for key, entry in normalised.items():
+        if _decoded_base64(entry["body"]) is not None:
+            verdict.add_warning(
+                key,
+                "body is base64 of a text document: the agent would receive the base64, "
+                "not the config inside it",
+                "a config body is text here — base64 is only how a protobuf `bytes` "
+                "field is rendered when a report is read back. Push the decoded "
+                "document; the UI's Prefill decodes an agent report for you.",
+            )
     return normalised
+
+
+def _decoded_base64(body: str) -> Optional[str]:
+    """The text a base64-shaped body decodes to, or `None` when it is not base64."""
+    from server import redaction
+
+    decoded = redaction.decode_text_body((body or "").strip())
+    return decoded if decoded and decoded.strip() else None
 
 
 def _detect_redaction(config_map: Any) -> bool:

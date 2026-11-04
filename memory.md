@@ -29,6 +29,25 @@
 
 - All new configurable settings should be added to `.env.sample`
 
+## Local Development Data (policy, 2026-11-04)
+
+- **This checkout is dev/test data. There is nothing in `data/opamp.db` worth
+  recovering.** If it is corrupt, schema-drifted, or just confusing: stop the server,
+  `rm -f data/opamp.db*`, start it again. Do not spend a session on `.recover`,
+  page-level salvage or btree archaeology — that is a production concern, not a dev one.
+- What a wipe costs here: `config_revisions`/`desired_configs`/audit history are gone,
+  the `agents` table rebuilds itself on the agent's next poll (≤ one heartbeat), and
+  **agent credentials are gone** — mint a new fleet token and restart the agent with
+  the new `Authorization` header. `data/admin_password` is a separate file, so the
+  admin login survives deleting only the database.
+- **Never run server modules from the host against `./data` while the container has it
+  open.** `import server.main` (and anything importing the `server` package) constructs
+  `AgentRegistry`, credential stores and migrations at import time, with `DATA_DIR`
+  defaulting to `./data`. On 2026-11-04 that concurrent access damaged the live
+  database's payload pages. When poking at server code from the host, always pin a
+  throwaway directory: `DATA_DIR=/tmp/opamp-dev python3 ...` (the UI container already
+  does this with `/tmp/opamp-ui-data`).
+
 ## Planning Process
 
 - When planning an issue, post the plan to the GitHub issue BEFORE modifying any code
@@ -461,3 +480,97 @@
   covered and gained one thin conformance case; the forward-compatibility case still
   covers #82/#83 and now also asserts the understood parts are stored.
 - Suite: **1350 passed** (+17 `tests/test_custom_messages.py`, +1 conformance).
+
+## osquery-opamp agent: three UI fixes, an object-key gap, and a DB I damaged, 2026-11-04
+
+Driving the UI from a live osquery agent found three defects. All are fixed in the
+working tree (uncommitted; the tree also carries someone else's WebSocket-default WIP).
+
+- **Empty fleet never updated.** The onboarding state is entered *before* the agent
+  exists and has no inputs, so Streamlit had no reason to re-run: "No agents connected
+  yet" outlived the connection. Added a `↻ Refresh` button (`empty_fleet_refresh`) next
+  to the notice.
+- **"Page not found" modal over a rendered agent page.** The table link hardcoded
+  `/Agents?agent_id=…`; the nav declares `url_path="agents"`, and Streamlit's client
+  router matches paths case-sensitively (`findPageByUrlPath` → `endsWith("/"+urlPath)`).
+  It falls back to the main page — which *is* Agents, already showing the detail from
+  the query param. Now a query-only link (`?agent_id=…`), which cannot mismatch a route.
+  A stale `/Agents…` URL left in a browser still triggers the dialog on reload; go to
+  `/agents` once to clear it.
+- **Agent config invisible.** osquery reports `application/json`; the display path only
+  accepted YAML, so `preferred_document()` returned `None` and the panel said "No config
+  object … readable as YAML" for an agent that was demonstrably running a schedule.
+  Display now opts into JSON (`accept_json=True`); component extraction and agent-type
+  inference stay YAML-only (adding `application/json` to `YAML_CONTENT_TYPES` would make
+  osquery resolve as the `otelcol` profile). Non-collector documents are rendered as-is
+  — the collector telemetry augmentation is applied only to collector-shaped documents.
+
+**Still open: pushing an osquery config is clunky.** Remote Config (`_config_map`) and
+`opampctl agents config set` always send the single object under `""`; the osquery agent
+requires `osquery.json` or a single `*.json` key, and `content_type` must be
+`application/json` (it fails `text/yaml`). A UI push therefore ends in agent `FAILED:
+expected a single osquery.json object, got ['']`. Existing successful revision
+`rev-20261104T023941Z-bffe5050` was created via the raw API with key `osquery.json`. The
+agreed direction: **the server infers the object name** for a single unnamed object from
+the target agent's evidence (prior active revision key first, then the single key it
+reports), and the Remote Config page **auto-prefills body *and* content type** from a
+target agent's effective config — no manual key field. Note `docs/opamp-contract.md`:
+pushes are per-source and merge additively, so pushing a query name that also exists in
+the local file yields `config_conflict`, and a pushed source is lost on daemon restart
+until the agent re-pushes it.
+
+**The incident.** Enabling config push (`.env`:
+`OPAMP_CONFIG_PUSH_ENABLED=true`, `OPAMP_ALLOW_INSECURE_CONFIG_PUSH=true`) and restarting
+`opamp-server` surfaced `database disk image is malformed` — the crash-loop was the
+database, not the flags. Cause: earlier host-side `python3` imports of `server.*` opened
+the live `data/opamp.db` (DATA_DIR defaults to `./data`) alongside the container and
+damaged payload pages. Recovered with `sqlite3 .recover`, which kept
+`config_revisions`, `desired_configs`, `agent_credential_agents`, `audit_log`,
+`admin_sessions` and alert config. The non-indexed `agent_credentials` columns (label,
+created_at, expires_at, max_agents, revoked_at) were unreadable; the 7 token hashes/token
+ids were reconstructed, the token the osquery agent actually presents (`3e3a4eb7…`,
+matched by hashing it from the process args) kept active, the other six revoked. The
+damaged copy is at `/tmp/opamp-db-backup/opamp.db.damaged` (temp only — not worth
+keeping). Policy recorded under **Decisions → Local Development Data**: in dev, wipe the
+database and start clean; never recover it, and never point host-side imports at `./data`.
+
+## Reported configs are decoded for the editor, not just for the panel, 2026-11-04
+
+Follow-up to the osquery UI session above, prompted by issue **#131** ("Don't need a
+different remote config screen"): the agent's own config panel becomes the editing
+surface, and editing must propose through the existing approval flow.
+
+- **The bug.** `MessageToDict` renders every protobuf `bytes` body as base64, so
+  `5_Remote_Config.py`'s prefill — which read `configMap.configMap[*].body` verbatim —
+  filled the edit box with base64. An operator then edited "the config" and proposed
+  base64 *as the body*; the server stores and delivers bodies as text, so the agent
+  would have been handed a config that is one base64 line. The Agents page was already
+  fine (`display_config_yaml`); only the prefill was raw.
+- **The fix.** `ui/config_view.editable_config()` returns `(key, decoded body,
+  content_type, role, others)` from the same reader the panel uses
+  (`server.effective_config.preferred_object(..., accept_json=True)`), so what you read
+  is what you edit. The prefill is an `on_click` callback because it also seeds the
+  content-type/role widgets, which cannot be written after instantiation. A body the
+  agent declared as `application/json` now prefills with that content type — prefilling
+  it under `text/yaml` was a second, quieter bug (#118).
+- **No re-encode is needed anywhere.** `remote_config` encodes the body once, for the
+  protobuf frame (`message.config_map[key].body = body.encode("utf-8")`). Text in, text
+  out; base64 exists only at that boundary and when a report is read back.
+- **Guard on the way in** (`config_validation.check_shape`): a body that is base64 of a
+  text document gets a warning naming the cause ("the agent would receive the base64,
+  not the config inside it"). Not a new block — a base64 line is a valid YAML *scalar*,
+  so the structural rule already refuses it, with no clue why. Undeclared content types
+  stay advisory, which is exactly where base64 previously survived.
+- Dropped the false `---` help text: the editor sends one object under `""`, and
+  `yaml.load` refuses a multi-document stream, so "paste several, the map keys them"
+  never worked. Multi-object prefill is now named in the UI instead of silently broken.
+- Suite: **1497 passed**, 6 pre-existing failures (`test_config_posture` /
+  `push_is_404_when_disabled` and friends need a TLS+auth+audit posture; identical on a
+  clean checkout — verified by stashing).
+
+**Still open — this fix does not make an osquery push succeed.** The revision key is
+still `""`; the osquery agent requires `osquery.json` or a single `*.json` key, so the
+push fails with `FAILED: expected a single osquery.json object, got ['']`. The agreed
+direction stands: the server infers the object name for a single unnamed object from the
+target agent's evidence (prior active revision key first, then the single key it
+reports), and the page keeps offering no manual key field.

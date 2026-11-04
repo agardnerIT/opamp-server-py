@@ -26,6 +26,11 @@ Rules:
 * parsing uses the bounded loader from `config_validation` (alias/depth/expansion
   budgets, duplicate keys refused) because the document comes from an agent.
 
+Display can also read **JSON** bodies (`accept_json=True`): osquery reports its
+config as `application/json`, and it is not a collector config at all. The default
+stays YAML-only because component extraction and agent-type inference must not
+mistake an arbitrary JSON document for collector YAML.
+
 Pure functions only: no FastAPI, no SQLite, no Streamlit.
 """
 
@@ -48,6 +53,13 @@ from server.redaction import decode_text_body
 #: Defined in `server.profiles.base` because profile identity inference (#118) needs
 #: the same set without importing the collector-shaped module.
 YAML_CONTENT_TYPES = _YAML_CONTENT_TYPES
+
+#: Document types the *display* path accepts on request, never by default. A JSON
+#: body is still a config an operator may need to read (osquery's schedule and its
+#: `SELECT` statements), but `application/json` must not become "YAML" for the
+#: component or identity paths — an osquery agent would then be classified as the
+#: collector profile, which is the bug the content-type set exists to prevent.
+JSON_CONTENT_TYPES = frozenset({"application/json", "text/json"})
 
 
 @dataclass(frozen=True)
@@ -73,6 +85,15 @@ def is_yaml_content_type(content_type: Any) -> bool:
     if not isinstance(content_type, str):
         return False
     return content_type.split(";")[0].strip().lower() in YAML_CONTENT_TYPES
+
+
+def is_json_content_type(content_type: Any) -> bool:
+    """True for `application/json`, `text/json` and their `; charset=` forms."""
+    if content_type is None:
+        return False
+    if not isinstance(content_type, str):
+        return False
+    return content_type.split(";")[0].strip().lower() in JSON_CONTENT_TYPES
 
 
 def _config_map(effective_config: Any) -> Mapping[str, Any]:
@@ -132,14 +153,22 @@ def _entry_field(entry: Mapping[str, Any], name: str) -> Any:
     return None
 
 
-def load_object(key: str, entry: Any) -> ConfigObject:
-    """Decode and parse one map entry. Never raises; says why in `skipped`."""
+def load_object(key: str, entry: Any, *, accept_json: bool = False) -> ConfigObject:
+    """Decode and parse one map entry. Never raises; says why in `skipped`.
+
+    `accept_json` widens the gate to JSON bodies for the display path. It does not
+    change the default: the component and identity readers must keep seeing only
+    what the agent declared as collector-shaped YAML.
+    """
     if not isinstance(entry, Mapping):
         return ConfigObject(key=key, skipped=f"entry is {type(entry).__name__}, not an object")
 
     content_type = _entry_field(entry, "content_type") or ""
     role = _entry_field(entry, "role") or ""
-    if not is_yaml_content_type(content_type):
+    readable = is_yaml_content_type(content_type) or (
+        accept_json and is_json_content_type(content_type)
+    )
+    if not readable:
         return ConfigObject(
             key=key,
             role=str(role),
@@ -185,10 +214,13 @@ def load_object(key: str, entry: Any) -> ConfigObject:
     )
 
 
-def objects(effective_config: Any) -> List[ConfigObject]:
+def objects(effective_config: Any, *, accept_json: bool = False) -> List[ConfigObject]:
     """Every object in the map, decoded, with `""` first. Never raises."""
     config_map = _config_map(effective_config)
-    return [load_object(key, config_map[key]) for key in _ordered_keys(config_map)]
+    return [
+        load_object(key, config_map[key], accept_json=accept_json)
+        for key in _ordered_keys(config_map)
+    ]
 
 
 def content_types(effective_config: Any) -> tuple:
@@ -287,7 +319,9 @@ def parse_effective_config(effective_config: Any) -> Dict[str, Set[str]]:
     return {component_type: ids for component_type, ids in found.items() if ids}
 
 
-def preferred_object(effective_config: Any) -> Optional[ConfigObject]:
+def preferred_object(
+    effective_config: Any, *, accept_json: bool = False
+) -> Optional[ConfigObject]:
     """The object to show as "the configuration".
 
     `""` when it parses — that key is what agents conventionally use for the full
@@ -295,19 +329,23 @@ def preferred_object(effective_config: Any) -> Optional[ConfigObject]:
     parseable object, untagged before role-tagged: a `role` marks an alternative
     representation (the raw config, a fragment), not the primary one.
     """
-    parsed = [obj for obj in objects(effective_config) if obj.parsed]
+    parsed = [
+        obj for obj in objects(effective_config, accept_json=accept_json) if obj.parsed
+    ]
     if not parsed:
         return None
     return min(parsed, key=lambda obj: (obj.key != "", bool(obj.role), obj.key))
 
 
-def preferred_document(effective_config: Any) -> Optional[Dict[str, Any]]:
+def preferred_document(
+    effective_config: Any, *, accept_json: bool = False
+) -> Optional[Dict[str, Any]]:
     """The parsed document of :func:`preferred_object`, or `None`."""
-    chosen = preferred_object(effective_config)
+    chosen = preferred_object(effective_config, accept_json=accept_json)
     return chosen.document if chosen else None
 
 
-def preferred_body(effective_config: Any) -> Optional[str]:
-    """The text body of :func:`preferred_object` (the un-augmented YAML)."""
-    chosen = preferred_object(effective_config)
+def preferred_body(effective_config: Any, *, accept_json: bool = False) -> Optional[str]:
+    """The text body of :func:`preferred_object` (the un-augmented config)."""
+    chosen = preferred_object(effective_config, accept_json=accept_json)
     return chosen.body if chosen else None

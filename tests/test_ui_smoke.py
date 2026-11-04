@@ -14,6 +14,7 @@ the server (that is `tests/test_auth.py`'s job).
 
 from __future__ import annotations
 
+import base64
 import json
 
 import pytest
@@ -95,6 +96,9 @@ class FakeServer:
         # test can assert the page shows *that* token and not a placeholder.
         self.agent_tokens = []
         self.minted_token = "opamp_agent_smoketoken"
+        # The agent-detail view: what `/agent/{id}` reports as the agent's effective
+        # config. `None` unless a test sets it, so the default page has none.
+        self.effective_config = None
         self.calls = []
 
     # -- assertions helpers -----------------------------------------------
@@ -112,6 +116,9 @@ class FakeServer:
         # use it (Remote Config) need the agent listing here, not only in `.get()`.
         if method == "GET" and url.endswith("/agents"):
             return FakeResponse(200, {"agents": self.agents, "count": len(self.agents)})
+        # The agent detail view, through the verb the Remote Config prefill uses (#131).
+        if method == "GET" and "/agent/" in url:
+            return self._agent_detail(url)
         # #126: fleet tokens.
         if url.endswith("/agent-tokens"):
             if method == "GET":
@@ -343,9 +350,23 @@ class FakeServer:
             )
         if url.endswith("/agents"):
             return FakeResponse(200, {"agents": self.agents, "count": len(self.agents)})
+        if "/agent/" in url:
+            return self._agent_detail(url)
         if url.endswith("/compliance/validate"):
             return FakeResponse(200, {"opa_enabled": True, "policies": []})
         return self.request("GET", url, headers=headers)
+
+    def _agent_detail(self, url):
+        """One agent's detail view. Only the fields the pages read are filled; the
+        point is to render the effective-config panel, not to model the API."""
+        agent_id = url.rsplit("/", 1)[-1].split("?")[0]
+        detail = dict(fake_agent(agent_id))
+        detail["effective_config"] = self.effective_config
+        detail["metrics"] = {}
+        detail["components"] = {}
+        detail["capability_tags"] = []
+        detail["last_heartbeat"] = "2026-01-01T00:00:00+00:00"
+        return FakeResponse(200, detail)
 
     def post(self, url, json=None, headers=None, timeout=None, **kwargs):
         self.calls.append(("POST", url))
@@ -929,6 +950,56 @@ def test_a_paused_rollout_shows_its_reason_not_just_paused(server):
     assert "Nothing is retried and nothing is rolled back automatically" in body
 
 
+def test_prefill_loads_the_agent_config_decoded(server):
+    """Prefill used to put the report's base64 in the box, so proposals pushed base64.
+
+    `MessageToDict` renders every protobuf `bytes` body as base64, and the page read
+    `configMap.configMap[*].body` verbatim (#131). What an operator edits has to be the
+    document, and the content type has to follow it — a JSON body stored as `text/yaml`
+    is a second, quieter bug (#118).
+    """
+    agent = fake_agent()
+    server.agents = [agent]
+    document = json.dumps(
+        {
+            "schedule": {
+                "battery_stats": {
+                    "query": "SELECT percent_remaining FROM battery;",
+                    "interval": 32,
+                }
+            }
+        }
+    )
+    server.effective_config = json.dumps(
+        {
+            "configMap": {
+                "configMap": {
+                    "": {
+                        "body": base64.b64encode(document.encode()).decode(),
+                        "contentType": "application/json",
+                    }
+                }
+            }
+        }
+    )
+
+    app = signed_in(REMOTE_CONFIG_PAGE, rc_prefill=agent["id"]).run()
+    assert not app.exception, app.exception
+    prefill = [
+        button
+        for button in app.button
+        if (button.label or "") == "Prefill from this agent's effective config"
+    ][0]
+    prefill.click().run()
+    assert not app.exception, app.exception
+
+    body = app.session_state["rc_body"]
+    assert "percent_remaining" in body
+    assert body.strip().startswith("{")
+    assert app.session_state["rc_content_type"] == "application/json"
+    assert "Loaded object" in texts(app)
+
+
 def test_a_redacted_body_is_refused_before_it_can_be_pushed(server):
     app = signed_in(
         REMOTE_CONFIG_PAGE,
@@ -1208,3 +1279,93 @@ def test_the_groups_section_lists_previews_and_creates_groups(server):
     [button for button in app.button if button.label == "Preview membership"][0].click().run()
     assert not app.exception, app.exception
     assert "Dropped" in texts(app)
+
+
+# ------------------------------------- empty-fleet refresh and agent-detail links
+
+
+def test_the_empty_fleet_refresh_picks_up_an_agent_that_has_since_connected(server):
+    """The empty state is entered before the agent exists, so nothing re-runs it.
+
+    Streamlit only re-runs on interaction and this screen has no inputs, so without the
+    button "No agents connected yet" outlived the connection until a navigation.
+    """
+    app = empty_agents_page(server)
+    assert "No agents connected yet" in texts(app)
+
+    server.agents = [fake_agent()]
+    refresh = next(button for button in app.button if button.key == "empty_fleet_refresh")
+    refresh.click().run()
+
+    assert not app.exception, app.exception
+    assert "Agent List" in texts(app), "the refresh must re-read /agents"
+    assert "No agents connected yet" not in texts(app)
+
+
+def test_the_agent_table_link_cannot_mismatch_the_page_path(server):
+    """The table hardcoded `/Agents` while the nav's `url_path` is `agents`.
+
+    Streamlit matches paths case-sensitively and answered the miss with a "Page not
+    found" dialog — over the detail that had rendered behind it. A query-only link
+    stays on whatever the current route is, so there is no path to mismatch.
+    """
+    server.agents = [fake_agent()]
+    app = run(AGENTS_PAGE, server)
+    assert not app.exception, app.exception
+
+    html = "\n".join(str(element.value) for element in app.markdown)
+    assert 'href="?agent_id=' in html
+    assert "/Agents?agent_id=" not in html
+    assert "/agents?agent_id=" not in html
+
+
+# --------------------------------------- the agent detail shows the running config
+
+
+def test_the_agent_detail_shows_the_config_an_osquery_agent_actually_runs(server):
+    """The panel claimed there was no readable config for a running osquery schedule.
+
+    osquery reports `application/json`; the display path only accepted YAML, so an
+    operator opening the agent saw "No config object ... readable as YAML" instead of
+    the `SELECT` statements and intervals the agent was executing.
+    """
+    agent = fake_agent()
+    server.agents = [agent]
+    body = base64.b64encode(
+        json.dumps(
+            {
+                "schedule": {
+                    "battery_percentage": {
+                        "query": "SELECT percent_remaining FROM battery;",
+                        "interval": 30,
+                    }
+                }
+            }
+        ).encode()
+    ).decode()
+    server.effective_config = json.dumps(
+        {
+            "configMap": {
+                "configMap": {
+                    "osquery.osquery.conf.json": {
+                        "body": body,
+                        "contentType": "application/json",
+                    }
+                }
+            }
+        }
+    )
+
+    app = AppTest.from_file(str(AGENTS_PAGE), default_timeout=30)
+    app.query_params["agent_id"] = agent["id"]
+    app.run()
+    assert not app.exception, app.exception
+
+    app.toggle(key=f"show_config_{agent['id'][:8]}").set_value(True).run()
+    assert not app.exception, app.exception
+
+    shown = "\n".join(str(element.value) for element in app.code)
+    assert "SELECT percent_remaining FROM battery;" in shown
+    assert "interval: 30" in shown
+    # Not rewritten into a collector config the agent never ran.
+    assert "receivers:" not in shown

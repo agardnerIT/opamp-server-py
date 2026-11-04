@@ -72,8 +72,25 @@ def _empty_fleet():
     never starts) and the endpoint host (a containerised collector cannot reach the
     host's `localhost`). Both are called out next to the snippet instead of in docs a
     new user has to find.
+
+    The refresh button is not decoration: this state is entered before the agent
+    exists, so by the time it connects the operator is looking at a page that has no
+    reason to re-run. Streamlit only re-runs on interaction, and nothing on this
+    screen is an input, so without a button "no agents connected" outlives the
+    connection until the operator navigates away.
     """
-    st.info("No agents connected yet — nothing is reporting to this server.")
+    notice, action = st.columns([4, 1], vertical_alignment="center")
+    with notice:
+        st.info("No agents connected yet — nothing is reporting to this server.")
+    with action:
+        if st.button(
+            "↻ Refresh",
+            key="empty_fleet_refresh",
+            use_container_width=True,
+            help="Ask the server again now. An agent that has just started may have "
+            "registered since this page was rendered.",
+        ):
+            st.rerun()
     data = st.session_state.get("agents_data", {}) or {}
     if "error" in data:
         # A server we cannot reach is not a configuration problem, and the snippet
@@ -370,7 +387,7 @@ if agent_id_param:
 
                 with col_btn:
                     st.download_button(
-                        "Download Config with Telemetry",
+                        "Download Config",
                         new_yaml,
                         file_name="collector-config.yaml",
                         mime="text/yaml",
@@ -380,7 +397,7 @@ if agent_id_param:
                     with st.expander("Show config"):
                         st.code(new_yaml, language="yaml")
             else:
-                st.caption("No config object in this agent's report is readable as YAML")
+                st.caption("No config object in this agent's report is readable as YAML or JSON")
     
     st.divider()
     
@@ -501,7 +518,7 @@ if agent_id_param:
     
     col1, col2 = st.columns([4, 1])
     with col1:
-        st.markdown("**Collector Configuration**")
+        st.markdown("**Configuration**")
     with col2:
         show_config = st.toggle("Show", value=False, key=f"show_config_{selected_id[:8] if selected_id else 'none'}")
     
@@ -517,11 +534,11 @@ if agent_id_param:
             )
             st.code(cleaned_yaml, language="yaml", height=400)
         else:
-            st.caption("No config object in this agent's report is readable as YAML")
+            st.caption("No config object in this agent's report is readable as YAML or JSON")
     elif effective_config:
         st.caption("Toggle to show configuration")
     else:
-        st.caption("No effective config available from this collector")
+        st.caption("No effective config reported by this agent")
 
 else:
     agents = st.session_state.get("agents_data", {}).get("agents", [])
@@ -554,7 +571,12 @@ else:
     if view_mode == "Table":
         rows = []
         for a in agents:
-            link = f'<a href="/Agents?agent_id={a["id"]}" target="_self" style="color:#0066cc;text-decoration:underline;cursor:pointer">{a["id"][:32]}{"..." if len(a["id"]) > 32 else ""}</a>'
+            # A query-only link stays on the current page. The old href hardcoded
+            # `/Agents`, but the nav declares the url_path `agents`, and Streamlit
+            # matches paths case-sensitively: the router did not find the page and
+            # raised "Page not found" over the agent detail that *had* rendered
+            # (the query param was already applied to the page underneath).
+            link = f'<a href="?agent_id={a["id"]}" target="_self" style="color:#0066cc;text-decoration:underline;cursor:pointer">{a["id"][:32]}{"..." if len(a["id"]) > 32 else ""}</a>'
             rows.append({
                 "Agent": link,
                 "Healthy": "✅" if a.get("healthy") else "❌" if a.get("healthy") is False else "⚪",

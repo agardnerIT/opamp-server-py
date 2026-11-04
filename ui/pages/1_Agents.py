@@ -28,6 +28,7 @@ from ui.shared import (
     display_config_yaml,
     generate_manifest,
     generate_ocb_command,
+    mint_agent_token_form,
     get_session,
     datetime,
     requests,
@@ -52,87 +53,19 @@ def _mint_token_and_snippet(in_container):
     `instance_uid`, so this can be done *before* any agent exists — which is exactly the
     state an empty fleet is in.
 
-    The token is shown once, in this session, and never written anywhere else: the server
-    keeps only its hash. Losing it costs one mint, not an outage.
+    The form itself is `ui.shared.mint_agent_token_form`, shared with the Admin page:
+    this screen needs a token to make its snippet runnable, the Admin page needs one
+    after a revocation, and both need the same defaults.
     """
-    minted = st.session_state.get(MINTED_TOKEN_KEY)
-    if minted:
-        st.success(
-            "Token created. **Copy it now** — the server stores only its hash, so this "
-            "is the one and only time it is shown."
-        )
-        st.code(minted["token"], language="text")
-        snippet = collector_config_snippet(
-            get_server_url(),
-            in_container=in_container,
-            agent_auth="token",
-            token_literal=minted["token"],
-        )
-        st.code(snippet, language="yaml")
-        st.download_button(
-            "Download config.yaml",
-            snippet,
-            file_name="config.yaml",
-            mime="text/yaml",
-            key="empty_fleet_download",
-        )
-        cap = minted.get("max_agents")
-        st.caption(
-            f"Token `{minted.get('token_id')}` · expires "
-            + (minted.get("expires_at") or "never")
-            + " · max agents "
-            + (str(cap) if cap is not None else "unlimited")
-            + f". Revoke it on the **Admin** page if it leaks. The snippet embeds the "
-            f"token because you are pasting it into a file you own; `{AGENT_TOKEN_ENV}` "
-            "(Help page) keeps it out of the file, which is better once it works."
-        )
-        if st.button("Done", key="empty_fleet_dismiss_token"):
-            st.session_state.pop(MINTED_TOKEN_KEY, None)
-            st.rerun()
-        return
-
-    st.markdown(
-        "**1. Generate a token for this fleet.** Agents present it on every connection, "
-        "so it has to exist before the first one can report — and a fleet token is not "
-        "tied to an agent id, so this works on an empty fleet."
+    mint_agent_token_form(
+        "empty_fleet",
+        in_container=in_container,
+        intro=(
+            "**1. Generate a token for this fleet.** Agents present it on every "
+            "connection, so it has to exist before the first one can report — and a "
+            "fleet token is not tied to an agent id, so this works on an empty fleet."
+        ),
     )
-    with st.form("empty_fleet_mint_token"):
-        label = st.text_input("Label", value="", placeholder="prod")
-        expiry = st.selectbox(
-            "Expires",
-            list(EXPIRY_CHOICES),
-            index=1,
-            help="A leaked token is only useful until it expires. 'Never' is for a token "
-            "you rotate by hand.",
-        )
-        max_agents = st.number_input(
-            "Max agents",
-            min_value=1,
-            max_value=10000,
-            value=15,
-            help="The agent over this limit is refused and logged, so a leaked token "
-            "cannot consume the server.",
-        )
-        submitted = st.form_submit_button("Generate token", type="primary")
-    if not submitted:
-        return
-
-    # Minting grants access to the endpoint, so it is an admin action like any other:
-    # the shared sign-in renders here and stops the page when it is needed (#105).
-    require_admin(ROLE_ADMIN)
-    body = {"label": label, "max_agents": int(max_agents)}
-    days = EXPIRY_CHOICES[expiry]
-    if days is not None:
-        body["expires_in_days"] = days
-    response = admin_request("POST", "/agent-tokens", required_role=ROLE_ADMIN, json=body)
-    if response is None:
-        st.error("Could not reach the server to mint a token.")
-        return
-    if response.status_code != 201:
-        st.error(f"Minting a token failed: {response.text}")
-        return
-    st.session_state[MINTED_TOKEN_KEY] = response.json()
-    st.rerun()
 
 
 def _empty_fleet():

@@ -13,10 +13,12 @@ from ui.shared import (
     REAUTH_KEY,
     UPDATE_SUBSCRIBE_URL,
     admin_request,
+    agent_auth_mode,
     agent_token_rows,
     get_agents,
     get_updates,
     logout,
+    mint_agent_token_form,
     render_sidebar,
     require_admin,
     requests,
@@ -247,6 +249,19 @@ if session.can(ROLE_ADMIN):
             "agent's identity. Tokens are never shown here — only the handle used to "
             "revoke them."
         )
+        # Minting lives here as well as on the empty-fleet screen, because revoking is
+        # the one thing an operator does *on this page* and it used to leave no way to
+        # replace what they had just revoked: the form only existed inside the
+        # empty-fleet branch, which is unreachable once any agent has connected.
+        if agent_auth_mode() == "token":
+            with st.expander("Generate a new token", expanded=False):
+                mint_agent_token_form("admin_token")
+        else:
+            st.caption(
+                "This deployment does not require an agent credential "
+                f"(`config_push.agent_auth` is not `token`), so there is nothing to "
+                "mint here. Set `OPAMP_AGENT_AUTH=token` to require one."
+            )
         tokens_resp = admin_request("GET", "/agent-tokens", required_role=ROLE_ADMIN)
         if tokens_resp is None or tokens_resp.status_code != 200:
             st.error("Failed to list agent tokens.")
@@ -255,8 +270,7 @@ if session.can(ROLE_ADMIN):
             if not tokens:
                 st.info(
                     "No tokens yet. Agents cannot connect until one exists — mint the "
-                    "first one from the **Agents** page (or `opampctl agent-tokens "
-                    "create`)."
+                    "first one above, or with `opampctl agent-tokens create`."
                 )
             else:
                 st.dataframe(

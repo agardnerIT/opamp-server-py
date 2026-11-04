@@ -710,6 +710,45 @@ def test_revoking_a_token_needs_a_confirmation_and_is_audited_by_the_server(serv
     )
 
 
+def test_the_admin_page_can_mint_a_replacement_after_a_revocation(server):
+    """Revoking on this page must not leave the operator unable to mint a new one.
+
+    The mint form used to exist only inside the empty-fleet branch of the Agents page,
+    which is unreachable as soon as a single agent has connected — so revoking your only
+    token locked you out of the UI entirely until you found `opampctl`. This is the
+    regression fence for that: one revoked token, one live fleet, and the form is here.
+    """
+    server.agent_auth_mode = "token"
+    server.agent_tokens = [token_row(token_id="agtok_dead", revoked_at="2026-02-01T00:00:00+00:00")]
+    app = signed_in(ADMIN_PAGE, role="admin").run()
+    assert not app.exception, app.exception
+
+    submit = [button for button in app.button if (button.label or "") == "Generate token"]
+    assert submit, "the Admin token tab has no way to mint a token"
+
+    submit[0].click().run()
+    assert not app.exception, app.exception
+
+    shown = "\n".join(element.value for element in app.code)
+    assert server.minted_token in shown, "the new token must be shown once, in full"
+    assert "only time it is shown" in texts(app)
+    assert any(
+        method == "POST" and url.endswith("/agent-tokens") for method, url in server.calls
+    ), "minting must go through the shared admin transport"
+
+
+def test_the_admin_page_does_not_offer_minting_when_no_token_is_required(server):
+    """An open endpoint makes a token meaningless, and offering one would imply it is not."""
+    server.agent_auth_mode = "off"
+    app = signed_in(ADMIN_PAGE, role="admin").run()
+    assert not app.exception, app.exception
+
+    assert not [
+        button for button in app.button if (button.label or "") == "Generate token"
+    ]
+    assert "OPAMP_AGENT_AUTH=token" in texts(app)
+
+
 def test_a_non_admin_does_not_see_the_token_tab(server):
     """The server re-checks the role; the tab is the courtesy, not the control."""
     app = signed_in(ADMIN_PAGE, role="operator").run()

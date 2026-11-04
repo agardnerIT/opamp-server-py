@@ -70,7 +70,20 @@ services:
       - OPAMP_MAX_MESSAGE_BYTES=${OPAMP_MAX_MESSAGE_BYTES:-67108864}
       - OPAMP_WS_OUTBOUND_QUEUE=${OPAMP_WS_OUTBOUND_QUEUE:-32}
     volumes:
-      - ./data:/app/data
+      # SQLite lives on a **named volume**, not a bind mount (#132).
+      #
+      # `./data:/app/data` is the obvious thing to write and it corrupts the database on
+      # Docker Desktop for macOS: virtiofs does not implement POSIX locking and `mmap`
+      # the way SQLite requires, so the server can see `database disk image is
+      # malformed` / `disk I/O error` while `PRAGMA integrity_check` on the same file
+      # from the host returns ok, and every write answers 503 until a restart re-reads
+      # the WAL — which is exactly one restart later than the next corruption. A named
+      # volume is an ext4 directory inside the VM, so this cannot happen.
+      #
+      # The cost is that `./data` is no longer where the files are. Get them out with
+      # `docker compose cp server:/app/data/opamp.db data/` when `opampctl --db` needs
+      # the live database offline. See README → "If every write answers 503".
+      - opamp-data:/app/data
     networks:
       - opamp-network
     restart: unless-stopped
@@ -102,11 +115,13 @@ services:
       # #46: public release-email Worker. Empty means the built-in default.
       - UPDATE_SUBSCRIBE_URL=${UPDATE_SUBSCRIBE_URL:-}
     volumes:
-      # Read-only: the UI imports server-side helpers (reports, manifests, posture)
-      # that resolve DATA_DIR. It never writes, and it does **not** read the admin
-      # credential from here — signing in exchanges a password for a session token
-      # and the password is discarded (#105).
-      - ./data:/app/data:ro
+      # Read-only, and the same named volume the server writes: the UI imports
+      # server-side helpers (reports, manifests, posture) that resolve DATA_DIR. It
+      # never writes, and it does **not** read the admin credential from here — signing
+      # in exchanges a password for a session token and the password is discarded
+      # (#105). A host path here would re-introduce the bind mount the server just
+      # stopped using (#132).
+      - opamp-data:/app/data:ro
     depends_on:
       server:
         condition: service_healthy
@@ -172,3 +187,9 @@ services:
 networks:
   opamp-network:
     driver: bridge
+
+volumes:
+  # The database volume (#132). Named, not bound: see the note on the server's
+  # `volumes:` above. `docker compose down -v` deletes it (and the admin password with
+  # it), so that flag is a deliberate "start over" — plain `down` keeps it.
+  opamp-data:

@@ -8,6 +8,13 @@ __pycache__
 venv
 .env
 # Generated admin credential (#96) and the SQLite DB must never be baked into an image.
+# Nor may the write-ahead log or shared-memory index: both are pieces of *one*
+# database's state, and shipping them next to a different database is its own
+# corruption (#132). `updates`/`update-settings` are local check state, not defaults.
 data/admin_password
 data/*.db
+data/*.db-wal
+data/*.db-shm
+data/update-check.json
+data/update-settings.json
 docker/data

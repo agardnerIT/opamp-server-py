@@ -89,10 +89,13 @@ Access:
 - OPA (if enabled): http://localhost:8181
 
 There is no default admin password. On first start the server generates a random
-one, prints it once in the logs (`docker-compose logs server | grep -i "admin
-password"`), and stores it in `./data/admin_password` (mode 0600). Set
-`ADMIN_PASSWORD` in `.env` to choose your own. Both ports bind to `127.0.0.1` on
-purpose — see [Before you expose this server](#before-you-expose-this-server).
+one, prints it once in the logs (`docker compose logs server | grep -i "admin
+password"`), and stores it at `$DATA_DIR/admin_password` (mode 0600) — inside the
+`opamp-data` volume, not `./data`, because SQLite may not live on a macOS bind
+mount (see [If every write answers 503](#if-every-write-answers-503)). Read it out
+with `docker compose cp server:/app/data/admin_password .`. Set `ADMIN_PASSWORD` in
+`.env` to choose your own. Both ports bind to `127.0.0.1` on purpose — see [Before
+you expose this server](#before-you-expose-this-server).
 
 ### Manual Setup
 
@@ -1189,7 +1192,36 @@ malformed` to the running process while `PRAGMA integrity_check` on the same fil
 the host, returns `ok`. Every write then returns 503 until the process is restarted,
 because the process keeps its stale view of the write-ahead log.
 
-What the server does about it:
+So the compose file does not bind-mount the data directory. It uses a named volume:
+
+```yaml
+services:
+  server:
+    volumes:
+      - opamp-data:/app/data
+volumes:
+  opamp-data:
+```
+
+A named volume is a directory in the VM's own filesystem, so the failure cannot
+happen. Keep it that way on Docker Desktop; a bind mount is safe on a Linux host with
+a native filesystem, and only there. `docker compose down` keeps the volume —
+`down -v` deletes it, admin password included.
+
+If you inherited a `./data:/app/data` deployment and the database is already damaged,
+switch to the volume and start from a clean database rather than repairing one:
+
+```bash
+# copy the non-database state out of the bind mount, then let the volume boot empty
+docker compose down
+mkdir -p /tmp/opamp-data-keep
+cp -f data/admin_password /tmp/opamp-data-keep/ 2>/dev/null || true
+docker compose up -d --wait
+for f in /tmp/opamp-data-keep/*; do docker compose cp "$f" "server:/app/data/$(basename "$f")"; done
+docker compose restart server
+```
+
+What the server does about it in the meantime:
 
 - the boot log carries one line, `state database check: ok` (or the failure);
 - a state-database error answers **503** with `Retry-After` and a message that says
@@ -1197,25 +1229,14 @@ What the server does about it:
 - the handler never attempts a repair. Rewriting a database underneath the process
   that just failed to read it is how a bad afternoon becomes data loss.
 
-What you do about it:
+One diagnostic worth knowing, because it looks like the opposite problem: a *host-side*
+`PRAGMA integrity_check` run against a bind-mounted file returns `ok` while the server
+reports corruption, and a run against a **copy** of that file reproduces the corruption.
+The file really is damaged; the live reader is the one that is wrong. The copy is the
+one to believe.
 
-```bash
-docker compose restart server     # re-reads the WAL, rebuilds the -shm index
-```
-
-If it recurs, move `DATA_DIR` off the bind mount onto a named volume (or the host's
-own filesystem via a Linux deployment) — that is the root cause, and no amount of
-restarting fixes it:
-
-```yaml
-volumes:
-  - opamp-data:/app/data
-volumes:
-  opamp-data:
-```
-
-`docker compose cp server:/app/data/admin_password .` gets the generated password out
-of a volume if you need it.
+`docker compose cp server:/app/data/opamp.db data/` gets the live database onto the
+host for `opampctl --db data/opamp.db`, which never runs inside the container.
 
 ## When an agent counts as gone (#69)
 

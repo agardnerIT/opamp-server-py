@@ -195,7 +195,10 @@ def test_propose_delivers_nothing_and_approve_delivers_once(client, registered):
     assert detail["desired"]["status"] == "active"
     assert detail["desired"]["revision_id"] == revision_id
     assert detail["desired"]["deliverable"] is True
-    assert detail["assignment"]["attempts"] == 1
+    # #135: the budget is per episode, so an acknowledged delivery zeroes it instead
+    # of leaving a spent counter next to a converged agent.
+    assert detail["assignment"]["attempts"] == 0
+    assert detail["assignment"]["unconfirmed"] is False
     assert detail["assignment"]["last_status"] == "APPLIED"
     assert detail["drift"]["drift"] is False
 
@@ -399,6 +402,39 @@ def test_the_delivery_budget_stops_an_agent_that_never_acknowledges(client, regi
     detail = client.get(f"/agent/{AGENT_ID}/config", headers=admin_headers()).json()
     assert detail["assignment"]["unconfirmed"] is True
     assert detail["assignment"]["attempts"] == 2
+
+
+def test_an_acknowledgement_clears_the_spent_delivery_budget(client, registered, monkeypatch):
+    """#135: the wedge. A budget burned by reconnects must not outlive the ack.
+
+    Reproduced on a real fleet: the agent process restarted a few times, each restart
+    reported UNSET with no hash, the server delivered each time, the budget ran out
+    and ``unconfirmed`` was set. The agent then had no way back - it applied the
+    config, acknowledged it, and the server still refused to deliver anything, for
+    good. "Never acknowledged" is simply false once the acknowledgement arrives.
+    """
+    monkeypatch.setenv("CONFIG_MAX_DELIVERY_ATTEMPTS", "2")
+    pending = propose(client).json()
+    approve(client, pending["proposal_id"])
+    assert reply(agent_message()).HasField("remote_config")
+    assert reply(agent_message()).HasField("remote_config")
+    assert reply(agent_message()).HasField("remote_config") is False
+
+    wedged = client.get(f"/agent/{AGENT_ID}/config", headers=admin_headers()).json()
+    assert wedged["assignment"]["unconfirmed"] is True
+    assert wedged["assignment"]["attempts"] == 2
+
+    # The agent finally applies it and says so, with our hash.
+    poll(
+        AGENT_ID,
+        status="APPLIED",
+        hash_b64=remote_config.hash_b64(pending["config_hash"]),
+    )
+
+    cleared = client.get(f"/agent/{AGENT_ID}/config", headers=admin_headers()).json()
+    assert cleared["assignment"]["unconfirmed"] is False
+    assert cleared["assignment"]["attempts"] == 0
+    assert cleared["assignment"]["last_error"] is None, "the message described a spent budget"
 
 
 def test_a_steady_state_acknowledgement_does_no_desired_config_writes(

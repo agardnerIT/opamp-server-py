@@ -17,7 +17,9 @@ import pytest
 
 from proto import opamp_pb2
 from server import crypto, remote_config
-from server.state import SQLiteDesiredConfigStore
+from datetime import timedelta
+
+from server.state import SQLiteDesiredConfigStore, utcnow
 
 AGENT = "ab" * 16
 YAML = "receivers:\n  otlp:\n    protocols:\n      grpc:\n"
@@ -461,3 +463,87 @@ def test_agent_id_normalisation():
         remote_config.normalize_agent_id("not-hex")
     with pytest.raises(ValueError):
         remote_config.normalize_agent_id("ab" * 15)
+
+
+# ------------------------------------------------- delivery budget expiry (#135)
+
+def _unconfirmed(agent: str, attempts: int = 2) -> str:
+    """An assignment delivered `attempts` times with no acknowledgement."""
+    remote_config.REGISTRY.push(
+        agent, {"": {"body": "{}", "content_type": "application/yaml"}}, author="test"
+    )
+    revision_id = remote_config.REGISTRY.get(agent)["revision_id"]
+    for _ in range(attempts):
+        remote_config.REGISTRY.record_delivery(agent, revision_id, channel="reply")
+    remote_config.REGISTRY.mark_unconfirmed(
+        agent, f"delivered {attempts} times and the agent never reported hash abc; delivery stopped"
+    )
+    return revision_id
+
+
+def test_an_unconfirmed_assignment_is_refused_inside_the_window():
+    agent = "cd" * 16
+    _unconfirmed(agent)
+    decision = remote_config.decision_for(agent, capabilities=0xFFFF)
+    assert decision.deliver is False
+    assert decision.reason == "revision_not_deliverable"
+
+
+def test_an_unconfirmed_assignment_gets_a_new_budget_after_the_window(monkeypatch):
+    """The fleet-facing recovery: no new revision, no operator, just reconciliation."""
+    monkeypatch.setenv("CONFIG_UNCONFIRMED_RETRY_SECONDS", "60")
+    agent = "ce" * 16
+    _unconfirmed(agent)
+    # Age the last delivery past the window (no sleeping: the fact is the timestamp).
+    remote_config.REGISTRY.get(agent)["delivered_at"] = (
+        utcnow() - timedelta(seconds=120)
+    ).isoformat()
+
+    decision = remote_config.decision_for(agent, capabilities=0xFFFF)
+    assert decision.deliver is True
+
+    record = remote_config.REGISTRY.get(agent)
+    assert record["unconfirmed"] is False
+    assert record["attempts"] == 0, "the retry has to fit inside the same budget"
+    assert record["last_error"] is None
+
+
+def test_the_retry_window_can_be_disabled(monkeypatch):
+    """`0` restores the old behaviour: once unconfirmed, never retried."""
+    monkeypatch.setenv("CONFIG_UNCONFIRMED_RETRY_SECONDS", "0")
+    agent = "cf" * 16
+    _unconfirmed(agent)
+    remote_config.REGISTRY.get(agent)["delivered_at"] = (
+        utcnow() - timedelta(days=365)
+    ).isoformat()
+
+    decision = remote_config.decision_for(agent, capabilities=0xFFFF)
+    assert decision.deliver is False
+    assert remote_config.REGISTRY.get(agent)["unconfirmed"] is True
+
+
+def test_an_unconfirmed_record_without_a_delivery_time_is_given_a_budget():
+    """No evidence behind the flag is not a reason to refuse forever."""
+    monkeypatch_free = {"delivered_at": None, "unconfirmed": True}
+    assert remote_config._unconfirmed_budget_expired(monkeypatch_free) is True
+
+
+def test_a_matching_applied_clears_the_budget_and_the_stale_error():
+    agent = "d0" * 16
+    revision_id = _unconfirmed(agent)
+    ours = remote_config.REGISTRY.get(agent)["config_hash"]
+
+    remote_config.note_status(agent, "APPLIED", remote_config.hash_b64(ours))
+
+    record = remote_config.REGISTRY.get(agent)
+    assert record["revision_id"] == revision_id
+    assert record["unconfirmed"] is False
+    assert record["attempts"] == 0
+    assert record["last_error"] is None
+
+
+def test_a_report_about_another_hash_does_not_clear_the_budget():
+    agent = "d1" * 16
+    _unconfirmed(agent)
+    remote_config.note_status(agent, "APPLIED", remote_config.hash_b64("ff" * 32))
+    assert remote_config.REGISTRY.get(agent)["unconfirmed"] is True

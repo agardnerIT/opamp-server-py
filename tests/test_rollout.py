@@ -282,6 +282,67 @@ def test_the_health_window_is_the_last_thing_to_open():
     assert opened.ok is True
 
 
+def test_a_config_conflict_pauses_the_batch_even_though_health_is_true():
+    """#135: APPLIED, healthy=true, and the fleet is still not running our config.
+
+    The agent's own `ComponentHealth.status` was `config_conflict` while `healthy`
+    stayed true (the agent is fine; the *config* is ambiguous, because the daemon
+    merges a second source scheduling the same query names). Checking only
+    `healthy is False` let a rollout complete on exactly that state.
+    """
+    gate = rollout.AgentGate(
+        agent_id="x",
+        expected_hash="a" * 64,
+        delivered=True,
+        reported_status="APPLIED",
+        reported_hash="a" * 64,
+        healthy=True,
+        health_status="config_conflict",
+        health_error="the same query name is scheduled more than once: battery_stats",
+    )
+    assert gate.applied is True, "this is not a delivery failure: the config did apply"
+
+    verdict = rollout.batch_gate([gate], gate_seconds=0)
+    assert verdict.pause is True
+    assert verdict.reason == rollout.PAUSE_CONFIG_CONFLICT
+    assert verdict.blocking == ("x",)
+    assert "battery_stats" in verdict.detail, "the agent's own words are the useful part"
+
+
+def test_a_healthy_status_that_is_not_a_conflict_still_promotes():
+    """Only the one status pauses: `ok` (and anything else the agent invents) does not."""
+    gate = rollout.AgentGate(
+        agent_id="x",
+        expected_hash="a" * 64,
+        delivered=True,
+        reported_status="APPLIED",
+        reported_hash="a" * 64,
+        healthy=True,
+        health_status="ok",
+    )
+    assert rollout.batch_gate([gate], gate_seconds=0).ok is True
+
+
+def test_facts_for_reads_the_reported_health_status():
+    """The gate's input comes from the stored health report, not from `healthy` alone."""
+
+    class State:
+        agent_id = "x"
+        healthy = True
+        remote_config_status = "RemoteConfigStatuses_APPLIED"
+        health = {"status": "config_conflict", "lastError": "duplicate query names"}
+
+        def is_stale(self, now):
+            return False
+
+    gate = rollout.facts_for(
+        {"agent_id": "x", "config_hash": "a" * 64, "revision_id": "r-1"}, State(), None
+    )
+    assert gate.healthy is True
+    assert gate.health_status == "config_conflict"
+    assert gate.health_error == "duplicate query names"
+
+
 def test_an_unknown_health_report_does_not_block_the_gate():
     """Health reporting is optional in the spec; blocking on its absence would make
     every collector without `ReportsHealth` un-rolloutable. Only `healthy=false` stops

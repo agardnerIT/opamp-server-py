@@ -76,6 +76,12 @@ PAUSE_HELP = {
     "auto_reverted": "An agent restored its last working config — the supervisor refused this one.",
     "agent_went_silent": "An agent stopped reporting after delivery, so its health cannot be verified.",
     "unhealthy": "An agent reports healthy=false after being delivered this config.",
+    "config_conflict": (
+        "An agent applied the config, but its daemon is merging a second config source "
+        "that schedules the same query names — so the effective config is not what this "
+        "server thinks it is. Manage the query in one place (usually "
+        "`--config_plugin=opamp`, so the agent is the only source)."
+    ),
     "delivery_unconfirmed": "An agent never acknowledged its delivery (attempt budget exhausted).",
     "superseded": "Another revision replaced this one on at least one agent.",
     "ttl_expired": "Nobody acted within the rollout TTL, so it was cancelled.",

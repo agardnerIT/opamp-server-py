@@ -257,7 +257,12 @@ class TestUnsolicitedSend:
         delivery = again.json()["delivery"]
         assert delivery["state"] == "unchanged"
         assert delivery["reason"] == "reported_hash_matches"
-        assert remote_config.REGISTRY.delivery_record(AGENT_ID)["attempts"] == 1
+        # #135: the acknowledgement is the end of the episode, so the attempt counter
+        # is cleared rather than left spent alongside a converged agent.
+        record = remote_config.REGISTRY.delivery_record(AGENT_ID)
+        assert record["attempts"] == 0
+        assert record["unconfirmed"] is False
+        assert record["state"] == "applied"
 
     def test_delivery_state_walks_queued_delivered_applied(self, client, token):
         poll(client, token)

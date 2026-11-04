@@ -1425,6 +1425,22 @@ class SQLiteDesiredConfigStore:
                 (detail[:2000], utcnow().isoformat(), agent_id),
             )
 
+    def reset_delivery_budget(self, agent_id: str) -> None:
+        """Clear the attempt counter and the never-acknowledged flag.
+
+        The budget is per assignment *episode*, not forever: it exists so a server
+        cannot re-push in a loop, and once there is new evidence - the agent
+        acknowledged, or it has been unacknowledged long enough that re-delivering is
+        the only way forward - counting starts again. `last_error` goes with it,
+        because that message described the budget that just expired.
+        """
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE desired_configs SET attempts=0, unconfirmed=0, last_error=NULL, "
+                "updated_at=? WHERE agent_id=?",
+                (utcnow().isoformat(), agent_id),
+            )
+
     def clear(
         self, agent_id: str) -> None:
         """Forget the desired state (used by tests and by a hard withdrawal)."""

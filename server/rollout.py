@@ -91,6 +91,13 @@ PAUSE_AUTO_REVERTED = "auto_reverted"
 PAUSE_SILENT = "agent_went_silent"
 PAUSE_UNHEALTHY = "unhealthy"
 PAUSE_UNCONFIRMED = "delivery_unconfirmed"
+# The agent applied the config but its daemon is running something else as well
+# (a leftover filesystem source scheduling the same query names), so "APPLIED" is
+# true and the effective config is still not what the server thinks it is.
+PAUSE_CONFIG_CONFLICT = "config_conflict"
+
+#: The agent's own `ComponentHealth.status` for that condition (#118/#135).
+AGENT_STATUS_CONFIG_CONFLICT = "config_conflict"
 PAUSE_SUPERSEDED = "superseded"
 PAUSE_REASONS = frozenset(
     {
@@ -99,6 +106,7 @@ PAUSE_REASONS = frozenset(
         PAUSE_SILENT,
         PAUSE_UNHEALTHY,
         PAUSE_UNCONFIRMED,
+        PAUSE_CONFIG_CONFLICT,
         PAUSE_SUPERSEDED,
     }
 )
@@ -296,6 +304,8 @@ class AgentGate:
     reported_status: Optional[str] = None  # short form: APPLIED/APPLYING/FAILED/UNSET
     reported_hash: Optional[str] = None  # our hex form
     healthy: Optional[bool] = None
+    health_status: Optional[str] = None  # the agent's own ComponentHealth.status
+    health_error: Optional[str] = None
     stale: bool = False
     poisoned: bool = False
     unconfirmed: bool = False
@@ -361,6 +371,10 @@ def batch_gate(
     2. an agent that was delivered to and has gone silent, or vanished from the
        registry, → **pause** (`agent_went_silent`);
     3. an agent reporting `healthy: false` → **pause** (`unhealthy`);
+    3b. an agent reporting `config_conflict` → **pause** (`config_conflict`), because
+       `healthy` stays true while the daemon merges a second config source that
+       schedules the same query names: the config applied and the fleet is still not
+       running what the server thinks it is;
     4. an agent whose delivery budget ran out → **pause** (`delivery_unconfirmed`);
     5. an agent no longer assigned the rollout's revision → **pause** (`superseded`);
     6. otherwise: not delivered yet / not applied yet / the health window has not
@@ -409,6 +423,21 @@ def batch_gate(
                 PAUSE_UNHEALTHY,
                 f"{gate.agent_id} reports healthy=false after being delivered this "
                 f"config",
+                blocking=(gate.agent_id,),
+            )
+    for gate in batch:
+        if gate.health_status == AGENT_STATUS_CONFIG_CONFLICT:
+            # `healthy` stays true for this one: the agent is fine, the *config* is
+            # ambiguous. That is exactly why checking only `healthy` let a rollout
+            # complete while the daemon ran two schedules under one query name.
+            return GateResult(
+                False,
+                PAUSE_CONFIG_CONFLICT,
+                f"{gate.agent_id} applied the config but reports "
+                f"{AGENT_STATUS_CONFIG_CONFLICT}"
+                + (f": {gate.health_error}" if gate.health_error else "")
+                + "; the daemon is merging our config with another source, so the "
+                "effective config is not what the server thinks it is",
                 blocking=(gate.agent_id,),
             )
     for gate in batch:
@@ -501,6 +530,25 @@ def new_rollout_id() -> str:
     return f"ro-{utcnow().strftime('%Y%m%dT%H%M%SZ')}-{uuid.uuid4().hex[:8]}"
 
 
+def _health_field(state: Optional[AgentState], name: str) -> Optional[str]:
+    """One field of the agent's reported `ComponentHealth`, or `None`.
+
+    `AgentState.health` is the stored `MessageToDict` dict, but a damaged (or
+    encrypted-looking) value must mean "no evidence" rather than a failed gate, so
+    both spellings are tolerated and anything unreadable is simply absent.
+    """
+    health = getattr(state, "health", None) if state is not None else None
+    if isinstance(health, str):
+        try:
+            health = json.loads(health)
+        except ValueError:
+            return None
+    if not isinstance(health, Mapping):
+        return None
+    value = health.get(name)
+    return str(value) if isinstance(value, str) and value else None
+
+
 def facts_for(
     row: Mapping[str, Any],
     state: Optional[AgentState],
@@ -523,6 +571,9 @@ def facts_for(
         ),
         reported_hash=remote_config.reported_hash(agent_id),
         healthy=getattr(state, "healthy", None),
+        health_status=_health_field(state, "status"),
+        health_error=_health_field(state, "lastError")
+        or _health_field(state, "last_error"),
         stale=bool(state is not None and state.is_stale(now or utcnow())),
         poisoned=bool(ours and (record.get("poisoned") or record.get("failed_at"))),
         unconfirmed=bool(ours and record.get("unconfirmed")),

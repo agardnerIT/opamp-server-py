@@ -89,6 +89,13 @@ DEFAULT_MAX_BYTES = config_validation.DEFAULT_MAX_BYTES
 # and the agent wedged, so this surfaces as `unconfirmed` and stops the loop.
 DEFAULT_MAX_DELIVERY_ATTEMPTS = 5
 
+# How long a spent delivery budget keeps blocking a re-push (#135). The budget stops
+# a re-push loop, but "never acknowledged" is not permanent: an agent that restarts,
+# or whose daemon lost the config, comes back reporting no hash at all, and refusing
+# it forever is how a fleet ends up APPLIED-less with nothing to recover with.
+# `0` restores the old "never retry" behaviour.
+DEFAULT_UNCONFIRMED_RETRY_SECONDS = 300
+
 # How long a supervisor gets to apply a config and report before a repeated
 # "different hash" report is treated as an auto-revert (T9). SIGHUP plus a restart
 # is not instantaneous, and poisoning a healthy rollout is its own incident.
@@ -142,6 +149,35 @@ def max_bytes() -> int:
 
 def max_delivery_attempts() -> int:
     return _env_int("CONFIG_MAX_DELIVERY_ATTEMPTS", DEFAULT_MAX_DELIVERY_ATTEMPTS)
+
+
+def unconfirmed_retry_seconds() -> int:
+    """`CONFIG_UNCONFIRMED_RETRY_SECONDS` - how long a spent budget blocks a push.
+
+    `0` is allowed and means "never give the budget back", which is what the server
+    did before this existed. A non-zero value bounds the re-push loop the budget
+    protects against (at most one extra budget per window) while letting an agent
+    that lost its config - a process restart, a daemon that booted without it -
+    recover without an operator creating a new revision.
+    """
+    raw = (os.environ.get("CONFIG_UNCONFIRMED_RETRY_SECONDS") or "").strip()
+    if not raw:
+        return DEFAULT_UNCONFIRMED_RETRY_SECONDS
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning(
+            f"CONFIG_UNCONFIRMED_RETRY_SECONDS={raw!r} is not an integer; "
+            f"using {DEFAULT_UNCONFIRMED_RETRY_SECONDS}"
+        )
+        return DEFAULT_UNCONFIRMED_RETRY_SECONDS
+    if value < 0:
+        logger.warning(
+            f"CONFIG_UNCONFIRMED_RETRY_SECONDS={raw!r} must be >= 0; using 0 "
+            "(never retry)"
+        )
+        return 0
+    return value
 
 
 def revert_grace_seconds() -> int:
@@ -556,6 +592,21 @@ class DesiredConfigRegistry:
             record["unconfirmed"] = True
             record["last_error"] = detail
 
+    def reset_delivery_budget(self, agent_id: str) -> None:
+        """Give an assignment a fresh delivery budget, store and cache together.
+
+        Called when there is evidence the previous budget no longer describes the
+        situation: the agent acknowledged the config (:func:`note_status`), or it has
+        been unacknowledged long enough that re-delivering is the only way forward
+        (:func:`decision_for`).
+        """
+        self._store.reset_delivery_budget(agent_id)
+        record = self._cache.get(agent_id)
+        if record is not None:
+            record["attempts"] = 0
+            record["unconfirmed"] = False
+            record["last_error"] = None
+
     def prune(self) -> int:
         """Apply `CONFIG_RETENTION_DAYS` to superseded revision bodies (#98)."""
         days = retention_days()
@@ -713,6 +764,52 @@ REASON_DETAILS = {
 }
 
 
+def _unconfirmed_budget_expired(record: Mapping[str, Any]) -> bool:
+    """Has the spent delivery budget stopped describing the situation? (#135)
+
+    Measured from the last delivery, because that is when the agent last had a
+    chance to apply it. An assignment marked unconfirmed with no delivery timestamp
+    has no evidence behind the flag at all, so it is treated as expired: refusing to
+    deliver on a record that cannot say when we delivered is how an agent stays
+    configless with no way back.
+    """
+    limit = unconfirmed_retry_seconds()
+    if limit <= 0:
+        return False
+    delivered = _delivered_at(record)
+    if delivered is None:
+        return True
+    return (utcnow() - delivered).total_seconds() >= limit
+
+
+def _retry_unconfirmed(agent_id: str, record: Dict[str, Any]) -> Dict[str, Any]:
+    """Reset an expired budget so this delivery is attempted, not refused.
+
+    One reset per window, so the budget still bounds a re-push loop: an agent that
+    keeps failing to acknowledge gets one new budget per
+    `CONFIG_UNCONFIRMED_RETRY_SECONDS`, not one per heartbeat.
+    """
+    if not record.get("unconfirmed"):
+        return record
+    if not _unconfirmed_budget_expired(record):
+        return record
+    attempts = int(record.get("attempts") or 0)
+    logger.bind(
+        event="config.delivery.retry_unconfirmed",
+        agent_id=agent_id,
+        attempts=attempts,
+        revision_id=record.get("revision_id"),
+    ).warning(
+        f"agent {agent_id}: delivery of {record.get('revision_id')} was unconfirmed "
+        f"after {attempts} attempt(s) and the agent still has no config; granting a "
+        f"new budget (CONFIG_UNCONFIRMED_RETRY_SECONDS="
+        f"{unconfirmed_retry_seconds()})"
+    )
+    REGISTRY.reset_delivery_budget(agent_id)
+    refreshed = REGISTRY.get(agent_id)
+    return refreshed if refreshed is not None else record
+
+
 def decision_for(
     agent_id: str,
     capabilities: int,
@@ -731,6 +828,12 @@ def decision_for(
     6. the delivery budget is not exhausted — an agent that never reports back is
        surfaced as `unconfirmed` instead of being re-pushed forever.
 
+    The budget is per episode, not permanent (#135): an agent that acknowledges
+    clears it, and one that has been unconfirmed for
+    `CONFIG_UNCONFIRMED_RETRY_SECONDS` gets a fresh one. Without that, an agent whose
+    process restarted (and so reports no hash at all) could never be given its config
+    again - that is a server refusing to reconcile, not a fleet that is converged.
+
     The one write this function can cause (`mark_unconfirmed`, when the budget runs
     out) is kept here rather than in a builder so both paths surface it identically.
     """
@@ -742,6 +845,9 @@ def decision_for(
     record = REGISTRY.get(agent_id)
     if not record:
         return OfferDecision(False, reason="nothing_assigned")
+    # #135: an expired budget is not a refusal, it is a stale fact. Reset it before
+    # `deliverable()` sees it, or the agent stays configless forever.
+    record = _retry_unconfirmed(agent_id, record)
     revision_id = record.get("revision_id")
     config_hash = record.get("config_hash")
     if not deliverable(record):
@@ -1234,6 +1340,13 @@ def note_status(
                 f"expected {ours[:12]}…)"
             )
             return _poison(agent_id, record, "auto_reverted", detail)
+
+    # #135: the agent has our config, so "never acknowledged" is no longer true.
+    # Clear the spent budget (and the error message describing it) here rather than
+    # waiting for a new revision: the recovery path must not be "propose again".
+    if status_name == STATUS_APPLIED and reported == ours:
+        if record.get("unconfirmed") or int(record.get("attempts") or 0):
+            REGISTRY.reset_delivery_budget(agent_id)
 
     REGISTRY.note_report(agent_id, status_name, error_message)
     return None

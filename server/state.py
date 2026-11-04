@@ -47,6 +47,33 @@ def _stringify_any_value(value: Optional[Dict]) -> Optional[str]:
 DATA_DIR = Path(os.environ.get("DATA_DIR", "data")).resolve()
 DB_PATH = DATA_DIR / "opamp.db"
 
+
+def state_database_health(db_path: Path = DB_PATH) -> tuple:
+    """``(ok, detail)`` for the state database, safe to call at startup.
+
+    A damaged database used to surface only as a bare 500 on the first write, with a
+    stack trace in the log and nothing an operator could act on. `PRAGMA quick_check`
+    is cheap (milliseconds on a control-plane database) and answers the question at
+    boot instead of at the worst possible moment.
+
+    Never raises: a missing file is "not created yet", not a failure — the stores
+    create it on first use.
+    """
+    if not Path(db_path).exists():
+        return True, "not created yet"
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5.0)
+    except sqlite3.Error as exc:  # pragma: no cover - open failures are rare
+        return False, str(exc)
+    try:
+        row = conn.execute("PRAGMA quick_check(1)").fetchone()
+        result = (row or [""])[0]
+        return (result == "ok"), str(result)
+    except sqlite3.DatabaseError as exc:
+        return False, str(exc)
+    finally:
+        conn.close()
+
 # #126: outcomes of `SQLiteCredentialStore.register_agent`. Strings rather than an enum
 # because they are also the `reason` on the metric and in the audit entry.
 AGENT_LIMIT_OK = "ok"

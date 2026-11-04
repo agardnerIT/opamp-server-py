@@ -1180,6 +1180,43 @@ curl -s localhost:4320/health | jq .throttle
 #  "lag_seconds": 2.4, "shedding": true}
 ```
 
+## If every write answers 503
+
+`data/opamp.db` is SQLite, and SQLite is only safe on a filesystem that implements
+POSIX locking and `mmap` correctly. A **Docker bind mount from macOS** (virtiofs) is
+not one of those: in practice the database can report `database disk image is
+malformed` to the running process while `PRAGMA integrity_check` on the same file, from
+the host, returns `ok`. Every write then returns 503 until the process is restarted,
+because the process keeps its stale view of the write-ahead log.
+
+What the server does about it:
+
+- the boot log carries one line, `state database check: ok` (or the failure);
+- a state-database error answers **503** with `Retry-After` and a message that says
+  what to do, instead of a bare 500;
+- the handler never attempts a repair. Rewriting a database underneath the process
+  that just failed to read it is how a bad afternoon becomes data loss.
+
+What you do about it:
+
+```bash
+docker compose restart server     # re-reads the WAL, rebuilds the -shm index
+```
+
+If it recurs, move `DATA_DIR` off the bind mount onto a named volume (or the host's
+own filesystem via a Linux deployment) — that is the root cause, and no amount of
+restarting fixes it:
+
+```yaml
+volumes:
+  - opamp-data:/app/data
+volumes:
+  opamp-data:
+```
+
+`docker compose cp server:/app/data/admin_password .` gets the generated password out
+of a volume if you need it.
+
 ## When an agent counts as gone (#69)
 
 The server learns each agent's reporting cadence instead of guessing it. The

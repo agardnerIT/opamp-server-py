@@ -258,3 +258,36 @@ class TestAgentRegistry:
         
         agents = temp_db.list_all()
         assert len(agents) == 2
+
+
+class TestStateDatabaseHealth:
+    """`state_database_health` is the boot-time answer to "is SQLite usable?".
+
+    A damaged database only announced itself as an opaque 500 on the first write, so
+    the check runs at startup and answers the same question in milliseconds.
+    """
+
+    def test_a_healthy_database_reports_ok(self, tmp_path):
+        from server.state import state_database_health
+
+        SQLiteAgentStore(db_path=tmp_path / "state.db")
+        ok, detail = state_database_health(tmp_path / "state.db")
+        assert ok is True
+        assert detail == "ok"
+
+    def test_a_missing_file_is_not_a_failure(self, tmp_path):
+        from server.state import state_database_health
+
+        ok, detail = state_database_health(tmp_path / "not-created-yet.db")
+        assert ok is True, "the stores create the file on first use"
+        assert "not created" in detail
+
+    def test_a_corrupt_file_reports_the_problem_instead_of_raising(self, tmp_path):
+        from server.state import state_database_health
+
+        broken = tmp_path / "broken.db"
+        broken.write_bytes(b"this is not a sqlite database" * 100)
+
+        ok, detail = state_database_health(broken)
+        assert ok is False
+        assert detail

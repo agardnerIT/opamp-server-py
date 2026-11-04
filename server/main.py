@@ -2,6 +2,7 @@ import asyncio
 import binascii
 import json
 import os
+import sqlite3
 from contextlib import nullcontext
 from pathlib import Path
 import prometheus_client as prom_client
@@ -39,6 +40,7 @@ from proto.opamp_pb2 import (
 )
 from server.state import (
     AgentRegistry,
+    state_database_health,
     AgentState,
     AGENT_REGISTRY,
     COLLECTOR_GROUPS,
@@ -250,6 +252,16 @@ async def lifespan(app: FastAPI):
     # thing you find by reading a JSON endpoint. Pure `metric_values()` in, gauges out.
     posture.publish_metrics()
     _log_audit_startup()
+    # The first write is what surfaces a damaged database (every write becomes a 500
+    # until the container restarts), so say it at boot rather than at that moment.
+    db_ok, db_detail = state_database_health()
+    if db_ok:
+        logger.info(f"state database check: {db_detail}")
+    else:
+        logger.error(
+            f"state database check failed ({db_detail}). Every write will answer 503: "
+            "restart the container, and if it recurs move DATA_DIR off a bind mount."
+        )
     # #98/#108: the log filter (redaction + correlation) is installed by
     # `configure_logging()` at import, before the first line is written. Calling
     # `redaction.install_log_filter()` here would replace the composed patcher and
@@ -464,6 +476,38 @@ app.add_middleware(RequestContextMiddleware)
 # cannot happen inside the lifespan (adding middleware to a started app raises).
 # `init_tracing` is a no-op unless OPAMP_TRACING_ENABLED=true.
 tracing.init_tracing(app)
+
+
+#: How a damaged state database is reported. The operator gets a next step, not a
+#: stack trace: this exact failure (SQLite "database disk image is malformed") turns
+#: every write into a 500 until the container is restarted, and a bare
+#: "Internal Server Error" gives nobody anything to do about it.
+STATE_DB_UNAVAILABLE = (
+    "The server's state database could not be read or written. Nothing was changed. "
+    "Restart the server container (`docker compose restart server`): a restart re-reads "
+    "the write-ahead log and rebuilds the shared-memory index, which is what clears a "
+    "stale WAL view after the container was stopped mid-write. If it comes back, the "
+    "data directory is on a filesystem SQLite cannot use safely — a macOS bind mount "
+    "inside Docker is the usual one — so move it to a named volume."
+)
+
+
+@app.exception_handler(sqlite3.DatabaseError)
+async def state_database_unavailable(request: Request, exc: sqlite3.DatabaseError):
+    """503 with an actionable message instead of an opaque 500.
+
+    Deliberately does not attempt a repair: rewriting a database underneath the
+    process that just failed to read it is how a bad afternoon becomes data loss.
+    The retry is "restart the process", which is both safe and effective.
+    """
+    logger.error(
+        f"state database error on {request.method} {request.url.path}: {exc}"
+    )
+    return JSONResponse(
+        status_code=503,
+        content={"detail": STATE_DB_UNAVAILABLE, "error": str(exc)},
+        headers={"Retry-After": "5"},
+    )
 
 
 @app.get("/auth/status", tags=["auth"], summary="Check whether admin auth is required")

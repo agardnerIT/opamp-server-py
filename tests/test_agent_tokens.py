@@ -252,6 +252,30 @@ class TestListingAndRoles:
         ).status_code == 403
         assert client.get("/agent-tokens").status_code == 401
 
+    def test_a_damaged_state_database_is_a_503_with_a_next_step(self, client, monkeypatch):
+        """The failure an operator actually hit: every write 500'd until a restart.
+
+        SQLite over a Docker bind mount on macOS went into "database disk image is
+        malformed" after the container was stopped mid-write. The database on disk was
+        fine (`PRAGMA integrity_check` returned ok) and a restart cleared it, but the
+        endpoint answered a bare 500 with a stack trace and nothing to do about it.
+        """
+
+        def explode(*_args, **_kwargs):
+            raise sqlite3.DatabaseError("database disk image is malformed")
+
+        monkeypatch.setattr(agent_auth.CREDENTIALS, "add", explode)
+
+        response = client.post("/agent-tokens", headers=admin_headers(), json={})
+
+        assert response.status_code == 503, response.text
+        assert response.headers["Retry-After"] == "5"
+        body = response.json()
+        assert "malformed" in body["error"]
+        # The message has to say what to do: restart clears it, a bind mount is why.
+        assert "restart" in body["detail"].lower()
+        assert "volume" in body["detail"].lower()
+
     def test_minting_is_audited_by_handle_not_by_token(self, client):
         minted = mint_fleet(client, label="prod", max_agents=3)
         audit = client.get("/audit?limit=20", headers=admin_headers()).json()

@@ -174,9 +174,9 @@ curl --max-time 20 --connect-timeout 5 -s localhost:4320/agents | jq '.count, .a
 opampctl agents list --pretty            # same data with names and capability tags
 ```
 
-**WebSocket transport** — replace the `http` block with `ws` (the server needs
-`OPAMP_WS_ENABLED=true`). One block, not both: the extension uses whichever is
-present.
+**WebSocket transport** — replace the `http` block with `ws`. One block, not
+both: the extension uses whichever is present. The server accepts the upgrade by
+default; set `OPAMP_WS_ENABLED=false` to refuse it.
 
 ```yaml
 extensions:
@@ -260,8 +260,11 @@ without it.
 ### Transports
 
 Plain HTTP is the default and is what the collector's `opamp` extension uses
-(`endpoint: http://host:4320/v1/opamp`). Set `OPAMP_WS_ENABLED=true` to accept a
-WebSocket upgrade on the same path. Frames are a base-128 varint header (must be
+(`endpoint: http://host:4320/v1/opamp`). The same path also accepts a WebSocket
+upgrade, which it does by default: an HTTP-only client never sends one, so the
+default costs it nothing, and a WebSocket client needs no server-side setup.
+`OPAMP_WS_ENABLED=false` refuses the upgrade with `1008`. Frames are a base-128
+varint header (must be
 `0`) followed by the protobuf message; messages over `OPAMP_MAX_MESSAGE_BYTES`
 close the socket with `1009`. Both transports run the same message handler, so
 agent state is identical either way.
@@ -376,7 +379,7 @@ returns `spec_version` and the exact server `capabilities` bitmask, so `opampctl
 MCP server and the UI never hardcode either.
 
 Transports: **HTTP** (poll/reply) and **WebSocket** (`OPAMP_WS_ENABLED`, upgrade on
-`/v1/opamp`, #89) — same framing, same message handler, same auth.
+`/v1/opamp`, #89, on by default) — same framing, same message handler, same auth.
 
 | Direction | Capability | Status |
 |---|---|---|
@@ -705,9 +708,14 @@ through it, and `ui/config_view.py` renders it):
   — each is skipped with a debug log naming the key, and the rest are still read.
 - **Parsing is bounded** (the same loader the config validator uses: alias, depth and
   expansion budgets; duplicate keys refused), because the document comes from an agent.
-- **`""` is preferred for display.** The "Collector Configuration" panel shows the `""`
+- **`""` is preferred for display.** The "Configuration" panel shows the `""`
   object when it parses, otherwise the first parseable object, untagged before
   role-tagged. A role marks an alternative representation, not the primary one.
+- **Display accepts JSON as well as YAML.** An osquery agent reports its config as
+  `application/json`; the panel decodes it and shows the `schedule` as-is. The
+  component and agent-type paths stay YAML-only, so an arbitrary JSON document is
+  never mistaken for collector config, and the collector telemetry augmentation is
+  applied only to a collector-shaped document.
 
 A role is carried end-to-end by the push path too: validated (and bounded to 128
 characters), included in the canonical hash **only when set** — so revisions stored
@@ -909,7 +917,11 @@ Lifecycle: `proposed → active → superseded | rolled_back | poisoned`, plus
   (`config.apply.failed` with `reason: auto_reverted`).
 - **Delivery is bounded.** `CONFIG_MAX_DELIVERY_ATTEMPTS` frames per assignment;
   an agent that never acknowledges is surfaced as `unconfirmed` instead of being
-  re-pushed forever.
+  re-pushed forever. The budget is per episode, not permanent:
+  `CONFIG_UNCONFIRMED_RETRY_SECONDS` (default 300, `0` = never) gives an
+  unacknowledged assignment a fresh budget, and a matching `APPLIED` clears it
+  immediately — otherwise an agent whose process restarted, and which therefore
+  reports no hash at all, could never be configured again.
 - **Drift** is visible per agent (`GET /agent/{id}/config` → `drift` with the
   missing YAML paths) and fires **one** `config_drift` alert per (agent, revision),
   never one per poll.
@@ -1014,7 +1026,7 @@ before it runs.
 - **A failure pauses; it never rolls the fleet back.** Rolling back 300 agents
 because one failed is a second outage. The pause carries one reason
 (`failed`, `auto_reverted`, `agent_went_silent`, `unhealthy`,
-`delivery_unconfirmed`, `superseded`) and the summary is "N applied, K failed,
+`config_conflict`, `delivery_unconfirmed`, `superseded`) and the summary is "N applied, K failed,
 paused at batch 2". The two decisions stay human: retry the failed agents (an
 approver `reactivate`, #99) or roll back the applied ones — which runs as its own
 rollout, canary first, gated the same way.
@@ -1356,7 +1368,7 @@ this project's own fixtures name their agents.
 | `UPDATE_CHECK_TIMEOUT_SECONDS` | `5` | GitHub request timeout; one attempt, no retries |
 | `UPDATE_HTTP_PROXY` | *(empty)* | Explicit proxy for the check. The check does not use `HTTP(S)_PROXY` or `.netrc` |
 | `CORS_ORIGINS` | `*` | Comma-separated list of allowed CORS origins (browser clients) |
-| `OPAMP_WS_ENABLED` | `false` | Enable the WebSocket transport on `/v1/opamp` (see [Transports](#transports)) |
+| `OPAMP_WS_ENABLED` | `true` | Accept a WebSocket upgrade on `/v1/opamp` (see [Transports](#transports)). `false` refuses it with `1008`; HTTP is unaffected either way |
 | `OPAMP_MAX_MESSAGE_BYTES` | `67108864` | Max OpAMP message size (64 MiB) on both transports; varint header included. HTTP request bodies are capped after gzip decompression. `/v1/metrics` (OTLP) is not affected |
 | `OPAMP_WS_OUTBOUND_QUEUE` | `32` | Per-connection WebSocket send queue depth; oldest is dropped when full. A dropped config frame is re-sent by reconciliation, never counted as a delivery (#102) |
 | `REPORT_FULL_STATE_MIN_INTERVAL_SECONDS` | `60` | Minimum gap between `ReportFullState` asks for one agent, when its `sequence_num` shows the server missed status. Stops a flapping counter from becoming a request storm; `0` disables the limit (#70) |
@@ -1627,7 +1639,7 @@ The UI signs in the same way the CLI does — `POST /auth/session` — and then 
 | DELETE | `/auth/principals/{id}` | admin | Revoke an identity and close its sessions (row kept, name stays reserved) |
 | GET | `/auth/verify` | viewer | Validate a credential — any role passes (200, 401, or 429 when locked out); failures feed the lockout |
 | POST | `/v1/opamp` | 🔑 | OpAMP protocol endpoint — agents connect here (protobuf). With `OPAMP_AGENT_AUTH=token` the agent must send `Authorization: Bearer <token>`: 401 without a valid one, 403 when the token is for another `instance_uid`. Malformed input (including an empty `instance_uid`) is 400 with a `BAD_REQUEST` error body; a body over `OPAMP_MAX_MESSAGE_BYTES` (after decompression) is 413; an unsupported `Content-Encoding` is 415; when the server is overloaded the request is 503 with `Retry-After` and no state change (#78). The `OpAMP-Instance-UID` header is read and cross-checked against the body (#76); a duplicate uid is answered with a server-generated replacement (#75) |
-| WS | `/v1/opamp` | 🔑 | Same endpoint over WebSocket when `OPAMP_WS_ENABLED=true`; credential checked before `accept()`, refusals close `1008`. Malformed messages (including an empty `instance_uid`) get a `BAD_REQUEST` error frame then close `1002`; oversized frames close `1009`; an overloaded server refuses the upgrade with `503` + `Retry-After` (#78) |
+| WS | `/v1/opamp` | 🔑 | Same endpoint over WebSocket (`OPAMP_WS_ENABLED`, on by default); credential checked before `accept()`, refusals close `1008`. Malformed messages (including an empty `instance_uid`) get a `BAD_REQUEST` error frame then close `1002`; oversized frames close `1009`; an overloaded server refuses the upgrade with `503` + `Retry-After` (#78) |
 | POST | `/v1/metrics` | | OTLP/HTTP metrics ingestion from collectors (JSON or protobuf) |
 | GET | `/agents` | | List agents. Filters: `healthy=true\|false\|unknown`, `status=` (remote config status, or alias `remote_config_status=`), or any description attribute, e.g. `?environment=prod`. Repeated params are OR. Each agent carries a `credential` block |
 | GET | `/agent/types` | | The agent types (profiles) this build recognises, in match order: `name`, `display_name`, `validates_structure`, `content_types`, `default_filename`, `reports`, `detectable`. `otelcol` is an OpenTelemetry Collector; `generic` is any other OpAMP agent, whose config is stored and relayed **without being interpreted** |

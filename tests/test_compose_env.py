@@ -1,20 +1,21 @@
-"""`docker-compose.yml` must actually read `.env`, not just interpolate a subset of it.
+"""`.env` is the single source of truth for configuration; the compose file pins topology.
 
-Compose loads `.env` automatically, but only for the `${VAR:-default}` references
-written out in `environment:`. A variable that is documented in `.env.sample` and
-set in `.env` but never spelled out in the compose file is *silently* dropped: no
-warning, no error, the container simply runs with the built-in default. The
-template shipped that way, and 45 of the 79 documented settings were affected —
-including `CONFIG_AT_REST_KEY`, which the README tells you to put in `.env` and
-which is a prerequisite for config push.
+Two failures this guards against, both of which shipped:
 
-`env_file:` closes that hole: it passes the whole file to the container, so
-`.env` stays the single place an operator edits. `environment:` is kept because
-it is where the documented, secure defaults live and it wins over `env_file:`
-(they read the same file, so they cannot disagree).
+1. **Silent drops.** Compose loads `.env` for `${VAR:-default}` interpolation, but a
+   variable not spelled out in `environment:` never reached the container. 45 of the
+   79 settings documented in `.env.sample` were affected — including
+   `CONFIG_AT_REST_KEY`, which the README tells you to put in `.env`. `env_file:`
+   passes the whole file instead, so documentation, source of truth and runtime
+   agree.
+2. **Two sources of truth.** Restating configuration in `environment:` means the
+   compose default and `.env` can disagree, and the compose default wins — a value
+   you wrote in `.env` silently not applying is the worst version of a default. The
+   only entries allowed there now are container topology (where the UI writes, which
+   host it talks to) and one Docker bootstrap default that `.env` can still override.
 
-These assertions encode the decision, not the mechanism: the file may be
-reorganised, but a documented variable may not become unreachable again.
+`environment:` beats `env_file:` in Compose, which is exactly why the allowlist below
+is asserted rather than trusted.
 """
 
 from __future__ import annotations
@@ -70,6 +71,17 @@ def environment_keys(service: dict) -> set[str]:
     return keys
 
 
+#: Values that describe this compose stack, not the deployment. A container cannot
+#: read either of them from `.env`: the UI writes to a throwaway directory because the
+#: real volume is read-only for it, and it must address the `server` service rather
+#: than the `localhost` that a `.env` copied from `.env.sample` will contain. These may
+#: be hardcoded, and they are the *only* hardcoded settings allowed.
+TOPOLOGY = {
+    "SERVER_ADDRESS",  # which host the UI talks to
+    "DATA_DIR",  # where a read-only-volume service keeps its scratch SQLite
+}
+
+
 def env_file_services() -> list[str]:
     """Services that load the whole `.env`."""
     return [
@@ -102,6 +114,32 @@ def test_a_missing_dot_env_stays_a_supported_posture():
                     f"service `{name}` makes `{ENV_FILE}` mandatory; a missing .env is "
                     "the secure default posture, not an error"
                 )
+
+
+def test_compose_does_not_restate_configuration():
+    """A key in `environment:` wins over `.env`, so a hardcoded one is a lie.
+
+    Allowed: topology, and values interpolated from `.env` itself
+    (`${KEY:-default}`), where the file stays authoritative and compose only supplies
+    the fallback. Everything else belongs in `.env` alone — see the module docstring.
+    """
+    offences = []
+    for name, service in compose()["services"].items():
+        for entry in service.get("environment") or []:
+            if isinstance(entry, dict):
+                key, value = next(iter(entry.items()))
+                value = "" if value is None else str(value)
+            else:
+                key, _, value = str(entry).partition("=")
+            if key in TOPOLOGY or "${" in value:
+                continue
+            offences.append(f"{name}: {key}={value}")
+    assert not offences, (
+        "these settings are hardcoded in docker-compose.yml and therefore override "
+        f"`.env`: {offences}. Configuration has one home; only {sorted(TOPOLOGY)} may "
+        "be pinned here, and any other default must be written "
+        "`${KEY:-default}` so `.env` still wins"
+    )
 
 
 def test_every_documented_variable_can_reach_a_container():

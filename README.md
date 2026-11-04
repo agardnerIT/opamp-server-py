@@ -88,14 +88,21 @@ Access:
 - Server: http://localhost:4320
 - OPA (if enabled): http://localhost:8181
 
-Configuration comes from `.env` (copy `.env.sample` to get one with every
-setting commented). Compose loads it for the `${VAR:-default}` defaults written
-in `docker-compose.yml`, and both services also declare `env_file: .env`, so any
-variable you add there reaches the container even if the compose file never
-mentions it. `environment:` wins where the two overlap, and both read the same
-file, so they cannot disagree. With no `.env` at all the stack still starts in
-read-only mode with a generated admin password — `required: false` keeps that a
-supported posture rather than a boot error.
+Configuration lives in `.env` — that is the only place you edit. Copy `.env.sample`
+to get one with every setting commented, including its default and what it does. Both
+services pass the whole file into the container (`env_file`), so a variable you add
+there reaches the app whether or not `docker-compose.yml` mentions it.
+
+`docker-compose.yml` pins only what a container cannot read from `.env`: where the UI
+keeps its scratch database, and that it reaches the server as the `server` service
+rather than `localhost`. Those two are commented as overrides where they appear.
+Everything else in the compose file is a fallback spelled `${KEY:-default}`, so a
+value in `.env` always wins and there is no second copy of the configuration to drift.
+
+With no `.env` at all the stack still starts: read-only for writes, config push off,
+and a random admin password generated on first boot (`required: false` keeps that a
+supported posture rather than a boot error). The app's built-in defaults are already
+the secure ones, so the missing file changes nothing about the posture.
 
 There is no default admin password. On first start the server generates a random
 one, prints it once in the logs (`docker compose logs server | grep -i "admin
@@ -1352,10 +1359,11 @@ this project's own fixtures name their agents.
 
 ## Environment Variables
 
-Under Compose, set any of these in `.env`: both services declare `env_file: .env`,
-so the whole file reaches the container even when `docker-compose.yml` never names
-the variable. Running the server directly, `server/main.py` loads the same file with
-`python-dotenv` (shell variables win, matching Compose).
+Under Compose, set any of these in `.env` — it is the single source of truth: both
+services load the whole file, and the compose file restates only container topology
+(see the notes there). Running the server directly, `server/main.py` loads the same
+file with `python-dotenv` (shell variables win, matching Compose). The default column
+is the app's own fallback, which is what applies when a line is absent from `.env`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -1368,7 +1376,7 @@ the variable. Running the server directly, `server/main.py` loads the same file 
 | `DATA_DIR` | `data` | SQLite database directory |
 | `ADMIN_PASSWORD` | *(empty)* | Admin password for privileged endpoints (see [API](#api-reference)). Empty = read-only mode; set `ADMIN_PASSWORD_FILE` or `OPAMP_ADMIN_AUTOGENERATE_PASSWORD` instead if you prefer |
 | `ADMIN_PASSWORD_FILE` | *(empty)* | Read the admin password from a file (secret mount) instead of the environment |
-| `OPAMP_ADMIN_AUTOGENERATE_PASSWORD` | `false` | Generate a random admin password on first start, print it once, store it in `$DATA_DIR/admin_password` (0600). `true` in `docker-compose.yml` |
+| `OPAMP_ADMIN_AUTOGENERATE_PASSWORD` | `false` | Generate a random admin password on first start, print it once, store it in `$DATA_DIR/admin_password` (0600). The compose server defaults it to `true` so a fresh stack has a way in; `.env` still overrides |
 | `ADMIN_SESSION_TTL_SECONDS` | `3600` | Absolute lifetime of a session issued by `POST /auth/session` (#95) |
 | `ADMIN_SESSION_IDLE_SECONDS` | `900` | Idle timeout for a session; every use refreshes it (at most one write a minute) |
 | `ADMIN_LOGIN_MAX_ATTEMPTS` | `5` | Failed logins per `(name, client IP)` before lockout starts |
@@ -1493,7 +1501,7 @@ Run OPA server, then set `OPA_ENABLED=true`.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OPA_ENABLED` | `false` | Enable OPA compliance |
-| `OPA_URL` | `http://localhost:8181` | OPA server URL |
+| `OPA_URL` | `http://localhost:8181` | OPA server URL (with the compose `opa` profile it is `http://opa:8181`, the service name) |
 | `POLICIES_DIR` | `policies/tags` | Policies directory |
 
 ### Policies

@@ -20,7 +20,14 @@ from functools import wraps
 
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).parent.parent / ".env")
+# The repository's `.env` is the single source of truth for a *deployment*. It is
+# deliberately not authoritative for a process that imports this module to test
+# something else: a developer with `OPAMP_CONFIG_PUSH_ENABLED=true` in their `.env`
+# would otherwise find the posture tests red (or, worse, green for the wrong reason)
+# for reasons that exist nowhere in the code. `OPAMP_NO_DOTENV` is the opt-out, set by
+# `tests/conftest.py` before this module is imported.
+if not os.environ.get("OPAMP_NO_DOTENV"):
+    load_dotenv(Path(__file__).parent.parent / ".env")
 
 # #108: configure loguru before importing anything that logs at import time (the
 # alert store, the persistent agent registry). In a container this is what makes

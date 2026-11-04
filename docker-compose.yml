@@ -1,8 +1,10 @@
 # Secure-by-default deployment template.
 #
-# Nothing here ships a usable default credential: with no .env the server starts
-# in read-only mode, generates a random admin password on first boot, and keeps
-# config push off. See README → "Before you expose this server".
+# Configuration lives in `.env` (start from `.env.sample`); this file only wires the
+# services together and pins the two facts a container cannot read from it. With no
+# .env the app's own defaults apply: read-only until a credential exists, a random
+# admin password generated on first boot, config push off, agent tokens required.
+# See README → "Before you expose this server".
 #
 # NOTE: Image tags are pinned to the release these compose files ship with.
 # Current version: 0.0.6
@@ -19,70 +21,27 @@ services:
     # of this mapping to 0.0.0.0 and firewall 4320 to the proxy only.
     ports:
       - "127.0.0.1:4320:4320"
-    # `.env` is read twice, on purpose, and the two reads are not redundant:
-    #   1. Compose itself loads `.env` to expand the `${VAR:-default}` references in
-    #      `environment:` below, which is why the documented defaults live here.
-    #   2. `env_file` passes the *whole* file into the container. Without this, `.env`
-    #      only sets the variables spelled out below and silently drops the rest —
-    #      CONFIG_AT_REST_KEY, the CONFIG_PUSH_* bounds, OPAMP_AUDIT_*, UPDATE_CHECK
-    #      and ~40 others you would reasonably expect to work.
-    # `environment:` wins over `env_file:`, and both read the same file, so the two
-    # cannot disagree. `required: false` keeps the secure default intact: no `.env`
-    # is a supported posture (read-only, random admin password), not a boot failure.
+    # `.env` is the single source of truth for configuration. The whole file is
+    # passed in (`env_file`), so every setting documented in `.env.sample` reaches
+    # the server whether or not it is named below — including the ones a
+    # hand-maintained list eventually drops (CONFIG_AT_REST_KEY, the CONFIG_PUSH_*
+    # bounds, OPAMP_AUDIT_*, UPDATE_CHECK...).
+    #
+    # `environment:` is therefore almost empty on purpose. It holds only what a
+    # container cannot take from `.env`: its own bootstrap and its own topology.
+    # Auth, TLS posture, timeouts, logging, tracing and retention all live in
+    # `.env`, where they are documented, and the app already defaults to the same
+    # secure values, so nothing here needs restating. A setting in two places is a
+    # setting that will disagree with itself — see README → "Environment Variables".
     env_file:
       - path: .env
         required: false
     environment:
-      - SERVER_HTTP_SCHEME=http
-      - SERVER_ADDRESS=0.0.0.0
-      - SERVER_PORT=4320
-      # Admin auth: never a static placeholder. Set ADMIN_PASSWORD in .env to
-      # choose your own; otherwise a random one is generated on first start,
-      # printed once in the logs, and stored in ./data/admin_password (0600).
-      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      # Docker bootstrap, not a setting to configure here: a container that starts
+      # with no password is read-only, and `docker compose up` would then have no way
+      # in on a fresh clone. `.env` still wins — set
+      # OPAMP_ADMIN_AUTOGENERATE_PASSWORD=false there and the server stays read-only.
       - OPAMP_ADMIN_AUTOGENERATE_PASSWORD=${OPAMP_ADMIN_AUTOGENERATE_PASSWORD:-true}
-      - ADMIN_PASSWORD_FILE=${ADMIN_PASSWORD_FILE:-}
-      # Sessions, lockout and proxy trust (#95). Named principals with roles are
-      # created with `opampctl auth principals create ...` and live in the data
-      # volume; the generated password above only bootstraps the first one.
-      - ADMIN_SESSION_TTL_SECONDS=${ADMIN_SESSION_TTL_SECONDS:-3600}
-      - ADMIN_SESSION_IDLE_SECONDS=${ADMIN_SESSION_IDLE_SECONDS:-900}
-      - ADMIN_LOGIN_MAX_ATTEMPTS=${ADMIN_LOGIN_MAX_ATTEMPTS:-5}
-      - ADMIN_LOGIN_MAX_BACKOFF_SECONDS=${ADMIN_LOGIN_MAX_BACKOFF_SECONDS:-900}
-      # true only when the nginx/caddy profile terminates the connection: it is
-      # what makes the real client IP visible to the login lockout (#95).
-      - TRUST_PROXY_HEADERS=${TRUST_PROXY_HEADERS:-false}
-      # Config push (#96): off unless the whole posture is secure.
-      - OPAMP_CONFIG_PUSH_ENABLED=${OPAMP_CONFIG_PUSH_ENABLED:-false}
-      # Observability (#108)
-      - LOG_FORMAT=${LOG_FORMAT:-json}
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - LOG_FILE=${LOG_FILE:-}
-      - OPAMP_TRACING_ENABLED=${OPAMP_TRACING_ENABLED:-false}
-      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
-      - OTEL_SERVICE_NAME=${OTEL_SERVICE_NAME:-opamp-server}
-      - OTEL_TRACES_SAMPLER=${OTEL_TRACES_SAMPLER:-parentbased_always_on}
-      - OPAMP_ALLOW_INSECURE_CONFIG_PUSH=${OPAMP_ALLOW_INSECURE_CONFIG_PUSH:-false}
-      # Agent tokens (#126): required. Mint one with
-      #   opampctl agent-tokens create --expires-in-days 30 --max-agents 50
-      # and paste the returned headers block into each agent's config. Leaving this
-      # unset is the secure default; OPAMP_ALLOW_UNAUTHENTICATED_AGENTS=true is the
-      # explicit (and loudly reported) way to run a tokenless endpoint locally.
-      - OPAMP_AGENT_AUTH=${OPAMP_AGENT_AUTH:-token}
-      - OPAMP_ALLOW_UNAUTHENTICATED_AGENTS=${OPAMP_ALLOW_UNAUTHENTICATED_AGENTS:-false}
-      - PUBLIC_URL=${PUBLIC_URL:-}
-      - TLS_TERMINATED_UPSTREAM=${TLS_TERMINATED_UPSTREAM:-false}
-      - OPA_ENABLED=${OPA_ENABLED:-false}
-      - OPA_URL=${OPA_URL:-http://opa:8181}
-      - AGENT_TIMEOUT_SECONDS=${AGENT_TIMEOUT_SECONDS:-180}
-      - AGENT_TIMEOUT_INTERVAL_MARGIN=${AGENT_TIMEOUT_INTERVAL_MARGIN:-3}
-      - AGENT_FIRST_CONTACT_SECONDS=${AGENT_FIRST_CONTACT_SECONDS:-900}
-      - CORS_ORIGINS=${CORS_ORIGINS:-*}
-      # WebSocket transport (#89). On by default: a client that only speaks HTTP
-      # never attempts an upgrade, so the default costs it nothing.
-      - OPAMP_WS_ENABLED=${OPAMP_WS_ENABLED:-true}
-      - OPAMP_MAX_MESSAGE_BYTES=${OPAMP_MAX_MESSAGE_BYTES:-67108864}
-      - OPAMP_WS_OUTBOUND_QUEUE=${OPAMP_WS_OUTBOUND_QUEUE:-32}
     volumes:
       # SQLite lives on a **named volume**, not a bind mount (#132).
       #
@@ -118,22 +77,24 @@ services:
     # 8501 unpublished.
     ports:
       - "127.0.0.1:8501:8501"
-    # Same `.env`, same rules as the server above: the UI reads a handful of the
-    # server's settings (posture, reports, update checks) through imported helpers,
-    # so a variable added to `.env` must not be invisible to it.
+    # Same `.env` as the server. The two entries below are the exception, because
+    # they describe this compose stack rather than the deployment: where the UI
+    # writes, and which host the API answers on. Taking them from `.env` would put
+    # the `SERVER_ADDRESS=localhost` of a local run inside `opamp-network` and point
+    # the UI at itself. Compose wins over `env_file` for exactly these two; the
+    # scheme and port need no entry since the UI defaults to `http` and `4320`.
     env_file:
       - path: .env
         required: false
     environment:
-      - SERVER_HTTP_SCHEME=http
+      # The server is a service name inside the compose network, never localhost.
+      # A `SERVER_ADDRESS` in `.env` is ignored here on purpose.
       - SERVER_ADDRESS=server
-      - SERVER_PORT=4320
       # The UI imports server helpers (posture, manifests, reports) that create
       # their SQLite stores at import. The real data volume is read-only, so use
-      # a throwaway writable directory; the UI reads fleet data over HTTP.
+      # a throwaway writable directory; the UI reads fleet data over HTTP. A
+      # `DATA_DIR` in `.env` (e.g. `data`) is ignored here on purpose.
       - DATA_DIR=/tmp/opamp-ui-data
-      # #46: public release-email Worker. Empty means the built-in default.
-      - UPDATE_SUBSCRIBE_URL=${UPDATE_SUBSCRIBE_URL:-}
     volumes:
       # Read-only, and the same named volume the server writes: the UI imports
       # server-side helpers (reports, manifests, posture) that resolve DATA_DIR. It
@@ -170,8 +131,9 @@ services:
   #   restart: unless-stopped
 
   # Optional: OPA for compliance checking
-  # If you enable this, set OPA_ENABLED=true
-  # in .env
+  # If you enable this, set OPA_ENABLED=true and OPA_URL=http://opa:8181 in .env
+  # (the container's own default is http://localhost:8181, which is not where the
+  # OPA container is).
   # opa:
   #   image: openpolicyagent/opa:latest
   #   container_name: opamp-opa

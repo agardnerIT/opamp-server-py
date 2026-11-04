@@ -19,11 +19,18 @@ same guarantee without fourteen copies to keep in sync.
 from __future__ import annotations
 
 import copy
+import os
 
-import pytest
-from fastapi.testclient import TestClient
+# Before anything imports `server.main`: a developer's `.env` configures a deployment,
+# not a test run. Without this, `OPAMP_CONFIG_PUSH_ENABLED=true` in a local `.env`
+# flips every config-push posture test red — the cause lives in a file the failing
+# test never mentions, and CI (which has no `.env`) never sees it.
+os.environ["OPAMP_NO_DOTENV"] = "1"
 
-from server import (
+import pytest  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+
+from server import (  # noqa: E402
     agent_auth,
     alerts,
     audit,
@@ -33,7 +40,7 @@ from server import (
     rollout,
     updates,
 )
-from server.main import app
+from server.main import app  # noqa: E402
 from server.state import (
     AGENT_REGISTRY,
     COLLECTOR_GROUPS,

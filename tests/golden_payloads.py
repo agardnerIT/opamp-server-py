@@ -162,12 +162,14 @@ def capture() -> Dict[str, Any]:
     payloads = []
     for agent in built:
         payload = agent.to_dict()
-        # Added by #118; absent on the pre-refactor side of the comparison.
+        # Added by #118 and #135; absent on the pre-refactor side of the comparison.
         for key in (
             "agent_type",
             "agent_type_source",
             "agent_type_pinned",
             "agent_type_warning",
+            "health_status",
+            "health_error",
         ):
             payload.pop(key, None)
         payloads.append(payload)

@@ -71,6 +71,8 @@ def agent_message(
     status: str | None = None,
     hash_b64: str | None = None,
     restart_capable: bool = True,
+    health_status: str = "",
+    health_error: str = "",
 ) -> bytes:
     msg = opamp_pb2.AgentToServer()
     msg.instance_uid = bytes.fromhex(agent_id)
@@ -84,6 +86,11 @@ def agent_message(
             opamp_pb2.AgentCapabilities.AgentCapabilities_AcceptsRestartCommand
         )
     msg.health.healthy = True
+    if health_status:
+        # #135: an agent-defined status that rides alongside `healthy: true`.
+        msg.health.status = health_status
+    if health_error:
+        msg.health.last_error = health_error
     if status:
         msg.remote_config_status.status = getattr(
             opamp_pb2.RemoteConfigStatuses, f"RemoteConfigStatuses_{status}"
@@ -511,6 +518,19 @@ def test_resume_reopens_a_paused_rollout_and_is_approver_only(client, registered
     assert resumed.status_code == 200, resumed.text
     assert resumed.json()["status"] == "running"
     assert resumed.json()["paused_reason"] is None
+
+
+def test_the_agent_view_exposes_the_status_the_gate_pauses_on(client, registered):
+    """#135: `healthy: true` plus `config_conflict` is the pause; the status is the only
+    thing that distinguishes it, so it must not be visible only in SQLite."""
+    poll(
+        health_status="config_conflict",
+        health_error="the same query name is scheduled more than once: battery_stats",
+    )
+    detail = client.get(f"/agent/{AGENT_ID}", headers=admin_headers()).json()
+    assert detail["healthy"] is True
+    assert detail["health_status"] == "config_conflict"
+    assert "battery_stats" in detail["health_error"]
 
 
 # ------------------------------------------------------------------ #79: /health

@@ -623,3 +623,33 @@ offer the subtract-our-own-source view. (b) The object-name inference from the p
 entry is still not implemented, so an osquery push is still keyed `""`.
 - Suite: **1538 passed**, 0 failed (the 6 posture failures noted earlier did not
   reproduce in this run; push posture was on).
+
+## The pause that could not clear, and the status nobody could see, 2026-11-05
+
+The osquery rollout from the entry above stayed paused after the host was fixed. The
+host *was* fixed: `osquery.config_plugin=opamp`, exactly one `battery_stats` in
+`osquery_schedule`, and the reported effective config byte-identical to the pushed
+`osquery.json`. Two defects kept it stuck, one on each side.
+
+- **The agent's `config_conflict` was sticky** (`osquery-opamp`, separate repo, commit
+  `85cf90f`). The status was set in `_apply` and nowhere else. The operator's fix is a
+  *state* change — delete the local query, or switch the daemon to pull mode — so no
+  config is applied, and the agent went on reporting `config_conflict` for a schedule
+  that no longer had a duplicate; the server's gate therefore re-paused on every tick.
+  `refresh_state` now re-derives the status when the duplicate set changes, via one
+  `_conflict_error()` shared with the apply path. Other statuses (`config_failed`,
+  `server_error`, `restart_refused`) are untouched.
+- **`ComponentHealth.status` was not in the API.** `AgentState.to_dict()` exposed
+  `healthy` but not the status/error, so the single field the rollout gate pauses on was
+  readable only from SQLite — a pause citing a status no operator, CLI or UI could
+  inspect. `to_dict()` now carries `health_status` and `health_error` (camelCase
+  `lastError` from `MessageToDict` and the snake spelling both accepted, strings only).
+  Pinned by `test_the_agent_view_exposes_the_status_the_gate_pauses_on`; the move golden
+  pops the two new keys the way it already pops the `agent_type_*` ones.
+- Also fixed here: a `config_conflict` pause reported "0 applied" because `_pause`
+  rewrote an `applied` agent to `paused` (`2948824`).
+- Two red herrings, for the record: osqueryd runs a **watcher + worker** (the two root
+  pids, `--flagfile` on the parent only; `osquery.watcher_pid`/`osquery.pid` prove it),
+  so "two daemons" was normal; and `--ephemeral` processes pointed at `/tmp` sockets are
+  leftovers from the test suite, not config sources.
+- Suite: **1539 passed**, 0 failed; `osquery-opamp` 170 passed, 2 skipped.

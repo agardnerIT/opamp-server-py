@@ -3152,9 +3152,18 @@ class AgentState:
         raw value deliberately, not by accident.
         """
         effective_config, redacted_paths = self.redacted_effective_config()
+        health = self.health if isinstance(self.health, dict) else {}
+        health_status = health.get("status")
+        health_error = health.get("lastError") or health.get("last_error")
         return {
             "id": self.agent_id,
             "healthy": self.healthy,
+            # #135: the rollout gate pauses on `ComponentHealth.status` — an agent
+            # reporting `config_conflict` keeps `healthy: true` — so the field the gate
+            # reads has to be readable. Without it a pause cites a status nobody can
+            # inspect, and "did the agent recover?" is answerable only from SQLite.
+            "health_status": health_status if isinstance(health_status, str) else None,
+            "health_error": health_error if isinstance(health_error, str) else None,
             "connected_at": self.connected_at.isoformat(),
             "last_heartbeat": self.last_heartbeat.isoformat(),
             "report_interval_seconds": (

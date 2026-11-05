@@ -1,0 +1,81 @@
+# Local development overlay. It is deliberately **not** named
+# `docker-compose.override.yml`: the base file pins released images for deployment,
+# and silently replacing them with a local build would make `docker compose up` mean
+# different things to a developer and an operator.
+#
+# Use it explicitly:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+#
+# The base services declare only `image:`, which is why `docker compose up --build`
+# on its own does nothing: Compose has no `build:` section to build. This overlay
+# adds one, tags the result locally (`:dev`), and bind-mounts the source so edits
+# reload without a rebuild.
+#
+# Adding a **new** Streamlit page file needs `docker compose ... restart ui` once:
+# Streamlit hot-reloads changed modules, but it does not notice a page that no
+# running script has imported yet. Editing an existing page hot-reloads normally.
+
+services:
+  server:
+    image: opamp-server-py-server:dev
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    environment:
+      # Read-only source mounts cannot take a __pycache__ write; skip bytecode.
+      - PYTHONDONTWRITEBYTECODE=1
+    volumes:
+      # Source over the image. The named data volume from the base file stays at
+      # /app/data; these mounts only shadow the code that the image copied in.
+      - ./server:/app/server:ro
+      - ./proto:/app/proto:ro
+      - ./policies:/app/policies:ro
+      - ./collector:/app/collector:ro
+    command:
+      - python
+      - -m
+      - uvicorn
+      - server.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "4320"
+      - --ws-max-size
+      - "67108864"
+      - --reload
+      - --reload-dir
+      - /app/server
+      - --reload-dir
+      - /app/proto
+      - --reload-dir
+      - /app/policies
+
+  ui:
+    image: opamp-server-py-ui:dev
+    build:
+      context: .
+      dockerfile: Dockerfile.ui
+    volumes:
+      - ./ui:/app/ui:ro
+      - ./server:/app/server:ro
+      - ./proto:/app/proto:ro
+      - ./policies:/app/policies:ro
+      - ./collector:/app/collector:ro
+      - ./.streamlit:/app/.streamlit:ro
+    environment:
+      - PYTHONDONTWRITEBYTECODE=1
+      # Streamlit's default is to keep the old script on disk changes. For a
+      # development stack that is exactly wrong.
+      - STREAMLIT_SERVER_RUN_ON_SAVE=true
+      # Docker Desktop bind mounts do not always emit inotify events. Polling is
+      # slower but reliable; the UI is small.
+      - STREAMLIT_SERVER_FILE_WATCHER_TYPE=poll
+    command:
+      - streamlit
+      - run
+      - ui/app.py
+      - --server.port=8501
+      - --server.address=0.0.0.0
+      - --server.headless=true
+      - --server.runOnSave=true

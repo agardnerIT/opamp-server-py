@@ -113,6 +113,60 @@ with `docker compose cp server:/app/data/admin_password .`. Set `ADMIN_PASSWORD`
 `.env` to choose your own. Both ports bind to `127.0.0.1` on purpose — see [Before
 you expose this server](#before-you-expose-this-server).
 
+### Developing with Docker (local source, hot reload)
+
+`docker-compose.yml` references **published images** (`ghcr.io/…:0.0.6`). Those
+services have no `build:` section, so `docker compose up --build` has nothing to
+build — Compose pulls the pinned image again and your local changes never reach the
+container. That is also why the sidebar keeps showing the old version: the version is
+`server/version.py` (kept in sync with `pyproject.toml` by `tests/test_version.py`),
+not a build stamp, so `0.1.0` means "this checkout has not bumped the version", not
+"the image is stale".
+
+Use the development overlay, which builds the local Dockerfiles and bind-mounts the
+source with autoreload:
+
+```bash
+# One command, every time during development
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+
+# If you want plain `docker compose up` to use the overlay for this shell:
+export COMPOSE_FILE=docker-compose.yml:docker-compose.dev.yml
+docker compose up --build
+```
+
+The overlay tags the local builds `opamp-server-py-server:dev` and
+`opamp-server-py-ui:dev`, so it does not overwrite the pinned release images. It
+also:
+
+- bind-mounts `server/`, `proto/`, `policies/`, `collector/`, `ui/` and `.streamlit/`
+  into the containers, so **editing an existing file hot-reloads** (uvicorn
+  `--reload` for the server, Streamlit `runOnSave` + polling for the UI);
+- keeps the `opamp-data` named volume at `/app/data`, so the database is not reset by
+  a rebuild.
+
+Things that still need a container restart rather than a hot reload:
+
+- **A new Streamlit page file** (e.g. `ui/pages/3_Groups.py`): Streamlit reloads
+  changed modules, but it does not notice a page that no running script has imported
+  yet. Run `docker compose -f docker-compose.yml -f docker-compose.dev.yml restart ui`
+  once after adding one.
+- **Dependency or Dockerfile changes** (`requirements*.txt`, `Dockerfile.*`): rebuild
+  with `--build` (no need for `--no-cache` unless the base image itself changed).
+- **New Python packages** must be added to `requirements.txt` / `requirements-ui.txt`
+  and rebuilt; the bind mount only shadows source files.
+
+Verify the new surface is live:
+
+```bash
+curl --max-time 20 --connect-timeout 5 -s localhost:4320/openapi.json | grep -o '"/agents/query/schema"'
+docker compose -f docker-compose.yml -f docker-compose.dev.yml logs -f ui
+```
+
+The sidebar should now show **Groups**. `docker compose down` is not needed between
+code changes; `up -d --build` recreates only what changed. Avoid `down -v` unless you
+intend to delete the `opamp-data` volume (database and generated admin password).
+
 ### Manual Setup
 
 #### Server

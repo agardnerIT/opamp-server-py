@@ -150,6 +150,23 @@ class FakeServer:
                 },
             )
         if method == "GET" and url.endswith("/agents"):
+            params = kwargs.get("params") or {}
+            query = params.get("q")
+            if query:
+                if not str(query).lstrip().upper().startswith("SELECT"):
+                    return FakeResponse(
+                        422,
+                        {"detail": {"message": "query must start with SELECT"}},
+                    )
+                # Tiny stand-in for the server: an id literal narrows the list, any
+                # other query returns the whole fleet. The real filtering is tested in
+                # tests/test_agent_query.py; here we only prove the page sends it.
+                selected = [a for a in self.agents if a.get("id") and a["id"] in query]
+                selected = selected or self.agents
+                return FakeResponse(
+                    200,
+                    {"agents": selected, "count": len(selected), "query": query},
+                )
             return FakeResponse(200, {"agents": self.agents, "count": len(self.agents)})
         # The agent detail view, through the verb the Remote Config prefill uses (#131).
         if method == "GET" and "/agent/" in url:
@@ -384,6 +401,20 @@ class FakeServer:
                 },
             )
         if url.endswith("/agents"):
+            params = kwargs.get("params") or {}
+            query = params.get("q")
+            if query:
+                if not str(query).lstrip().upper().startswith("SELECT"):
+                    return FakeResponse(
+                        422,
+                        {"detail": {"message": "query must start with SELECT"}},
+                    )
+                selected = [a for a in self.agents if a.get("id") and a["id"] in query]
+                selected = selected or self.agents
+                return FakeResponse(
+                    200,
+                    {"agents": selected, "count": len(selected), "query": query},
+                )
             return FakeResponse(200, {"agents": self.agents, "count": len(self.agents)})
         if "/agent/" in url:
             return self._agent_detail(url)
@@ -1417,6 +1448,66 @@ def test_an_unreachable_server_is_not_reported_as_a_configuration_problem(server
     assert "unreachable" in body
     assert "connection refused" in body
     assert not app.code, "a snippet would send a new user looking in the wrong place"
+
+
+# --------------------------------------------------- SQL search on the agent list
+
+
+def test_the_agent_list_has_a_sql_search_bar_that_filters_the_table(server):
+    """#132: search belongs where the agents are, not only on a separate page."""
+    first = fake_agent("ab" * 16)
+    second = fake_agent("cd" * 16)
+    server.agents = [first, second]
+    app = signed_in(AGENTS_PAGE)
+    app.run()
+    assert not app.exception, app.exception
+
+    assert any(widget.key == "agents_sql" for widget in app.text_input)
+    app.text_input(key="agents_sql").input(
+        "SELECT * FROM agents WHERE id = '" + second["id"] + "'"
+    )
+    [button for button in app.button if button.label == "Search"][0].click().run()
+    assert not app.exception, app.exception
+    body = texts(app)
+    assert "Showing 1 of 2 agent(s)" in body
+    assert second["id"][:16] in body
+    assert first["id"][:16] not in body
+
+
+def test_the_agent_list_search_explains_a_refused_query(server):
+    server.agents = [fake_agent()]
+    app = signed_in(AGENTS_PAGE)
+    app.run()
+    app.text_input(key="agents_sql").input("DELETE FROM agents")
+    [button for button in app.button if button.label == "Search"][0].click().run()
+    assert not app.exception, app.exception
+    body = texts(app)
+    assert "SQL search refused" in body
+    assert "query must start with SELECT" in body
+
+
+def test_the_agent_list_can_load_a_saved_query_by_group(server):
+    server.agents = [fake_agent("ab" * 16)]
+    server.groups = [
+        group_row(
+            name="prod-query",
+            selector_kind="query",
+            definition={},
+            query="SELECT * FROM agents WHERE environment = 'production'",
+        )
+    ]
+    app = signed_in(
+        AGENTS_PAGE,
+        agents_group_pick="prod-query",
+    )
+    app.run()
+    assert not app.exception, app.exception
+    picker = app.selectbox(key="agents_group_pick")
+    assert "prod-query" in picker.options
+    [button for button in app.button if button.label == "Load group"][0].click().run()
+    assert not app.exception, app.exception
+    assert app.text_input(key="agents_sql").value.endswith("environment = 'production'")
+    assert "matching" in texts(app)
 
 
 # ------------------------------------------------- collector groups in the UI (#111)

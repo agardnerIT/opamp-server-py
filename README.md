@@ -1051,8 +1051,10 @@ The SQL schema is deliberately small: `agents` with core columns (`id`, `healthy
 per description attribute** (`environment`, `host_arch`, `"os.type"`, …). Only
 `SELECT` is accepted; writes, `PRAGMA`, `ATTACH` and unknown functions are refused.
 `GET /agents/query/schema` returns the columns plus the values live agents actually
-report, which is what powers the UI's suggestions. Legacy #111 filter-document groups
-still work and can be rewritten as SQL with `groups update --query`.
+report, which is what powers the UI's suggestions. The **Agents** page carries the
+same SQL search bar (plus a loader for saved SQL groups), so filtering and saving a
+group happen where the fleet is. Legacy #111 filter-document groups still work and can
+be rewritten as SQL with `groups update --query`.
 
 Four deliberate refusals, each closing a way a "saved filter" feature turns into an
 outage:

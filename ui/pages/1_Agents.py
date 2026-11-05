@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import streamlit as st
@@ -10,6 +11,7 @@ from ui.shared import (
     MINTED_TOKEN_KEY,
     ROLE_ADMIN,
     ROLE_OPERATOR,
+    ROLE_VIEWER,
     SERVER_URL,
     agent_auth_mode,
     agent_auth_note,
@@ -153,6 +155,60 @@ def _empty_fleet():
         "every request it receives, so a missing agent is almost always a config or "
         "network question, not a server one."
     )
+
+
+# ---------------------------------------------------------- SQL agent search (#132)
+
+
+def _apply_agent_query():
+    """Callback: the button's click is the moment the typed query becomes active.
+
+    Doing this in a callback rather than after the widget matters: Streamlit forbids
+    assigning to a widget's own session key after that widget has been instantiated,
+    and the search box has to stay editable while a previous result is still shown.
+    """
+    st.session_state["agents_active_query"] = (
+        st.session_state.get("agents_sql") or ""
+    ).strip() or None
+
+
+def _clear_agent_query():
+    st.session_state["agents_sql"] = ""
+    st.session_state["agents_active_query"] = None
+
+
+def _insert_agent_suggestion():
+    suggestion = st.session_state.get("agents_sql_suggestion")
+    if suggestion:
+        st.session_state["agents_sql"] = suggestion
+
+
+def _load_agent_group():
+    name = st.session_state.get("agents_group_pick")
+    query = (st.session_state.get("agents_group_queries") or {}).get(name)
+    if query:
+        st.session_state["agents_sql"] = query
+        st.session_state["agents_active_query"] = query
+
+
+def _run_agent_query(sql):
+    """Return `(agents, error)` for a SQL selection. Never raises into the page."""
+    try:
+        response = requests.get(
+            f"{SERVER_URL}/agents", params={"q": sql}, timeout=10
+        )
+        try:
+            payload = response.json()
+        except Exception:
+            payload = {}
+        if response.status_code == 200:
+            return payload.get("agents") or [], None
+        detail = payload.get("detail") if isinstance(payload, dict) else payload
+        if isinstance(detail, dict):
+            detail = detail.get("message") or json.dumps(detail)
+        return [], str(detail or f"HTTP {response.status_code}")
+    except Exception as exc:
+        return [], str(exc)
 
 
 agent_id_param = st.query_params.get("agent_id")
@@ -541,17 +597,145 @@ if agent_id_param:
         st.caption("No effective config reported by this agent")
 
 else:
-    agents = st.session_state.get("agents_data", {}).get("agents", [])
-    
-    if agents:
-        st.header("Agent List")
-        st.caption(f"Showing {len(agents)} agent(s)")
-    else:
+    all_agents = st.session_state.get("agents_data", {}).get("agents", [])
+
+    if not all_agents:
         _empty_fleet()
         # Nothing below this line (view-mode radio, property grouping) means anything
         # for an empty fleet, and the old trailing "No agents connected" info was a
         # second, worse copy of the same message.
         st.stop()
+
+    st.header("Agent List")
+
+    # ---------------------------------------------------------- SQL search (#132)
+    # The list is the search interface: type a SELECT, see the matching agents, and
+    # only then decide whether the query is worth saving as a group. Suggestions are
+    # built from the live schema, so `host_arch = 'amd64'` is offered because an
+    # agent reported that value, not because it was hard-coded here.
+    schema = {}
+    try:
+        schema_response = requests.get(
+            f"{SERVER_URL}/agents/query/schema", timeout=5
+        )
+        if schema_response.status_code == 200:
+            schema = schema_response.json() or {}
+    except Exception:
+        schema = {}
+    examples = schema.get("examples") or [
+        "SELECT * FROM agents",
+        "SELECT * FROM agents WHERE healthy = 1",
+    ]
+
+    if "agents_sql" not in st.session_state:
+        st.session_state["agents_sql"] = ""
+
+    with st.container(border=True):
+        st.markdown("**Search agents with SQL**")
+        st.caption(
+            "A read-only `SELECT * FROM agents WHERE ...` over the live fleet. "
+            "Description attributes are columns (`host_arch`, `environment`, "
+            "`\"os.type\"`, …); the suggestions are the columns and values this "
+            "fleet actually reports. Save a query as a group on the **Groups** page."
+        )
+        suggestion_cols = st.columns([4, 1])
+        with suggestion_cols[0]:
+            st.selectbox(
+                "Suggestions from the live fleet",
+                options=examples,
+                key="agents_sql_suggestion",
+                label_visibility="collapsed",
+            )
+        with suggestion_cols[1]:
+            st.button(
+                "Insert",
+                key="agents_sql_insert",
+                on_click=_insert_agent_suggestion,
+                use_container_width=True,
+            )
+        st.text_input(
+            "SQL selection",
+            key="agents_sql",
+            placeholder="SELECT * FROM agents WHERE host_arch = 'amd64'",
+            label_visibility="collapsed",
+            # Enter in a search box should search, not require a second click.
+            on_change=_apply_agent_query,
+        )
+
+        # "Find by group" belongs on the search interface too: a saved query is just a
+        # search someone already wrote. Only SQL-backed groups can be loaded as text;
+        # legacy filter-document groups are handled on the Groups page.
+        session = get_session()
+        if session is not None and not session.expired():
+            groups_response = admin_request(
+                "GET", "/groups", required_role=ROLE_VIEWER
+            )
+            group_rows = []
+            if groups_response is not None and groups_response.status_code == 200:
+                group_rows = (groups_response.json() or {}).get("groups") or []
+            query_groups = {
+                row["name"]: row.get("query")
+                for row in group_rows
+                if row.get("query")
+            }
+            st.session_state["agents_group_queries"] = query_groups
+            if query_groups:
+                group_cols = st.columns([4, 1])
+                with group_cols[0]:
+                    st.selectbox(
+                        "Find by group",
+                        options=[""] + sorted(query_groups),
+                        format_func=lambda value: (
+                            "— load a saved query —" if not value else value
+                        ),
+                        key="agents_group_pick",
+                        label_visibility="collapsed",
+                    )
+                with group_cols[1]:
+                    st.button(
+                        "Load group",
+                        key="agents_group_load",
+                        on_click=_load_agent_group,
+                        use_container_width=True,
+                    )
+
+        action_cols = st.columns([1, 1, 4])
+        with action_cols[0]:
+            st.button(
+                "Search",
+                key="agents_sql_search",
+                type="primary",
+                on_click=_apply_agent_query,
+                use_container_width=True,
+            )
+        with action_cols[1]:
+            st.button(
+                "Clear",
+                key="agents_sql_clear",
+                on_click=_clear_agent_query,
+                use_container_width=True,
+            )
+
+    active_query = st.session_state.get("agents_active_query")
+    agents = all_agents
+    if active_query:
+        matched, error = _run_agent_query(active_query)
+        if error:
+            st.error(f"SQL search refused: {error}")
+            st.stop()
+        agents = matched
+        st.caption(
+            f"Showing {len(agents)} of {len(all_agents)} agent(s) matching "
+            f"`{active_query}`"
+        )
+        if not agents:
+            st.info(
+                "No agents matched. Check the attribute names in the suggestions — "
+                "an unknown attribute matches nothing rather than failing the query."
+            )
+            st.stop()
+    else:
+        st.caption(f"Showing {len(agents)} agent(s)")
 
     view_mode_options = ["Table", "By Property"]
     saved_view_mode = st.query_params.get("view_mode", "Table")

@@ -15,6 +15,10 @@
  *  2. The rerun after a search carried the *pre-submit* `value`, and the editor
  *     adopted it, so the box emptied as soon as the query ran.
  *  3. An empty box offered `FROM` at the first position, which cannot compile.
+ *  4. The list flashed and vanished. Streamlit re-sends `streamlit:render` on every
+ *     frame-height change, so opening the popup renders immediately; treating that
+ *     render as "nothing happened" closed the list it had just opened, and left Tab
+ *     and the arrow keys dead. `settle()` emulates the loop.
  *
  * Run: node tests/js/sql_search_harness.js   (pytest runs this and skips without node)
  */
@@ -133,7 +137,11 @@ function boot() {
     RegExp,
   };
   sandbox.window.document = env.document;
+  env.page = { value: "", revision: 0 };
+  env.deliveredHeight = null;
   vm.runInNewContext(scriptMatch[1], sandbox, { filename: "sql_search/index.html" });
+  deliverRender(env);
+  settle(env);
   return env;
 }
 
@@ -174,23 +182,59 @@ function activeLabel(env) {
 function popupOpen(env) {
   return env.elements.pop.classList.contains("open");
 }
-function render(env, args) {
+/**
+ * Deliver one `streamlit:render` message, the way Streamlit's frontend does.
+ *
+ * `ComponentInstance.tsx` re-sends RENDER inside `useEffect(..., [height])`, so *every*
+ * `setFrameHeight` comes straight back as a render. That feedback loop is the whole
+ * reason this harness exists: opening the suggestion list grows the frame, which
+ * triggers a render, and a component that treats a render as "the operator did nothing"
+ * shuts the list again — a flash and nothing else. `settle()` below replays it.
+ */
+function deliverRender(env) {
+  env.deliveredHeight = lastHeight(env);
   const message = {
     type: "streamlit:render",
     theme: { base: "light" },
-    args: Object.assign({ schema: SCHEMA, label: "", placeholder: "SELECT ...", value: "", revision: 0 }, args || {}),
+    args: Object.assign(
+      { schema: SCHEMA, label: "", placeholder: "SELECT ..." },
+      env.page
+    ),
   };
   for (const handler of env.window._messageHandlers || []) handler({ data: message });
 }
+
+/** Let the frontend catch up: one RENDER per height change, until it stops moving. */
+function settle(env) {
+  for (let i = 0; i < 20; i += 1) {
+    if (lastHeight(env) === env.deliveredHeight) return;
+    deliverRender(env);
+  }
+  throw new Error(
+    `the frame height never settled (last ${lastHeight(env)}, delivered ${env.deliveredHeight}) — a render loop`
+  );
+}
+
+/** What the page holds for `value`/`revision` (a rerun, or a deliberate change). */
+function pageSet(env, value, revision) {
+  env.page = { value: value, revision: revision };
+  deliverRender(env);
+  settle(env);
+}
+
 function type(env, text, caret) {
   const input = env.elements.q;
   input.value = text;
   input.selectionStart = caret == null ? text.length : caret;
   input.dispatch("input", {});
+  settle(env);
 }
+
 function key(env, name, extra) {
   env.elements.q.dispatch("keydown", Object.assign({ key: name }, extra || {}));
+  settle(env);
 }
+
 function press(env, name, extra) {
   // keydown handlers call preventDefault(); mirror that the browser would then not
   // type the character, which is the case for every key this component handles.
@@ -222,7 +266,6 @@ function scenario(name, fn) {
 // 1. Escape closes the popup AND gives the height back.
 scenario("Escape closes the popup and restores the frame height", () => {
   const env = boot();
-  render(env, { value: "" });
   assertEqual(lastHeight(env), 64, "frame height before any typing");
   type(env, "SELECT * FROM agents WHERE ");
   assert(popupOpen(env), "typing opens the popup");
@@ -230,8 +273,8 @@ scenario("Escape closes the popup and restores the frame height", () => {
   press(env, "Escape");
   assert(!popupOpen(env), "Escape closes the popup");
   assertEqual(lastHeight(env), 64, "Escape collapses the iframe, leaving no blank band");
-  // Escape is sticky: a rerun from the page must not reopen the list.
-  render(env, { value: "SELECT * FROM agents WHERE ", revision: 0 });
+  // Escape is sticky: the render that follows the height change must not reopen it.
+  pageSet(env, "SELECT * FROM agents WHERE ", 0);
   assert(!popupOpen(env), "a rerun after Escape does not reopen the popup");
   assertEqual(lastHeight(env), 64, "and the height stays collapsed");
   // ... but the operator typing again does reopen it.
@@ -239,10 +282,43 @@ scenario("Escape closes the popup and restores the frame height", () => {
   assert(popupOpen(env), "typing after Escape reopens the popup");
 });
 
-// 2. The submitted query survives the reruns that follow it.
+// 2. The list survives Streamlit's render-on-height-change, which is what made it
+//    flash and vanish: opening the popup grows the frame, the frontend re-sends RENDER,
+//    and a component that closes on "a render" shuts the list it just opened.
+scenario("the popup survives the render sent on every frame-height change", () => {
+  const env = boot();
+  type(env, "SELECT * FROM agents WHERE ");
+  assert(popupOpen(env), "the list is open after typing");
+  const height = lastHeight(env);
+  // settle() already replayed one render per height change; do it again explicitly.
+  pageSet(env, "", 0);
+  assert(popupOpen(env), "a height-change render does not close the list");
+  assertEqual(labels(env).length > 0, true, "and it still has its suggestions");
+  assertEqual(lastHeight(env), height, "the height settled instead of oscillating");
+});
+
+// 3. A highlight the operator arrowed to survives that same render, so Enter accepts
+//    the row instead of submitting the half-typed query.
+scenario("a highlighted row survives a frame-height render", () => {
+  const env = boot();
+  type(env, "SELECT * FROM agents WHERE ");
+  press(env, "ArrowDown");
+  press(env, "ArrowDown");
+  const highlighted = activeLabel(env);
+  assert(highlighted, "an arrow key highlights a row");
+  pageSet(env, "", 0);
+  assertEqual(activeLabel(env), highlighted, "the same row is still highlighted");
+  press(env, "Enter");
+  assertEqual(values(env).length, 0, "Enter still accepts the row, it does not submit");
+  assert(
+    env.elements.q.value.indexOf(highlighted.trim()) >= 0,
+    `the highlighted row was accepted; got ${JSON.stringify(env.elements.q.value)}`
+  );
+});
+
+// 4. The submitted query survives the reruns that follow it.
 scenario("submitting keeps the query in the box", () => {
   const env = boot();
-  render(env, { value: "", revision: 0 });
   type(env, "SELECT * FROM agents WHERE healthy = 1");
   press(env, "Enter");
   const sent = values(env);
@@ -250,36 +326,36 @@ scenario("submitting keeps the query in the box", () => {
   assertEqual(sent[0].text, "SELECT * FROM agents WHERE healthy = 1", "the submitted text");
   assertEqual(sent[0].submit, true, "submit flag");
   assertEqual(lastHeight(env), 64, "the popup closes on submit");
+  assert(!popupOpen(env), "and stays closed");
   assertEqual(env.elements.q.value, "SELECT * FROM agents WHERE healthy = 1", "text survives the submit");
 
   // The rerun that the submission triggers still carries the *old* value ("") and the
   // old revision. That is the bug: adopting it emptied the box.
-  render(env, { value: "", revision: 0 });
+  pageSet(env, "", 0);
   assertEqual(env.elements.q.value, "SELECT * FROM agents WHERE healthy = 1", "a stale rerun does not clear the box");
   assert(!popupOpen(env), "and does not reopen the popup");
 
   // The page then stores the submission and bumps the revision: the echo is adopted.
-  render(env, { value: "SELECT * FROM agents WHERE healthy = 1", revision: 1 });
+  pageSet(env, "SELECT * FROM agents WHERE healthy = 1", 1);
   assertEqual(env.elements.q.value, "SELECT * FROM agents WHERE healthy = 1", "the stored query is echoed back");
   assert(!popupOpen(env), "the popup stays closed after a run");
 
   // Operator types again, then an unrelated rerun arrives with the same revision: the
   // half-typed text must not be replaced by what the page still holds.
   type(env, "SELECT * FROM agents WHERE healthy = 0");
-  render(env, { value: "SELECT * FROM agents WHERE healthy = 1", revision: 1 });
+  pageSet(env, "SELECT * FROM agents WHERE healthy = 1", 1);
   assertEqual(env.elements.q.value, "SELECT * FROM agents WHERE healthy = 0", "typing is never clobbered by the page's copy");
 
   // A deliberate change from the page (new revision) *is* adopted.
-  render(env, { value: "SELECT * FROM agents", revision: 2 });
+  pageSet(env, "SELECT * FROM agents", 2);
   assertEqual(env.elements.q.value, "SELECT * FROM agents", "a page-initiated change is adopted");
 });
 
-// 3. The first word of a statement is SELECT, and only SELECT.
+// 5. The first word of a statement is SELECT, and only SELECT.
 scenario("the empty first position offers SELECT, never FROM", () => {
   const env = boot();
-  render(env, { value: "", revision: 0 });
   type(env, "");
-  assert(popupOpen(env), "an input event opens the list (this is what a click into an empty box does not do)");
+  assert(popupOpen(env), "an input event opens the list (a click into an empty box does not)");
   assertEqual(labels(env), ["SELECT"], "only SELECT can start a statement");
   assert(!labels(env).includes("FROM"), "FROM at position 1 is not a query");
   assert(!kinds(env).includes("column"), "and neither is a bare column");
@@ -299,20 +375,18 @@ scenario("the empty first position offers SELECT, never FROM", () => {
   assertEqual(labels(env), ["agents"], "the table name follows FROM");
 });
 
-// 4. Mid-statement the list continues the expression instead of restarting it.
+// 6. Mid-statement the list continues the expression instead of restarting it.
 scenario("mid-statement keywords continue the expression", () => {
   const env = boot();
-  render(env, { value: "", revision: 0 });
   type(env, "SELECT * FROM agents WHERE healthy = 1 ");
   const shown = labels(env);
   assert(shown.includes("AND") && shown.includes("OR"), "AND/OR are offered after a complete condition; got " + JSON.stringify(shown));
   assert(!shown.includes("FROM"), "FROM is not offered once the query has one");
 });
 
-// 5. Ctrl+Space reopens the list for the word being edited.
+// 7. Ctrl+Space reopens the list for the word being edited.
 scenario("Ctrl+Space reopens the list on demand", () => {
   const env = boot();
-  render(env, { value: "", revision: 0 });
   type(env, "SELECT * FROM agents WHERE hea");
   press(env, "Escape");
   assert(!popupOpen(env), "Escape closed it");
@@ -320,27 +394,14 @@ scenario("Ctrl+Space reopens the list on demand", () => {
   assert(popupOpen(env), "Ctrl+Space reopens it");
 });
 
-// 6. Tab accepts the active suggestion and keeps the list open for the next word.
+// 8. Tab accepts the active suggestion and keeps the list open for the next word.
 scenario("Tab accepts the highlighted suggestion", () => {
   const env = boot();
-  render(env, { value: "", revision: 0 });
   type(env, "SELECT");
   press(env, "Tab");
   assertEqual(env.elements.q.value, "SELECT * FROM agents ", "Tab appends the first clause");
   assert(popupOpen(env), "and the next suggestions are shown");
-
-  type(env, "SELECT * FROM agents WHERE ");
-  press(env, "ArrowDown");
-  press(env, "ArrowDown");
-  const chosen = activeLabel(env);
-  assert(chosen, "an arrow key highlights a row");
-  press(env, "Enter");
-  assertEqual(values(env).length, 0, "Enter with a highlighted row does not submit");
-  assert(
-    env.elements.q.value === "SELECT * FROM agents WHERE " + chosen.trim() + " " ||
-      env.elements.q.value.indexOf(chosen.trim()) === 27,
-    `Enter accepts the highlighted row (${JSON.stringify(chosen)}) instead of running; got ${JSON.stringify(env.elements.q.value)}`
-  );
+  assertEqual(values(env).length, 0, "accepting does not run the query");
 });
 
 console.log(results.join("\n"));

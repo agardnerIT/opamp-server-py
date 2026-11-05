@@ -10,6 +10,13 @@ wiring around it. Three defects lived in exactly that blind spot:
    the *pre-submit* value; the editor adopted it, wiping the query it had just run.
 3. **`FROM` was offered at the first position,** where no statement can start with it.
 
+And one that only appears against the real frontend: Streamlit re-sends
+`streamlit:render` on every frame-height change (`useEffect(..., [height])` in
+`ComponentInstance.tsx`), so opening the popup grows the frame, which renders, and a
+component that closes on "a render" shuts the list it just opened — a flash and
+nothing else. `settle()` in the harness replays that loop, one render per height
+change, and fails the scenario if the height never converges.
+
 The harness (`tests/js/sql_search_harness.js`) runs the real `<script>` against a small
 DOM stub and drives it like a browser: type, Tab, Enter, Escape, and the
 `streamlit:render` messages the page sends. It needs `node`, which the Python test job

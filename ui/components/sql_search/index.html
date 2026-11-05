@@ -108,6 +108,7 @@
     let popupOpen = false;
     let replaceStart = 0;
     let currentValue = "";
+    let lastText = null;
     // Which generation of the page's `value` this editor is holding. The page bumps it
     // whenever it deliberately sets the query; a rerun that merely echoes an older
     // value keeps the same revision, so the box (and anything the operator has typed
@@ -471,9 +472,15 @@
     function update(openPopup) {
       const cursor = input.selectionStart == null ? input.value.length : input.selectionStart;
       const ctx = contextFor(input.value, cursor);
+      const textChanged = input.value !== lastText;
+      lastText = input.value;
       replaceStart = ctx.start;
       suggestions = suggestionsFor(ctx);
-      activeMoved = false;
+      // A highlight is only stale when the text it pointed into changed. Streamlit
+      // re-renders the component on every frame-height change (that is how it keeps
+      // the iframe in step), so resetting it here would make Enter submit instead of
+      // accepting the row the operator just arrow-keyed to.
+      if (textChanged) activeMoved = false;
       // Suggestions are recomputed on every render (a rerun can change the schema), but
       // the popup only opens for an explicit operator action.
       popupOpen = !!openPopup && !suppressed && suggestions.length > 0;
@@ -600,9 +607,12 @@
         currentValue = incoming;
         input.value = incoming;
       }
-      // Recompute against the (possibly new) schema, but never open the popup from a
-      // rerun: the operator's last keystroke is what opens it.
-      update(false);
+      // Recompute against the (possibly new) schema. The popup keeps its current state:
+      // a render is not an operator action, and Streamlit sends one every time the
+      // frame height changes — so closing here would shut the list the moment it opened
+      // (the effect `useEffect(..., [height])` in ComponentInstance.tsx re-sends
+      // RENDER). `suppressed` is what remembers that Enter or Escape closed it.
+      update(popupOpen && !suppressed);
     });
 
     post({ type: READY, apiVersion: 1 });

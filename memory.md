@@ -740,10 +740,21 @@ host *was* fixed: `osquery.config_plugin=opamp`, exactly one `battery_stats` in
   plus columns — `FROM` is offered where a statement can take it (after a select list).
 - **Numbers were not tokens.** `healthy = 1` left the last token as `=`, so the popup
   went on offering values and `AND` never appeared. `TOKEN_RE` matches `\d+(\.\d+)?`.
-- **The popup no longer opens from a rerun.** `update(openPopup)` takes an explicit
-  "the operator asked for this" flag: typing, `↑`/`↓`, focus on a non-empty box and
-  `Ctrl+Space` open it; a rerun and a submit do not (submitting used to reopen it under
-  the cursor).
+- **The popup no longer opens from a rerun, but must not *close* on one.** Streamlit's
+  `ComponentInstance.tsx` re-sends RENDER inside `useEffect(..., [height])`, so **every
+  `setFrameHeight` comes straight back as a render**. Opening the list grows the frame,
+  which renders, and closing on "a render" shut the list it had just opened — the
+  reported "flash and then nothing", with Tab and the arrow keys dead because they need
+  an open list. So `update(openPopup)` takes an explicit flag (typing, `↑`/`↓`, focus on
+  a non-empty box, `Ctrl+Space` open it) and the render handler *preserves* the current
+  state: `update(popupOpen && !suppressed)`. `suppressed` is what remembers that Enter
+  or Escape closed it. Heights converge because the frontend ignores an unchanged
+  height, so `render()` re-sending the same number does not loop. A highlight
+  (`activeMoved`) is only reset when the text changed, for the same reason.
+- **The harness emulates that loop.** `settle()` delivers one RENDER per height change
+  until the height stops moving (and fails the scenario if it never does), so a
+  component that mishandles a render fails locally instead of flashing in a browser.
+  Verified both ways: reverting the fix fails five of the eight scenarios.
 - **Save the query as a group from the Agent List** (`_save_query_as_group` in
   `ui/pages/1_Agents.py`): button next to the match count, shown only once a query has
   run and matched. Clicking **Save group** stashes the payload in

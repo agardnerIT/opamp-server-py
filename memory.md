@@ -721,3 +721,47 @@ host *was* fixed: `osquery.config_plugin=opamp`, exactly one `battery_stats` in
   so "two daemons" was normal; and `--ephemeral` processes pointed at `/tmp` sockets are
   leftovers from the test suite, not config sources.
 - Suite: **1539 passed**, 0 failed; `osquery-opamp` 170 passed, 2 skipped.
+
+## #132 follow-up — the SQL dropdown's three defects, and save-as-group from the list
+
+- **Escape only hid the popup.** The component sets the iframe height itself
+  (`streamlit:setFrameHeight`), so `display: none` on the popup left the frame at its
+  tall height — a blank band between the box and the results. Every path that closes
+  the popup now sends `BASE_HEIGHT` (64) too.
+- **The box emptied after a search.** The rerun a component value triggers still carries
+  the *pre-submit* `value`, and the editor adopted it whenever it was not focused. Text
+  flow is now revision-gated: `ui/sql_search.py` takes `revision`, the page bumps it
+  (`agents_sql_revision`) every time it sets the query itself, and the editor only
+  adopts a `value` whose revision it has not seen. A rerun echoing an older value is
+  ignored, so it cannot clobber the submitted text *or* a half-typed edit.
+- **`FROM` at position 1.** The popup opened on an empty box with every keyword and
+  column in it. Positional now: tokens before the word decide, and with none the only
+  suggestion is `SELECT`. Mid-statement the fallback is `AND`/`OR`/`ORDER BY`/`LIMIT`
+  plus columns — `FROM` is offered where a statement can take it (after a select list).
+- **Numbers were not tokens.** `healthy = 1` left the last token as `=`, so the popup
+  went on offering values and `AND` never appeared. `TOKEN_RE` matches `\d+(\.\d+)?`.
+- **The popup no longer opens from a rerun.** `update(openPopup)` takes an explicit
+  "the operator asked for this" flag: typing, `↑`/`↓`, focus on a non-empty box and
+  `Ctrl+Space` open it; a rerun and a submit do not (submitting used to reopen it under
+  the cursor).
+- **Save the query as a group from the Agent List** (`_save_query_as_group` in
+  `ui/pages/1_Agents.py`): button next to the match count, shown only once a query has
+  run and matched. Clicking **Save group** stashes the payload in
+  `agents_save_pending` and reruns; the pending path calls `require_admin(ROLE_OPERATOR)`
+  *there*, so the password prompt appears after the click and browsing never needs one.
+  The stash is what makes the click survive the sign-in rerun — without it the operator
+  signs in and nothing is saved. The name is checked against the store's
+  `NAME_PATTERN` before the prompt (the server stays the authority); 409 says the name
+  is taken and leaves the form open. No second `POST /groups` implementation and no new
+  endpoint: the four layers stay as they were, this is a UI entry point to `POST /groups`.
+- **Behaviour tests exist now.** `tests/js/sql_search_harness.js` runs the component's
+  real `<script>` against a minimal DOM stub and drives it like a browser (six
+  scenarios: Escape height, stale-echo, first position, mid-statement, Ctrl+Space, Tab).
+  `tests/test_sql_search_component.py` shells out to it and **skips without node** —
+  CI's Python job has none — so it is a local gate, which is why the assertions live in
+  the harness and pytest only checks that they ran. `tests/test_ui_smoke.py` covers the
+  save flow: signed in saves immediately; unsigned gets the login form only after the
+  click, with nothing posted before the password; a bad name is refused before the
+  prompt.
+- **Kept:** the Table / By Property view radio. Removing it was floated and rejected by
+  the user — grouping by property is a separate question from SQL search.

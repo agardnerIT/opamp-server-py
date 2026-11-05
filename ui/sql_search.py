@@ -10,8 +10,14 @@ build step: one input, a suggestion popup, Tab to accept, Enter to run. It compu
 suggestions in the browser from the live schema (`GET /agents/query/schema`), which is
 what makes `host_arch = 'amd64'` a suggestion only when an agent reported `amd64`.
 
-The component returns `{"text": ..., "submit": bool}`. A submit is the only thing the
-page acts on; typing does not rerun the Python script on every keystroke.
+The component returns `{"text": ..., "submit": bool, "nonce": ...}`. A submit is the
+only thing the page acts on; typing does not rerun the Python script on every keystroke.
+
+`value` is pushed *down* into the editor, and a component re-render is not a reliable
+"the text changed" signal: the rerun that follows a submission still carries the value
+from before it, and adopting that is what emptied the box as soon as a search ran. So
+the page also passes `revision`, bumped whenever it deliberately sets the query, and the
+editor only adopts a `value` that arrives with a revision it has not seen yet.
 """
 
 from __future__ import annotations
@@ -31,16 +37,27 @@ def sql_search(
     *,
     label: str = "Search agents with SQL",
     placeholder: str = "SELECT * FROM agents WHERE ...",
+    revision: int = 0,
     key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Render the SQL search box and return its last event.
 
-    Returns a dict with ``text`` (the current query) and ``submit`` (true when the
-    operator pressed Enter or the run button). The default value keeps the page
+    Returns a dict with ``text`` (the current query), ``submit`` (true when the
+    operator pressed Enter or the run button) and ``nonce`` (unique per submission, so
+    a sticky component value is acted on once). The default value keeps the page
     deterministic on first render and in tests that cannot execute component JS.
+
+    ``revision`` must be bumped by the caller every time it assigns ``value`` itself.
+    Without it the editor cannot tell a deliberate change from a rerun echoing the text
+    it already replaced.
     """
+    try:
+        revision = int(revision or 0)
+    except (TypeError, ValueError):
+        revision = 0
     result = _sql_search(
         value=value or "",
+        revision=revision,
         schema=schema or {},
         label=label,
         placeholder=placeholder,

@@ -282,10 +282,23 @@ LIMIT 20
 }
 ```
 
-The UI uses this for the suggestion buttons in the SQL editor. An agent should use it
-the same way: the `columns` list is the authoritative set of names, and `values` are
-values observed on connected agents. `sql_name` is already quoted correctly for use in
-a statement.
+The UI uses this for the one-box editor on the Agent List (and the pickers on the
+Groups page). An agent should use it the same way: the `columns` list is the
+authoritative set of names, and `values` are values observed on connected agents.
+`sql_name` is already quoted correctly for use in a statement.
+
+### What the editor suggests, and where
+
+Suggestions are positional, not a keyword dump. The first word of a statement can only
+be `SELECT`; `FROM` is offered after a select list, and only there, because that is the
+only place a statement can take it. After a complete expression (`healthy = 1`, a
+quoted value, `)`) the popup continues the clause (`AND`, `OR`, `ORDER BY`, `LIMIT`)
+and offers the fleet's column names.
+
+Keys: `Tab` accepts the highlighted suggestion, `↑`/`↓` choose, `Enter` runs the query,
+`Esc` closes the list. The list reopens on the next keystroke, on `↑`/`↓`, or on
+`Ctrl+Space` for the word under the cursor. Running a query leaves it in the box, so
+the next adjustment starts from what just ran.
 
 ---
 
@@ -315,6 +328,23 @@ curl -X POST http://localhost:4320/groups \
   -u admin:$ADMIN_PASSWORD -H 'Content-Type: application/json' \
   -d '{"name": "macos-au", "query": "SELECT * FROM agents WHERE \"os.type\" = '\''darwin'\''"}'
 ```
+
+### Saving from the Agent List (UI)
+
+The shortest path is the Agents page: search, adjust the query until the result is what
+you mean, then **💾 Save this query as a group** next to the match count.
+
+- The button appears only once a query has run **and matched something**, so a name is
+given to a selection the operator has actually seen.
+- Saving is an `operator` action, and the password prompt appears **after** the click,
+not in front of the search box: searching and reading the fleet stays open. Already
+signed in, there is no prompt.
+- The name is checked against the same rule the server enforces (2–63 lowercase
+characters from `a-z`, `0-9`, `.`, `_` and `-`) *before* the prompt, so a typo does not
+cost a round trip through sign-in.
+- The click survives the sign-in rerun: the payload is stashed, then posted once the
+session exists. Nothing is saved before the password is accepted.
+- Saving pushes nothing. Manage, preview or archive the group on the **Groups** page.
 
 ### Group rules that are not SQL rules
 

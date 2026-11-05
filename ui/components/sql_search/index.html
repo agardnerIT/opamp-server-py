@@ -80,7 +80,7 @@
       <button id="run" title="Run query (Ctrl+Enter)">Search</button>
     </div>
     <div id="pop" role="listbox"></div>
-    <div class="hint"><kbd>Tab</kbd> accept · <kbd>↑</kbd><kbd>↓</kbd> choose · <kbd>Enter</kbd> run · <kbd>Esc</kbd> close</div>
+    <div class="hint"><kbd>Tab</kbd> accept · <kbd>↑</kbd><kbd>↓</kbd> choose · <kbd>Enter</kbd> run · <kbd>Esc</kbd> close · <kbd>Ctrl</kbd>+<kbd>Space</kbd> reopen</div>
   </div>
   <script>
     "use strict";
@@ -95,6 +95,11 @@
     const label = document.getElementById("label");
     const runButton = document.getElementById("run");
 
+    // The frame height with no popup open. Every path that closes the popup has to
+    // send it back, or the iframe keeps the tall height and leaves a blank band
+    // between the box and the results below it.
+    const BASE_HEIGHT = 64;
+
     let schema = {};
     let columns = [];
     let suggestions = [];
@@ -103,17 +108,28 @@
     let popupOpen = false;
     let replaceStart = 0;
     let currentValue = "";
+    // Which generation of the page's `value` this editor is holding. The page bumps it
+    // whenever it deliberately sets the query; a rerun that merely echoes an older
+    // value keeps the same revision, so the box (and anything the operator has typed
+    // since) is never overwritten by it. This is what used to empty the box the moment
+    // a search ran: the rerun after a submit still carried the pre-submit value.
+    let revision = null;
+    // Enter or Escape dismissed the popup. Only the operator typing (or an arrow key)
+    // reopens it, so a rerun cannot pop the list back open under the cursor.
+    let suppressed = false;
 
     const PRIORITY = [
       "type", "healthy", "compliant", "last_heartbeat", "heartbeat_age_seconds",
       "service.name", "service_name", "agent_type", "remote_config_status", "id",
       "capabilities", "stale"
     ];
-    const KEYWORDS = [
-      "SELECT", "FROM", "WHERE", "AND", "OR", "NOT", "IN", "LIKE", "IS NULL",
-      "IS NOT NULL", "ORDER BY", "LIMIT"
-    ];
-    const TOKEN_RE = /"(?:[^"]|"")*"|'(?:[^']|'')*'|[A-Za-z_][A-Za-z0-9_.]*|<=|>=|<>|!=|==|=|<|>|[(),*]/g;
+    // Words that can follow a complete expression. `FROM` is deliberately absent: it
+    // belongs after a select list and nowhere else, so it is offered there explicitly.
+    const CONTINUATIONS = ["AND", "OR", "ORDER BY", "LIMIT"];
+    // Numbers are tokens too. Without them `healthy = 1` did not end the expression:
+    // the last token was still `=`, so the popup went on offering values and `AND` /
+    // `OR` never appeared.
+    const TOKEN_RE = /"(?:[^"]|"")*"|'(?:[^']|'')*'|[A-Za-z_][A-Za-z0-9_.]*|\d+(?:\.\d+)?|<=|>=|<>|!=|==|=|<|>|[(),*]/g;
 
     function post(message) {
       message.isStreamlitMessage = true;
@@ -320,10 +336,10 @@
       return filterList(list, prefix).slice(0, 12);
     }
 
-    function keywordSuggestions(prefix) {
+    function continuationSuggestions(prefix) {
       const list = [];
       const seen = new Set();
-      for (const keyword of KEYWORDS) add(list, seen, keyword + " ", keyword, "", "keyword");
+      for (const keyword of CONTINUATIONS) add(list, seen, keyword + " ", keyword, "", "keyword");
       return filterList(list, prefix).slice(0, 12);
     }
 
@@ -400,21 +416,29 @@
         add(list, seen, "FROM ", "FROM", "", "keyword");
         return filterList(list, prefix);
       }
-      if (upper === "ASC" || upper === "DESC") return keywordSuggestions(prefix);
+      if (upper === "ASC" || upper === "DESC") return continuationSuggestions(prefix);
       if (lastColumn) return operatorSuggestions(lastColumn, prefix);
+      if (!ctx.tokens.length) {
+        // Nothing before this word, so the statement has not started yet: `SELECT` is
+        // the only legal first word. Offering `FROM` here (or any column) is a
+        // suggestion that cannot compile.
+        add(list, seen, "SELECT ", "SELECT", "start a query", "keyword");
+        return filterList(list, prefix).slice(0, 12);
+      }
       const combined = [];
       const combinedSeen = new Set();
-      for (const item of keywordSuggestions(prefix)) add(combined, combinedSeen, item.insert, item.label, item.detail, item.kind);
+      for (const item of continuationSuggestions(prefix)) add(combined, combinedSeen, item.insert, item.label, item.detail, item.kind);
       for (const item of columnSuggestions(prefix)) add(combined, combinedSeen, item.insert, item.label, item.detail, item.kind);
       return combined.slice(0, 12);
     }
 
     function render() {
       popup.innerHTML = "";
-      if (!suggestions.length) {
+      if (!popupOpen || !suggestions.length) {
         popup.classList.remove("open");
         popupOpen = false;
-        sendHeight(64);
+        active = -1;
+        sendHeight(BASE_HEIGHT);
         return;
       }
       if (active < 0 || active >= suggestions.length) active = 0;
@@ -444,13 +468,16 @@
       sendHeight(height);
     }
 
-    function update(forceOpen) {
+    function update(openPopup) {
       const cursor = input.selectionStart == null ? input.value.length : input.selectionStart;
       const ctx = contextFor(input.value, cursor);
       replaceStart = ctx.start;
       suggestions = suggestionsFor(ctx);
       activeMoved = false;
-      if (!forceOpen && !suggestions.length) active = -1;
+      // Suggestions are recomputed on every render (a rerun can change the schema), but
+      // the popup only opens for an explicit operator action.
+      popupOpen = !!openPopup && !suppressed && suggestions.length > 0;
+      if (!popupOpen) active = -1;
       render();
     }
 
@@ -469,30 +496,44 @@
       const position = replaceStart + leading.length + insert.length + spacer.length;
       input.setSelectionRange(position, position);
       input.focus();
+      suppressed = false;
       update(true);
     }
 
     function submit() {
-      popup.classList.remove("open");
+      suppressed = true;
       popupOpen = false;
       active = -1;
       suggestions = [];
-      sendHeight(64);
+      render();
       sendValue(true);
     }
 
-    input.addEventListener("input", () => update(false));
+    input.addEventListener("input", () => {
+      suppressed = false;
+      update(true);
+    });
+    input.addEventListener("focus", () => {
+      // A click into a box that already holds a query reopens the list; an empty box
+      // stays quiet until the operator types, so the page does not open a popup on load.
+      suppressed = false;
+      update(input.value.trim() !== "");
+    });
     input.addEventListener("keydown", (event) => {
       if (event.key === "ArrowDown") {
         if (!suggestions.length) return;
+        suppressed = false;
         activeMoved = true;
         active = (active + 1) % suggestions.length;
+        popupOpen = true;
         render();
         event.preventDefault();
       } else if (event.key === "ArrowUp") {
         if (!suggestions.length) return;
+        suppressed = false;
         activeMoved = true;
         active = (active - 1 + suggestions.length) % suggestions.length;
+        popupOpen = true;
         render();
         event.preventDefault();
       } else if (event.key === "Tab") {
@@ -508,17 +549,23 @@
         }
         event.preventDefault();
       } else if (event.key === "Escape") {
-        popup.classList.remove("open");
+        // Close *and* shrink: hiding the popup alone left the iframe at its tall
+        // height, which showed up as a blank band pushing the results down.
+        suppressed = true;
         popupOpen = false;
+        active = -1;
+        render();
         event.preventDefault();
       } else if (event.key === " " && (event.ctrlKey || event.metaKey)) {
+        suppressed = false;
         update(true);
         event.preventDefault();
       }
     });
     input.addEventListener("blur", () => {
       // Keep Python's copy of the text in sync when focus leaves the editor, without
-      // rerunning on every keystroke. The component ignores the echo while focused.
+      // rerunning on every keystroke. The echo that comes back carries no new revision,
+      // so it cannot overwrite what the editor already holds.
       window.setTimeout(() => {
         if (document.activeElement !== input) sendValue(false);
       }, 120);
@@ -545,16 +592,21 @@
       if (args.placeholder) input.placeholder = args.placeholder;
       applyTheme(data.theme || {});
       const incoming = typeof args.value === "string" ? args.value : "";
-      if (incoming !== currentValue && document.activeElement !== input) {
+      const incomingRevision = String(args.revision == null ? "" : args.revision);
+      if (revision === null || incomingRevision !== revision) {
+        // Either the first render, or the page deliberately set the query (it stored a
+        // submission, or something replaced it). Adopt it.
+        revision = incomingRevision;
         currentValue = incoming;
         input.value = incoming;
       }
+      // Recompute against the (possibly new) schema, but never open the popup from a
+      // rerun: the operator's last keystroke is what opens it.
       update(false);
-      sendHeight(popupOpen ? Math.min(360, 72 + suggestions.length * 34) : 64);
     });
 
     post({ type: READY, apiVersion: 1 });
-    sendHeight(64);
+    sendHeight(BASE_HEIGHT);
   </script>
 </body>
 </html>

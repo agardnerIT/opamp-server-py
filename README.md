@@ -1055,7 +1055,9 @@ writes, `PRAGMA`, `ATTACH` and unknown functions are refused.
 `GET /agents/query/schema` returns the columns plus the values live agents actually
 report, which is what powers the UI's suggestions. The **Agents** page has a
 one-box SQL editor with context-aware completion (`SELECT` → `* FROM agents` →
-`WHERE` → columns → values, Tab to accept, Enter to run). Legacy #111
+`WHERE` → columns → values, Tab to accept, Enter to run), and the query you settle on
+saves as a group from the same page: **💾 Save this query as a group** prompts for the
+admin password *after* the click, so searching the fleet never needs one. Legacy #111
 filter-document groups still work and can be rewritten as SQL with
 `groups update --query`.
 

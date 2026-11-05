@@ -1494,6 +1494,102 @@ def test_a_refused_agent_query_is_explained(server):
     assert "query must start with SELECT" in body
 
 
+# ------------------------------------- save the query as a group, from the list
+#
+# The flow is search → adjust → save, so the button belongs next to the result. Saving
+# is an `operator` action and the operator may not be signed in, so the password prompt
+# has to come *after* the click (a login wall in front of the search box would mean a
+# password to browse the fleet). These tests pin that ordering, because it is the part
+# a refactor can quietly turn into "sign in first, then lose the click".
+
+QUERY = "SELECT * FROM agents WHERE healthy = 1"
+
+
+def unsigned_agents_page(**state):
+    app = AppTest.from_file(str(AGENTS_PAGE), default_timeout=30)
+    for key, value in state.items():
+        app.session_state[key] = value
+    return app
+
+
+def click_save_this_query(app):
+    app.button(key="agents_save_open_button").click().run()
+    assert not app.exception, app.exception
+    return app
+
+
+def save_form_name(app, name):
+    app.text_input(key="agents_save_name").input(name)
+    [b for b in app.button if (b.label or "") == "Save group"][0].click().run()
+    assert not app.exception, app.exception
+    return app
+
+
+def test_the_query_can_be_saved_as_a_group_from_the_agent_list(server):
+    server.agents = [fake_agent("ab" * 16), fake_agent("cd" * 16)]
+    app = signed_in(AGENTS_PAGE, agents_active_query=QUERY)
+    app.run()
+    assert not app.exception, app.exception
+    assert "Save this query as a group" in "\n".join(
+        b.label or "" for b in app.button
+    ), [b.label for b in app.button]
+
+    click_save_this_query(app)
+    assert any(field.key == "agents_save_name" for field in app.text_input)
+    save_form_name(app, "Prod-EMEA")  # the server lowercases; the form may not care
+
+    # Already signed in, so the save happens on the same interaction — no second prompt.
+    assert "Admin sign-in required" not in texts(app)
+    body = server.body_for("/groups")
+    assert body["name"] == "prod-emea", body
+    assert body["query"] == QUERY, body
+    assert "Saved `prod-emea`" in texts(app)
+    assert "**Groups** page" in texts(app), "the saved group is left where it is managed"
+
+
+def test_saving_prompts_for_the_password_after_the_click_not_before(server):
+    """Unsigned: the list is searchable, and the prompt appears only on save."""
+    server.agents = [fake_agent("ab" * 16)]
+    app = unsigned_agents_page(agents_active_query=QUERY)
+    app.run()
+    assert not app.exception, app.exception
+    assert "Admin sign-in required" not in texts(app), "browsing must not require a password"
+    assert server.methods_for("/groups") == []
+
+    click_save_this_query(app)
+    assert "Admin sign-in required" not in texts(app), "opening the form is not privileged either"
+
+    save_form_name(app, "prod-au")
+    # Now — and only now — the shared sign-in form is what the operator sees.
+    assert "Admin sign-in required" in texts(app)
+    assert server.methods_for("/groups") == [], "nothing is saved before the password is given"
+    assert app.session_state["agents_save_pending"]["name"] == "prod-au", \
+        "the click has to survive the sign-in rerun, or the save is silently lost"
+
+    sign_in(app)
+    assert not app.exception, app.exception
+    body = server.body_for("/groups")
+    assert body["name"] == "prod-au", body
+    assert body["query"] == QUERY, body
+    assert "Saved `prod-au`" in texts(app)
+    assert "agents_save_pending" not in session_state(app), "the pending save is consumed"
+    assert not app.session_state["agents_save_open"], "the form closes once it is saved"
+
+
+def test_a_bad_group_name_is_refused_before_the_password_prompt(server):
+    """Two round trips (password, then 422) for a typo the UI can see is wasted."""
+    server.agents = [fake_agent()]
+    app = unsigned_agents_page(agents_active_query=QUERY)
+    app.run()
+    click_save_this_query(app)
+    save_form_name(app, "prod *")
+
+    assert "Admin sign-in required" not in texts(app)
+    assert "That name will be refused" in texts(app)
+    assert server.methods_for("/groups") == []
+    assert "agents_save_pending" not in session_state(app)
+
+
 # ------------------------------------------------- collector groups in the UI (#111)# ------------------------------------------------- collector groups in the UI (#111)
 
 

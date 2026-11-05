@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import sys
 import streamlit as st
 import pandas as pd
@@ -178,6 +179,124 @@ def _run_agent_query(sql):
         return [], str(detail or f"HTTP {response.status_code}")
     except Exception as exc:
         return [], str(exc)
+
+
+#: Same rule the store enforces (`SQLiteGroupStore.NAME_PATTERN`), checked here only so
+#: a typo is caught *before* the password prompt instead of after it. The server stays
+#: the authority: this copy can be wrong without ever letting a bad name through.
+def _group_name_ok(name):
+    return bool(re.fullmatch(r"[a-z0-9][a-z0-9._-]{1,62}", (name or "").strip().lower()))
+
+
+def _save_query_as_group(active_query):
+    """#132 follow-up: save the query you just tuned as a group, from this page.
+
+    The workflow the issue describes is *search, adjust, then save* — so the button
+    belongs next to the result, not on a second page where the query has to be
+    retyped. Saving is an `operator` action and the operator may not be signed in yet,
+    so the sign-in form appears **after** the click (`require_admin`), not as a wall in
+    front of the search box: browsing the fleet stays possible without a password.
+
+    The payload is stashed in session state before the prompt because `require_admin`
+    ends that run, and signing in reruns the script from the top. Without the stash the
+    click would be lost and the operator would be asked for a password, then left with
+    nothing saved.
+    """
+    notice = st.session_state.pop("agents_save_notice", None)
+    if notice:
+        st.success(notice)
+        st.caption(
+            "Membership is resolved on read, and saving a group pushes nothing. "
+            "Preview, edit or archive it on the **Groups** page."
+        )
+
+    pending = st.session_state.get("agents_save_pending")
+    if pending:
+        # This is the password prompt: it renders *here*, where the operator clicked.
+        require_admin(ROLE_OPERATOR)
+        response = admin_request(
+            "POST", "/groups", required_role=ROLE_OPERATOR, json=pending
+        )
+        st.session_state.pop("agents_save_pending", None)
+        if response is not None and response.status_code == 200:
+            try:
+                created = response.json() or {}
+            except Exception:
+                created = {}
+            st.session_state["agents_save_open"] = False
+            st.session_state.pop("agents_save_name", None)
+            st.session_state.pop("agents_save_description", None)
+            st.session_state["agents_save_notice"] = (
+                f"Saved `{created.get('name') or pending.get('name')}` with "
+                f"{created.get('member_count', 0)} member(s)."
+            )
+            st.rerun()
+        elif response is not None and response.status_code == 409:
+            # `admin_request` already showed the server's message; this is the one
+            # failure the operator can fix here, so say what to do about it.
+            st.info(
+                "Group names are unique regardless of case. Pick another name and "
+                "save again."
+            )
+        # Any other failure was reported by `admin_request`; the form stays open with
+        # the name still in it so the operator can fix and retry.
+        return
+
+    if st.button(
+        "💾 Save this query as a group",
+        key="agents_save_open_button",
+        help=(
+            "Name the query and it becomes a saved selection you can target with "
+            "Remote Config. Saving pushes nothing."
+        ),
+    ):
+        st.session_state["agents_save_open"] = True
+
+    if not st.session_state.get("agents_save_open"):
+        return
+
+    with st.form("agents_save_group_form"):
+        name = st.text_input(
+            "Group name",
+            key="agents_save_name",
+            placeholder="macos-au",
+            help=(
+                "2–63 lowercase characters from a-z, 0-9, '.', '_' and '-', starting "
+                "with a letter or digit. Unique regardless of case."
+            ),
+        )
+        description = st.text_input(
+            "Description (optional)",
+            key="agents_save_description",
+            placeholder="macOS gateways in Australia. Owner: platform-oncall.",
+            help="Shown in the group list, for the next person who has to guess.",
+        )
+        st.caption(f"Saved as: `{active_query}`")
+        save_col, cancel_col = st.columns([1, 5])
+        with save_col:
+            save_clicked = st.form_submit_button("Save group", type="primary")
+        with cancel_col:
+            cancel_clicked = st.form_submit_button("Cancel")
+
+    if cancel_clicked:
+        st.session_state["agents_save_open"] = False
+        st.rerun()
+
+    if save_clicked:
+        if not _group_name_ok(name):
+            st.error(
+                "That name will be refused. Use 2–63 lowercase characters from a-z, "
+                "0-9, '.', '_' and '-', starting with a letter or digit."
+            )
+            return
+        st.session_state["agents_save_pending"] = {
+            "name": (name or "").strip().lower(),
+            "query": active_query,
+            "description": (description or "").strip() or None,
+        }
+        # A clean run, so the pending payload is what asks for the password and then
+        # saves — see the docstring: this click must survive the sign-in rerun.
+        st.rerun()
 
 
 agent_id_param = st.query_params.get("agent_id")
@@ -593,10 +712,16 @@ else:
 
     if "agents_sql" not in st.session_state:
         st.session_state["agents_sql"] = ""
+    if "agents_sql_revision" not in st.session_state:
+        # Bumped every time Python sets the query itself. The editor only adopts a
+        # pushed-down `value` that carries a new revision, so the rerun after a submit
+        # (which still carries the pre-submit text) cannot empty the box.
+        st.session_state["agents_sql_revision"] = 0
 
     st.markdown("**Search agents with SQL**")
     search_result = sql_search(
         value=st.session_state.get("agents_sql") or "",
+        revision=st.session_state.get("agents_sql_revision") or 0,
         schema=schema,
         key="agents_sql_component",
         label="",
@@ -613,6 +738,9 @@ else:
         st.session_state["agents_last_submit_nonce"] = submit_nonce
         text = search_result.get("text") or ""
         st.session_state["agents_sql"] = text
+        st.session_state["agents_sql_revision"] = (
+            int(st.session_state.get("agents_sql_revision") or 0) + 1
+        )
         st.session_state["agents_active_query"] = text.strip() or None
         st.rerun()
     elif search_result.get("text") and search_result["text"] != st.session_state.get("agents_sql"):
@@ -623,8 +751,8 @@ else:
     st.caption(
         "Read-only SQL over the live fleet. Description attributes are columns "
         "(`host_arch`, `environment`, `\"os.type\"`, …); suggestions come from the "
-        "columns and values this fleet actually reports. Save a query as a group on "
-        "the **Groups** page."
+        "columns and values this fleet actually reports. When the query says what "
+        "you mean, save it as a group below."
     )
 
     active_query = st.session_state.get("agents_active_query")
@@ -635,16 +763,21 @@ else:
             st.error(f"SQL search refused: {error}")
             st.stop()
         agents = matched
-        st.caption(
-            f"Showing {len(agents)} of {len(all_agents)} agent(s) matching "
-            f"`{active_query}`"
-        )
         if not agents:
+            st.caption(f"Showing 0 of {len(all_agents)} agent(s) matching `{active_query}`")
             st.info(
                 "No agents matched. Check the attribute names in the suggestions — "
                 "an unknown attribute matches nothing rather than failing the query."
             )
             st.stop()
+        # The query has run and it matches something, which is exactly the moment the
+        # operator is "happy with the query". Saving is offered here, next to the
+        # result, instead of sending them to the Groups page to retype it.
+        st.caption(
+            f"Showing {len(agents)} of {len(all_agents)} agent(s) matching "
+            f"`{active_query}`"
+        )
+        _save_query_as_group(active_query)
     else:
         st.caption(f"Showing {len(agents)} agent(s)")
 

@@ -1453,20 +1453,30 @@ def test_an_unreachable_server_is_not_reported_as_a_configuration_problem(server
 # --------------------------------------------------- SQL search on the agent list
 
 
-def test_the_agent_list_has_a_sql_search_bar_that_filters_the_table(server):
-    """#132: search belongs where the agents are, not only on a separate page."""
-    first = fake_agent("ab" * 16)
-    second = fake_agent("cd" * 16)
-    server.agents = [first, second]
+def test_the_agent_list_renders_the_sql_search_editor(server):
+    """#132: the search box is a component, so AppTest cannot type into it.
+
+    What this can prove is the page wiring: the editor is mounted, and a submitted
+    query is what filters the list. The suggestion engine itself is exercised by the
+    component's own browser behaviour; the server-side query semantics are covered in
+    tests/test_agent_query.py.
+    """
+    server.agents = [fake_agent("ab" * 16), fake_agent("cd" * 16)]
     app = signed_in(AGENTS_PAGE)
     app.run()
     assert not app.exception, app.exception
+    assert "Search agents with SQL" in texts(app)
 
-    assert any(widget.key == "agents_sql" for widget in app.text_input)
-    app.text_input(key="agents_sql").input(
-        "SELECT * FROM agents WHERE id = '" + second["id"] + "'"
+
+def test_a_submitted_agent_query_filters_the_table(server):
+    first = fake_agent("ab" * 16)
+    second = fake_agent("cd" * 16)
+    server.agents = [first, second]
+    app = signed_in(
+        AGENTS_PAGE,
+        agents_active_query="SELECT * FROM agents WHERE id = '" + second["id"] + "'",
     )
-    [button for button in app.button if button.label == "Search"][0].click().run()
+    app.run()
     assert not app.exception, app.exception
     body = texts(app)
     assert "Showing 1 of 2 agent(s)" in body
@@ -1474,43 +1484,17 @@ def test_the_agent_list_has_a_sql_search_bar_that_filters_the_table(server):
     assert first["id"][:16] not in body
 
 
-def test_the_agent_list_search_explains_a_refused_query(server):
+def test_a_refused_agent_query_is_explained(server):
     server.agents = [fake_agent()]
-    app = signed_in(AGENTS_PAGE)
+    app = signed_in(AGENTS_PAGE, agents_active_query="DELETE FROM agents")
     app.run()
-    app.text_input(key="agents_sql").input("DELETE FROM agents")
-    [button for button in app.button if button.label == "Search"][0].click().run()
     assert not app.exception, app.exception
     body = texts(app)
     assert "SQL search refused" in body
     assert "query must start with SELECT" in body
 
 
-def test_the_agent_list_can_load_a_saved_query_by_group(server):
-    server.agents = [fake_agent("ab" * 16)]
-    server.groups = [
-        group_row(
-            name="prod-query",
-            selector_kind="query",
-            definition={},
-            query="SELECT * FROM agents WHERE environment = 'production'",
-        )
-    ]
-    app = signed_in(
-        AGENTS_PAGE,
-        agents_group_pick="prod-query",
-    )
-    app.run()
-    assert not app.exception, app.exception
-    picker = app.selectbox(key="agents_group_pick")
-    assert "prod-query" in picker.options
-    [button for button in app.button if button.label == "Load group"][0].click().run()
-    assert not app.exception, app.exception
-    assert app.text_input(key="agents_sql").value.endswith("environment = 'production'")
-    assert "matching" in texts(app)
-
-
-# ------------------------------------------------- collector groups in the UI (#111)
+# ------------------------------------------------- collector groups in the UI (#111)# ------------------------------------------------- collector groups in the UI (#111)
 
 
 def group_row(**overrides):

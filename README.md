@@ -1046,15 +1046,18 @@ now, and cannot go stale. `include` forces one agent in, `exclude` forces one ou
 (both audited); there is no nesting. The full language reference is
 [`docs/sql-agent-queries.md`](docs/sql-agent-queries.md).
 
-The SQL schema is deliberately small: `agents` with core columns (`id`, `healthy`,
-`health_status`, `remote_config_status`, `agent_type`, `stale`, …) and **one column
-per description attribute** (`environment`, `host_arch`, `"os.type"`, …). Only
-`SELECT` is accepted; writes, `PRAGMA`, `ATTACH` and unknown functions are refused.
+The SQL schema is deliberately small: `agents` with core columns (`id`, `type`,
+`healthy`, `compliant`, `last_heartbeat`, `heartbeat_age_seconds`,
+`remote_config_status`, `capabilities`, …), one boolean column per OpAMP capability
+(`AcceptsRemoteConfig`, `ReportsHealth`, …), and **one column per description
+attribute** (`environment`, `host_arch`, `"os.type"`, …). Only `SELECT` is accepted;
+writes, `PRAGMA`, `ATTACH` and unknown functions are refused.
 `GET /agents/query/schema` returns the columns plus the values live agents actually
-report, which is what powers the UI's suggestions. The **Agents** page carries the
-same SQL search bar (plus a loader for saved SQL groups), so filtering and saving a
-group happen where the fleet is. Legacy #111 filter-document groups still work and can
-be rewritten as SQL with `groups update --query`.
+report, which is what powers the UI's suggestions. The **Agents** page has a
+one-box SQL editor with context-aware completion (`SELECT` → `* FROM agents` →
+`WHERE` → columns → values, Tab to accept, Enter to run). Legacy #111
+filter-document groups still work and can be rewritten as SQL with
+`groups update --query`.
 
 Four deliberate refusals, each closing a way a "saved filter" feature turns into an
 outage:

@@ -51,8 +51,20 @@ CORE_COLUMNS: Dict[str, str] = {
     "connected_at": "TEXT",
     "last_heartbeat": "TEXT",
     "agent_type": "TEXT",
+    # `type` is the name operators use in conversation; `agent_type` stays because it
+    # is the API field. Both point at the same resolved profile.
+    "type": "TEXT",
+    "compliant": "TEXT",
+    "is_compliant": "INTEGER",
+    "heartbeat_age_seconds": "INTEGER",
+    "capabilities": "INTEGER",
+    "capability_tags": "TEXT",
     "service_name": "TEXT",
     "service_version": "TEXT",
+    # The dotted spelling is what an OpAMP description calls it. SQLite needs it
+    # quoted, which is exactly what the editor suggests.
+    "service.name": "TEXT",
+    "service.version": "TEXT",
     "stale": "INTEGER",
     "attributes": "TEXT",
 }
@@ -64,11 +76,19 @@ CORE_DESCRIPTIONS = {
     "health_status": "ComponentHealth.status, e.g. ok or config_conflict",
     "remote_config_status": "Remote config status, e.g. UNSET, APPLIED, FAILED",
     "status": "Alias for remote_config_status",
-    "connected_at": "When the server first saw this agent (ISO-8601)",
-    "last_heartbeat": "Last OpAMP message (ISO-8601)",
+    "connected_at": "When the server first saw this agent (UTC, YYYY-MM-DD HH:MM:SS)",
+    "last_heartbeat": "Last OpAMP message (UTC, YYYY-MM-DD HH:MM:SS)",
     "agent_type": "Resolved profile name, e.g. otelcol or generic",
+    "type": "Alias for agent_type",
+    "compliant": "'yes', 'no' or 'unknown' (OPA verdict)",
+    "is_compliant": "1 compliant, 0 not, NULL never evaluated / OPA disabled",
+    "heartbeat_age_seconds": "Seconds since the last OpAMP message",
+    "capabilities": "OpAMP capability bitmask",
+    "capability_tags": "Advertised capability labels as a JSON array",
     "service_name": "service.name description attribute",
     "service_version": "service.version description attribute",
+    "service.name": "service.name (quoted identifier)",
+    "service.version": "service.version (quoted identifier)",
     "stale": "1 when the agent is past its own silence budget",
     "attributes": "All description attributes as a JSON object",
 }
@@ -90,11 +110,14 @@ ALLOWED_FUNCTIONS = frozenset(
     {
         "abs",
         "coalesce",
+        "date",
+        "datetime",
         "ifnull",
         "instr",
         "json_array_length",
         "json_extract",
         "json_type",
+        "julianday",
         "length",
         "like",
         "glob",
@@ -104,18 +127,52 @@ ALLOWED_FUNCTIONS = frozenset(
         "replace",
         "round",
         "rtrim",
+        "strftime",
         "substr",
+        "time",
         "trim",
         "typeof",
         "upper",
     }
 )
 
-_HEALTH_TOKENS = frozenset({"healthy", "health_status", "remote_config_status", "status"})
+_HEALTH_TOKENS = frozenset(
+    {
+        "healthy",
+        "health_status",
+        "remote_config_status",
+        "status",
+        "stale",
+        "last_heartbeat",
+        "heartbeat_age_seconds",
+    }
+)
 
 _ATTR_CALL = re.compile(r"\battr\s*\(\s*(['\"])(.*?)\1\s*\)", re.IGNORECASE)
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _QUOTED_IDENTIFIER = re.compile(r'"((?:[^"]|"")*)"')
+
+
+def capability_columns() -> Dict[str, int]:
+    """Capability label -> bit, in the spelling an operator would type.
+
+    ``AcceptsRemoteConfig`` rather than ``accepts_remote_config`` because that is the
+    OpAMP vocabulary the UI already shows; SQLite identifiers are case-insensitive, so
+    the exact camel case is not required, only the spelling.
+    """
+    from server.state import CAPABILITY_TAGS
+
+    return {
+        label.replace(" ", ""): bit
+        for bit, (label, _icon) in CAPABILITY_TAGS.items()
+    }
+
+
+def _known_columns() -> Dict[str, str]:
+    columns = dict(CORE_COLUMNS)
+    for label in capability_columns():
+        columns[label] = "INTEGER"
+    return columns
 
 
 class AgentQueryError(ValueError):
@@ -312,10 +369,18 @@ def _attribute_values(agent: "AgentState") -> Dict[str, str]:
 
 
 def _agent_row(agent: "AgentState") -> Dict[str, Any]:
+    from server.state import utcnow
+
     attributes = _attribute_values(agent)
     health = agent.health if isinstance(agent.health, dict) else {}
     health_status = health.get("status")
     type_info = agent.type_info()
+    compliance = agent.compliance if isinstance(agent.compliance, dict) else {}
+    compliant = compliance.get("compliant")
+    compliant_text = (
+        "unknown" if compliant is None else ("yes" if compliant is True else "no")
+    )
+    heartbeat_age = max(0, int((utcnow() - agent.last_heartbeat).total_seconds()))
     row: Dict[str, Any] = {
         "id": agent.agent_id,
         "agent_id": agent.agent_id,
@@ -323,22 +388,36 @@ def _agent_row(agent: "AgentState") -> Dict[str, Any]:
         "health_status": health_status if isinstance(health_status, str) else None,
         "remote_config_status": agent.remote_config_status,
         "status": agent.remote_config_status,
-        "connected_at": agent.connected_at.isoformat(),
-        "last_heartbeat": agent.last_heartbeat.isoformat(),
+        # SQLite datetime form (`YYYY-MM-DD HH:MM:SS`, UTC), not the API's ISO
+        # spelling: `datetime('now', '-1 hour')` compares against it directly.
+        "connected_at": agent.connected_at.strftime("%Y-%m-%d %H:%M:%S"),
+        "last_heartbeat": agent.last_heartbeat.strftime("%Y-%m-%d %H:%M:%S"),
         "agent_type": type_info.get("agent_type"),
+        "type": type_info.get("agent_type"),
+        "compliant": compliant_text,
+        "is_compliant": None if compliant is None else int(bool(compliant)),
+        "heartbeat_age_seconds": heartbeat_age,
+        "capabilities": int(agent.capabilities or 0),
+        "capability_tags": json.dumps(
+            [tag["label"] for tag in agent.capability_tags], sort_keys=True
+        ),
         "service_name": attributes.get("service.name"),
         "service_version": attributes.get("service.version"),
+        "service.name": attributes.get("service.name"),
+        "service.version": attributes.get("service.version"),
         "stale": int(agent.is_stale()),
         "attributes": json.dumps(attributes, sort_keys=True),
     }
+    for label, bit in capability_columns().items():
+        row[label] = int(bool(int(agent.capabilities or 0) & bit))
     for key, value in attributes.items():
-        if key not in CORE_COLUMNS:
+        if key not in _known_columns():
             row[key] = value
     return row
 
 
 def _table_columns(agents: Sequence["AgentState"], sql: str) -> List[str]:
-    columns = list(CORE_COLUMNS)
+    columns = list(_known_columns())
     seen = set(columns)
     for agent in agents:
         for key in _attribute_values(agent):
@@ -360,7 +439,7 @@ def _connect(sql: str, agents: Sequence["AgentState"]) -> sqlite3.Connection:
     columns = _table_columns(agents, sql)
     definitions = []
     for name in columns:
-        column_type = CORE_COLUMNS.get(name, "TEXT")
+        column_type = _known_columns().get(name, "TEXT")
         definitions.append(f"{quote_identifier(name)} {column_type}")
     connection.execute(f"CREATE TABLE agents ({', '.join(definitions)})")
     if agents:
@@ -545,8 +624,48 @@ def _suggestion_rows(agents: Sequence["AgentState"]) -> List[Dict[str, Any]]:
 
     for name, description in CORE_DESCRIPTIONS.items():
         add(name, "core", description)
+    for label in capability_columns():
+        add(
+            label,
+            "capability",
+            "OpAMP capability flag: 1 advertised, 0 not advertised",
+        )
     for agent in agents:
+        # Values for the core columns operators actually filter on. A suggestion is
+        # only useful when it is a value this fleet reported, so these are sampled
+        # from the same agents the query will run against.
+        type_info = agent.type_info()
+        compliance = agent.compliance if isinstance(agent.compliance, dict) else {}
+        compliant = compliance.get("compliant")
+        for name, value in (
+            ("type", type_info.get("agent_type")),
+            ("agent_type", type_info.get("agent_type")),
+            ("healthy", None if agent.healthy is None else int(bool(agent.healthy))),
+            (
+                "compliant",
+                "unknown" if compliant is None else ("yes" if compliant is True else "no"),
+            ),
+            (
+                "is_compliant",
+                None if compliant is None else int(bool(compliant)),
+            ),
+            ("service.name", agent.get_attr("service.name")),
+            ("service_name", agent.get_attr("service.name")),
+            ("service.version", agent.get_attr("service.version")),
+            ("service_version", agent.get_attr("service.version")),
+            ("capabilities", int(agent.capabilities or 0)),
+        ):
+            if value is not None:
+                add(name, "core", CORE_DESCRIPTIONS.get(name, ""))["values"].append(
+                    str(value)
+                )
+        for label, bit in capability_columns().items():
+            add(label, "capability", "")["values"].append(
+                "1" if int(agent.capabilities or 0) & bit else "0"
+            )
         for key, value in _attribute_values(agent).items():
+            if key in _known_columns():
+                continue
             bucket = add(
                 key,
                 "attribute",
@@ -556,8 +675,7 @@ def _suggestion_rows(agents: Sequence["AgentState"]) -> List[Dict[str, Any]]:
             if value not in bucket["values"]:
                 bucket["values"].append(value)
     for bucket in seen.values():
-        bucket["values"].sort(key=str.lower)
-        bucket["values"] = bucket["values"][:12]
+        bucket["values"] = sorted(set(bucket["values"]), key=str.lower)[:12]
     return sorted(seen.values(), key=lambda bucket: (bucket["kind"] != "core", bucket["name"].lower()))
 
 
@@ -574,6 +692,16 @@ def schema(agents: Sequence["AgentState"]) -> Dict[str, Any]:
     if any(agent.healthy is not None for agent in agents):
         examples.append("SELECT * FROM agents WHERE healthy = 1")
     examples.append("SELECT * FROM agents WHERE remote_config_status = 'APPLIED'")
+    examples.append("SELECT * FROM agents WHERE type = 'otelcol'")
+    examples.append("SELECT * FROM agents WHERE compliant = 'no'")
+    examples.append("SELECT * FROM agents WHERE AcceptsRemoteConfig = 1")
+    examples.append(
+        "SELECT * FROM agents WHERE \"service.name\" = 'collector-prod'"
+    )
+    examples.append(
+        "SELECT * FROM agents WHERE last_heartbeat < datetime('now', '-1 hour')"
+    )
+    examples.append("SELECT * FROM agents WHERE heartbeat_age_seconds > 300")
     attribute_columns = [column for column in columns if column["kind"] == "attribute"]
     for column in attribute_columns[:6]:
         for value in column["values"][:2]:

@@ -485,6 +485,25 @@
   as group, preview/edit/archive/restore. Groups were removed from Remote Config, which
   now only consumes them as a target and links to the page. `st.page_link` cannot be
   used from a page rendered standalone by `AppTest`; use a markdown pointer instead.
+- **Agent List search (#132 follow-up):** a native `st.text_input` cannot do
+  context-aware completion and a selectbox is a second control, so the editor is a
+  small **custom component** at `ui/components/sql_search/index.html` (served by
+  `ui/sql_search.py`; no npm/build step). One input, one popup: `SELECT` → `* FROM
+  agents` → `WHERE` → columns → operators → live values, with Tab accepting and
+  Enter running. Suggestions are computed in JS from the `/agents/query/schema`
+  payload, so typing never reruns Python; only a submitted query crosses the
+  component boundary. The component value is sticky in Streamlit, so a submission
+  carries a `nonce` and the page acts once per nonce (without it, `st.rerun()` loops
+  forever because the same `submit: true` value is returned on every rerun).
+- **SQL columns for the search UX:** `type` (alias of `agent_type`), `compliant`
+  (`yes`/`no`/`unknown`), `is_compliant` (1/0/NULL), `heartbeat_age_seconds`,
+  `capabilities`, `capability_tags`, `service.name`/`service.version` (quoted dotted
+  aliases), and one boolean column per OpAMP capability (`AcceptsRemoteConfig`,
+  `ReportsHealth`, …). `connected_at`/`last_heartbeat` are stored as UTC
+  `YYYY-MM-DD HH:MM:SS` so `datetime('now','-1 hour')` compares directly (ISO `T`/`Z`
+  text does not). `datetime/date/time/strftime/julianday` are in the function
+  whitelist; `stale`, `last_heartbeat` and `heartbeat_age_seconds` are health/liveness
+  tokens for the group push guard.
 - **Docs:** `docs/sql-agent-queries.md` is the language reference for humans and agents.
 - Tests: `tests/test_agent_query.py` (language, refusals, query groups, selector-kind
   switching, in-place schema upgrade) plus parity/MCP/CLI/UI updates.

@@ -68,6 +68,26 @@ def test_the_ui_files_we_think_are_here():
     }
 
 
+# --------------------------------------------------- one-box SQL search (#132)
+
+
+def test_the_sql_search_editor_is_a_single_input_component():
+    """The issue asked for one box with Tab completion, not a picker + a box.
+
+    This is a packaging/intent guard, not a behaviour test: it proves the component
+    ships with the UI and still implements the single-input contract. The behaviour
+    itself is exercised in a browser (Playwright) during development, and the server
+    side of the query is covered by tests/test_agent_query.py.
+    """
+    component = UI_DIR / "components" / "sql_search" / "index.html"
+    assert component.exists(), "the SQL search component must ship with the UI"
+    text = source(component)
+    assert 'id="q"' in text, "the editor must have one input"
+    assert 'id="pop"' in text, "suggestions must be a popup, not a second box"
+    assert "streamlit:setComponentValue" in text
+    assert "Tab" in text and "ArrowDown" in text
+
+
 # ------------------------------------------------- "one login implementation"
 
 

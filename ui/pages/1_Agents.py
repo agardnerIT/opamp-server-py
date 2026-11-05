@@ -5,13 +5,13 @@ import streamlit as st
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from ui.sql_search import sql_search
 from ui.shared import (
     AGENT_TOKEN_ENV,
     EXPIRY_CHOICES,
     MINTED_TOKEN_KEY,
     ROLE_ADMIN,
     ROLE_OPERATOR,
-    ROLE_VIEWER,
     SERVER_URL,
     agent_auth_mode,
     agent_auth_note,
@@ -158,37 +158,6 @@ def _empty_fleet():
 
 
 # ---------------------------------------------------------- SQL agent search (#132)
-
-
-def _apply_agent_query():
-    """Callback: the button's click is the moment the typed query becomes active.
-
-    Doing this in a callback rather than after the widget matters: Streamlit forbids
-    assigning to a widget's own session key after that widget has been instantiated,
-    and the search box has to stay editable while a previous result is still shown.
-    """
-    st.session_state["agents_active_query"] = (
-        st.session_state.get("agents_sql") or ""
-    ).strip() or None
-
-
-def _clear_agent_query():
-    st.session_state["agents_sql"] = ""
-    st.session_state["agents_active_query"] = None
-
-
-def _insert_agent_suggestion():
-    suggestion = st.session_state.get("agents_sql_suggestion")
-    if suggestion:
-        st.session_state["agents_sql"] = suggestion
-
-
-def _load_agent_group():
-    name = st.session_state.get("agents_group_pick")
-    query = (st.session_state.get("agents_group_queries") or {}).get(name)
-    if query:
-        st.session_state["agents_sql"] = query
-        st.session_state["agents_active_query"] = query
 
 
 def _run_agent_query(sql):
@@ -609,10 +578,9 @@ else:
     st.header("Agent List")
 
     # ---------------------------------------------------------- SQL search (#132)
-    # The list is the search interface: type a SELECT, see the matching agents, and
-    # only then decide whether the query is worth saving as a group. Suggestions are
-    # built from the live schema, so `host_arch = 'amd64'` is offered because an
-    # agent reported that value, not because it was hard-coded here.
+    # The list is the search interface: type a SELECT, Tab through the live schema,
+    # and see the matching agents. The component computes suggestions in the browser
+    # (no rerun per keystroke); Python only hears about a submitted query.
     schema = {}
     try:
         schema_response = requests.get(
@@ -622,99 +590,42 @@ else:
             schema = schema_response.json() or {}
     except Exception:
         schema = {}
-    examples = schema.get("examples") or [
-        "SELECT * FROM agents",
-        "SELECT * FROM agents WHERE healthy = 1",
-    ]
 
     if "agents_sql" not in st.session_state:
         st.session_state["agents_sql"] = ""
 
-    with st.container(border=True):
-        st.markdown("**Search agents with SQL**")
-        st.caption(
-            "A read-only `SELECT * FROM agents WHERE ...` over the live fleet. "
-            "Description attributes are columns (`host_arch`, `environment`, "
-            "`\"os.type\"`, …); the suggestions are the columns and values this "
-            "fleet actually reports. Save a query as a group on the **Groups** page."
-        )
-        suggestion_cols = st.columns([4, 1])
-        with suggestion_cols[0]:
-            st.selectbox(
-                "Suggestions from the live fleet",
-                options=examples,
-                key="agents_sql_suggestion",
-                label_visibility="collapsed",
-            )
-        with suggestion_cols[1]:
-            st.button(
-                "Insert",
-                key="agents_sql_insert",
-                on_click=_insert_agent_suggestion,
-                use_container_width=True,
-            )
-        st.text_input(
-            "SQL selection",
-            key="agents_sql",
-            placeholder="SELECT * FROM agents WHERE host_arch = 'amd64'",
-            label_visibility="collapsed",
-            # Enter in a search box should search, not require a second click.
-            on_change=_apply_agent_query,
-        )
+    st.markdown("**Search agents with SQL**")
+    search_result = sql_search(
+        value=st.session_state.get("agents_sql") or "",
+        schema=schema,
+        key="agents_sql_component",
+        label="",
+        placeholder="SELECT * FROM agents WHERE ...",
+    )
+    submit_nonce = search_result.get("nonce")
+    if (
+        search_result.get("submit")
+        and submit_nonce is not None
+        and submit_nonce != st.session_state.get("agents_last_submit_nonce")
+    ):
+        # A component value is sticky until it changes again, so the nonce is what
+        # makes one Enter press mean one search instead of an infinite rerun.
+        st.session_state["agents_last_submit_nonce"] = submit_nonce
+        text = search_result.get("text") or ""
+        st.session_state["agents_sql"] = text
+        st.session_state["agents_active_query"] = text.strip() or None
+        st.rerun()
+    elif search_result.get("text") and search_result["text"] != st.session_state.get("agents_sql"):
+        # A blur sends the text without submitting, so a later rerun (view mode,
+        # refresh) does not replace what the operator typed.
+        st.session_state["agents_sql"] = search_result["text"]
 
-        # "Find by group" belongs on the search interface too: a saved query is just a
-        # search someone already wrote. Only SQL-backed groups can be loaded as text;
-        # legacy filter-document groups are handled on the Groups page.
-        session = get_session()
-        if session is not None and not session.expired():
-            groups_response = admin_request(
-                "GET", "/groups", required_role=ROLE_VIEWER
-            )
-            group_rows = []
-            if groups_response is not None and groups_response.status_code == 200:
-                group_rows = (groups_response.json() or {}).get("groups") or []
-            query_groups = {
-                row["name"]: row.get("query")
-                for row in group_rows
-                if row.get("query")
-            }
-            st.session_state["agents_group_queries"] = query_groups
-            if query_groups:
-                group_cols = st.columns([4, 1])
-                with group_cols[0]:
-                    st.selectbox(
-                        "Find by group",
-                        options=[""] + sorted(query_groups),
-                        format_func=lambda value: (
-                            "— load a saved query —" if not value else value
-                        ),
-                        key="agents_group_pick",
-                        label_visibility="collapsed",
-                    )
-                with group_cols[1]:
-                    st.button(
-                        "Load group",
-                        key="agents_group_load",
-                        on_click=_load_agent_group,
-                        use_container_width=True,
-                    )
-
-        action_cols = st.columns([1, 1, 4])
-        with action_cols[0]:
-            st.button(
-                "Search",
-                key="agents_sql_search",
-                type="primary",
-                on_click=_apply_agent_query,
-                use_container_width=True,
-            )
-        with action_cols[1]:
-            st.button(
-                "Clear",
-                key="agents_sql_clear",
-                on_click=_clear_agent_query,
-                use_container_width=True,
-            )
+    st.caption(
+        "Read-only SQL over the live fleet. Description attributes are columns "
+        "(`host_arch`, `environment`, `\"os.type\"`, …); suggestions come from the "
+        "columns and values this fleet actually reports. Save a query as a group on "
+        "the **Groups** page."
+    )
 
     active_query = st.session_state.get("agents_active_query")
     agents = all_agents

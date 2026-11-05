@@ -57,13 +57,29 @@ The table is `agents`. Every row is one connected agent.
 | `health_status` | text | `ComponentHealth.status`, e.g. `ok`, `config_conflict` |
 | `remote_config_status` | text | `UNSET`, `APPLIED`, `APPLYING`, `FAILED`, … |
 | `status` | text | Alias for `remote_config_status` |
-| `connected_at` | text | ISO-8601 timestamp |
-| `last_heartbeat` | text | ISO-8601 timestamp |
+| `connected_at` | text | UTC `YYYY-MM-DD HH:MM:SS` |
+| `last_heartbeat` | text | UTC `YYYY-MM-DD HH:MM:SS` |
 | `agent_type` | text | Resolved profile, e.g. `otelcol`, `generic` |
-| `service_name` | text | `service.name` description attribute |
-| `service_version` | text | `service.version` description attribute |
+| `type` | text | Alias for `agent_type` |
+| `compliant` | text | `'yes'`, `'no'` or `'unknown'` (OPA verdict) |
+| `is_compliant` | integer | `1` compliant, `0` not, `NULL` never evaluated / OPA disabled |
+| `heartbeat_age_seconds` | integer | Seconds since the last OpAMP message |
+| `capabilities` | integer | OpAMP capability bitmask |
+| `capability_tags` | text | Advertised capability labels as a JSON array |
+| `service_name` / `service.name` | text | `service.name` description attribute (quote the dotted form) |
+| `service_version` / `service.version` | text | `service.version` description attribute (quote the dotted form) |
 | `stale` | integer | `1` when the agent is past its own silence budget |
 | `attributes` | text | Every description attribute as a JSON object |
+
+`connected_at` and `last_heartbeat` are UTC in SQLite's `YYYY-MM-DD HH:MM:SS`
+form, so they compare directly with `datetime('now', '-1 hour')` and friends.
+
+### Capabilities
+
+Every OpAMP capability is also a **boolean column**, named exactly as the UI shows
+it: `AcceptsRemoteConfig`, `ReportsHealth`, `AcceptsRestart`, and so on. `1` means the
+agent advertised it; `0` means it did not. `capabilities` is the raw bitmask for
+anything the columns do not cover.
 
 ### Description attributes
 
@@ -102,7 +118,8 @@ Useful functions (a whitelist; anything else is refused):
 
 `lower`, `upper`, `length`, `substr`, `trim`, `ltrim`, `rtrim`, `replace`,
 `coalesce`, `ifnull`, `nullif`, `instr`, `abs`, `round`, `typeof`,
-`json_extract`, `json_type`, `json_array_length`.
+`json_extract`, `json_type`, `json_array_length`, `datetime`, `date`, `time`,
+`strftime`, `julianday`.
 
 `LIKE` is case-insensitive for ASCII in SQLite and supports `%` and `_`.
 
@@ -120,6 +137,43 @@ Healthy agents only:
 
 ```sql
 SELECT * FROM agents WHERE healthy = 1
+```
+
+Agents that accept remote configuration:
+
+```sql
+SELECT * FROM agents WHERE AcceptsRemoteConfig = 1
+```
+
+Non-compliant agents:
+
+```sql
+SELECT * FROM agents WHERE compliant = 'no'
+```
+
+Agents that have not been seen for an hour:
+
+```sql
+SELECT * FROM agents
+WHERE last_heartbeat < datetime('now', '-1 hour')
+```
+
+The same thing as a number, which is easier to reason about:
+
+```sql
+SELECT * FROM agents WHERE heartbeat_age_seconds > 3600
+```
+
+By agent type:
+
+```sql
+SELECT * FROM agents WHERE type = 'otelcol'
+```
+
+By `service.name` (the dotted attribute, quoted):
+
+```sql
+SELECT * FROM agents WHERE "service.name" = 'collector-prod'
 ```
 
 Agents that have never reported health:

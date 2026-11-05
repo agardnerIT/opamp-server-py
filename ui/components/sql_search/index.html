@@ -1,0 +1,560 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <style>
+    :root {
+      --bg: #ffffff;
+      --text: #262730;
+      --muted: #6b7280;
+      --border: #d5d9e2;
+      --popup: #ffffff;
+      --hover: #f0f2f6;
+      --accent: #ff4b4b;
+      --accent-text: #ffffff;
+      --font: "Source Sans Pro", sans-serif;
+      --mono: "Source Code Pro", monospace;
+    }
+    body.dark {
+      --bg: #0e1117;
+      --text: #fafafa;
+      --muted: #a3a8b8;
+      --border: #3b4050;
+      --popup: #1a1f2b;
+      --hover: #262d3d;
+      --accent: #ff4b4b;
+      --accent-text: #ffffff;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: transparent; color: var(--text); font-family: var(--font); }
+    #wrap { position: relative; padding: 2px 0 0 0; }
+    #label { font-size: 0.82rem; color: var(--muted); margin: 0 0 4px 2px; }
+    #box {
+      display: flex; align-items: center; gap: 6px;
+      border: 1px solid var(--border); border-radius: 8px; background: var(--bg);
+      padding: 0 6px 0 10px; min-height: 42px;
+    }
+    #box:focus-within { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+    #q {
+      flex: 1; border: 0; outline: 0; background: transparent; color: var(--text);
+      font-family: var(--mono); font-size: 0.92rem; padding: 10px 0; min-width: 0;
+    }
+    #q::placeholder { color: var(--muted); }
+    #run {
+      border: 0; border-radius: 6px; background: var(--accent); color: var(--accent-text);
+      font-size: 0.9rem; padding: 6px 10px; cursor: pointer; white-space: nowrap;
+    }
+    #run:hover { filter: brightness(1.06); }
+    #pop {
+      position: absolute; left: 0; right: 0; top: 100%; z-index: 1000;
+      margin-top: 4px; background: var(--popup); border: 1px solid var(--border);
+      border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.18); overflow: hidden;
+      display: none; max-height: 300px; overflow-y: auto;
+    }
+    #pop.open { display: block; }
+    .item {
+      display: flex; align-items: baseline; gap: 8px; padding: 7px 10px;
+      cursor: pointer; border-bottom: 1px solid transparent;
+    }
+    .item:last-child { border-bottom: 0; }
+    .item.active, .item:hover { background: var(--hover); }
+    .kind {
+      flex: 0 0 auto; font-size: 0.64rem; text-transform: uppercase; letter-spacing: .04em;
+      color: var(--muted); border: 1px solid var(--border); border-radius: 4px;
+      padding: 1px 4px; min-width: 4.4rem; text-align: center;
+    }
+    .label { font-family: var(--mono); font-size: 0.86rem; color: var(--text); white-space: nowrap; }
+    .detail { font-size: 0.72rem; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .hint { font-size: 0.7rem; color: var(--muted); margin: 4px 2px 0 2px; }
+    .hint kbd {
+      border: 1px solid var(--border); border-radius: 3px; padding: 0 3px;
+      font-family: var(--mono); font-size: 0.68rem;
+    }
+  </style>
+</head>
+<body>
+  <div id="wrap">
+    <div id="label"></div>
+    <div id="box">
+      <input id="q" autocomplete="off" autocapitalize="off" spellcheck="false" />
+      <button id="run" title="Run query (Ctrl+Enter)">Search</button>
+    </div>
+    <div id="pop" role="listbox"></div>
+    <div class="hint"><kbd>Tab</kbd> accept · <kbd>↑</kbd><kbd>↓</kbd> choose · <kbd>Enter</kbd> run · <kbd>Esc</kbd> close</div>
+  </div>
+  <script>
+    "use strict";
+
+    const RENDER = "streamlit:render";
+    const READY = "streamlit:componentReady";
+    const VALUE = "streamlit:setComponentValue";
+    const HEIGHT = "streamlit:setFrameHeight";
+
+    const input = document.getElementById("q");
+    const popup = document.getElementById("pop");
+    const label = document.getElementById("label");
+    const runButton = document.getElementById("run");
+
+    let schema = {};
+    let columns = [];
+    let suggestions = [];
+    let active = -1;
+    let activeMoved = false;
+    let popupOpen = false;
+    let replaceStart = 0;
+    let currentValue = "";
+
+    const PRIORITY = [
+      "type", "healthy", "compliant", "last_heartbeat", "heartbeat_age_seconds",
+      "service.name", "service_name", "agent_type", "remote_config_status", "id",
+      "capabilities", "stale"
+    ];
+    const KEYWORDS = [
+      "SELECT", "FROM", "WHERE", "AND", "OR", "NOT", "IN", "LIKE", "IS NULL",
+      "IS NOT NULL", "ORDER BY", "LIMIT"
+    ];
+    const TOKEN_RE = /"(?:[^"]|"")*"|'(?:[^']|'')*'|[A-Za-z_][A-Za-z0-9_.]*|<=|>=|<>|!=|==|=|<|>|[(),*]/g;
+
+    function post(message) {
+      message.isStreamlitMessage = true;
+      window.parent.postMessage(message, "*");
+    }
+    function sendHeight(height) {
+      post({ type: HEIGHT, height: height });
+    }
+    function sendValue(submit) {
+      currentValue = input.value;
+      post({
+        type: VALUE,
+        dataType: "json",
+        value: {
+          text: currentValue,
+          submit: !!submit,
+          // A submitted value is sticky in Streamlit until it changes again. The
+          // nonce lets the page act once per submission instead of rerunning forever.
+          nonce: submit ? Date.now() : null,
+        },
+      });
+    }
+
+    function normalize(value) {
+      return String(value == null ? "" : value).replace(/^"|"$/g, "").replace(/""/g, '"').toLowerCase();
+    }
+    function findColumn(token) {
+      if (!token) return null;
+      const wanted = normalize(token);
+      return columns.find((column) => (
+        normalize(column.name) === wanted || normalize(column.sql_name) === wanted
+      )) || null;
+    }
+    function isOperator(token) {
+      return ["=", "==", "!=", "<>", "<", ">", "<=", ">=", "LIKE", "IN", "IS", "NOT"].includes(
+        String(token || "").toUpperCase()
+      );
+    }
+    function tokenize(text) {
+      return text.match(TOKEN_RE) || [];
+    }
+    function insideSingleQuote(before) {
+      let open = false;
+      for (let i = 0; i < before.length; i += 1) {
+        if (before[i] === "'") {
+          if (open && before[i + 1] === "'") { i += 1; continue; }
+          open = !open;
+        }
+      }
+      return open;
+    }
+    function contextFor(text, cursor) {
+      const before = text.slice(0, cursor);
+      const inString = insideSingleQuote(before);
+      let prefix;
+      let start;
+      if (inString) {
+        const quote = before.lastIndexOf("'");
+        prefix = before.slice(quote + 1);
+        start = quote;
+      } else {
+        const match = before.match(/(?:"(?:[^"]|"")*"?|[A-Za-z_][A-Za-z0-9_.]*)$/);
+        prefix = match ? match[0] : "";
+        start = cursor - prefix.length;
+      }
+      const head = before.slice(0, start);
+      const tokens = tokenize(head);
+      let last = tokens.length ? tokens[tokens.length - 1] : "";
+      const prev = tokens.length > 1 ? tokens[tokens.length - 2] : "";
+      // At the very start of the box the partial word is the keyword the operator is
+      // typing (`SELECT`), not a prefix to filter the SELECT suggestions by.
+      if (!tokens.length && prefix) {
+        if (prefix.toUpperCase() === "SELECT") {
+          // `SELECT` is a complete keyword, so its suggestions append after it
+          // (`SELECT * FROM agents`) instead of replacing what was typed.
+          last = prefix;
+          prefix = "";
+          start = cursor;
+        } else {
+          last = prefix;
+        }
+      }
+      return { before, inString, prefix, start, tokens, last, prev };
+    }
+    function columnBeforeOperator(tokens, operatorIndex) {
+      for (let i = operatorIndex - 1; i >= 0; i -= 1) {
+        const column = findColumn(tokens[i]);
+        if (column) return column;
+        if (["WHERE", "AND", "OR", "NOT", "(", ","].includes(String(tokens[i]).toUpperCase())) break;
+      }
+      return null;
+    }
+    function quoteValue(value) {
+      return "'" + String(value).replace(/'/g, "''") + "'";
+    }
+    function matchesPrefix(item, prefix) {
+      if (!prefix) return true;
+      const wanted = normalize(prefix);
+      return normalize(item.label).includes(wanted) || normalize(item.insert).includes(wanted);
+    }
+    function add(list, seen, insert, label, detail, kind) {
+      const key = String(insert);
+      if (seen.has(key)) return;
+      seen.add(key);
+      list.push({ insert: insert, label: label || insert, detail: detail || "", kind: kind || "keyword" });
+    }
+    function filterList(list, prefix) {
+      return list.filter((item) => matchesPrefix(item, prefix));
+    }
+
+    function columnSuggestions(prefix) {
+      const list = [];
+      const seen = new Set();
+      const ordered = columns.slice().sort((a, b) => {
+        const ai = PRIORITY.indexOf(a.name);
+        const bi = PRIORITY.indexOf(b.name);
+        if (ai !== bi) return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
+        if (a.kind !== b.kind) return a.kind === "attribute" ? 1 : -1;
+        return a.name.localeCompare(b.name);
+      });
+      for (const column of ordered) {
+        const detail = column.description || (
+          column.kind === "capability" ? "capability flag (1 = advertised)" :
+          column.kind === "attribute" ? "description attribute" : ""
+        );
+        add(
+          list, seen,
+          column.sql_name + " ",
+          column.name,
+          detail,
+          column.kind === "capability" ? "capability" : column.kind === "attribute" ? "attribute" : "column"
+        );
+      }
+      add(list, seen, "attr('", "attr('key')", "description attribute by name", "function");
+      return filterList(list, prefix).slice(0, 12);
+    }
+
+    function valueSuggestions(column, prefix, operator) {
+      const list = [];
+      const seen = new Set();
+      if (!column) return list;
+      const name = normalize(column.name);
+      const values = (column.values || []).map((value) => String(value));
+      const addValue = (raw, insert, detail, showInsert) => add(
+        list, seen, insert, showInsert ? String(insert).trim() : String(raw), detail, "value"
+      );
+
+      if (name === "last_heartbeat" || name === "connected_at") {
+        for (const [labelText, expression] of [
+          ["last hour", "datetime('now', '-1 hour')"],
+          ["last 24 hours", "datetime('now', '-24 hours')"],
+          ["last 7 days", "datetime('now', '-7 days')"],
+          ["now", "datetime('now')"],
+        ]) {
+          addValue(
+            labelText,
+            expression + " ",
+            labelText === "now" ? "the current time" : "agents seen in the " + labelText
+          );
+        }
+        return filterList(list, prefix).slice(0, 12);
+      }
+      if (name === "heartbeat_age_seconds") {
+        for (const [labelText, value] of [["5 minutes", "300"], ["1 hour", "3600"], ["1 day", "86400"]]) {
+          addValue(labelText, value + " ", "older than " + labelText);
+        }
+        return filterList(list, prefix).slice(0, 12);
+      }
+      if (name === "healthy" || name === "is_compliant" || name === "stale" || column.kind === "capability") {
+        for (const value of ["1", "0"]) addValue(value, value + " ", "boolean flag", true);
+        return filterList(list, prefix).slice(0, 12);
+      }
+      if (name === "compliant") {
+        for (const value of ["yes", "no", "unknown"]) {
+          addValue(value, quoteValue(value) + " ", "OPA verdict", true);
+        }
+        return filterList(list, prefix).slice(0, 12);
+      }
+      for (const value of values) {
+        if (!value) continue;
+        if (operator === "LIKE") {
+          addValue(value, quoteValue("%" + value + "%") + " ", "contains " + value, true);
+        } else {
+          addValue(value, quoteValue(value) + " ", column.description || "observed value", true);
+        }
+      }
+      return filterList(list, prefix).slice(0, 12);
+    }
+
+    function operatorSuggestions(column, prefix) {
+      const list = [];
+      const seen = new Set();
+      const name = normalize(column.name);
+      const operators = (
+        name === "last_heartbeat" || name === "connected_at" || name === "heartbeat_age_seconds"
+          ? ["<", "<=", ">", ">=", "=", "!="]
+          : name === "healthy" || name === "is_compliant" || name === "stale" || column.kind === "capability"
+            ? ["=", "!=", "IS NULL"]
+            : ["=", "!=", "LIKE", "IN", "IS NULL", "IS NOT NULL"]
+      );
+      for (const operator of operators) {
+        add(list, seen, operator + " ", operator, "comparison", "operator");
+      }
+      return filterList(list, prefix).slice(0, 12);
+    }
+
+    function keywordSuggestions(prefix) {
+      const list = [];
+      const seen = new Set();
+      for (const keyword of KEYWORDS) add(list, seen, keyword + " ", keyword, "", "keyword");
+      return filterList(list, prefix).slice(0, 12);
+    }
+
+    function suggestionsFor(ctx) {
+      const prefix = ctx.prefix;
+      const last = String(ctx.last || "");
+      const upper = last.toUpperCase();
+      const lastColumn = findColumn(last);
+      const list = [];
+      const seen = new Set();
+
+      if (ctx.inString) {
+        const operatorIndex = ctx.tokens.length - 1;
+        const operator = String(ctx.tokens[operatorIndex] || "").toUpperCase();
+        const column = columnBeforeOperator(ctx.tokens, operatorIndex);
+        return valueSuggestions(column, prefix, operator);
+      }
+      if (isOperator(last)) {
+        if (upper === "IN") {
+          add(list, seen, "( ", "(", "list of values", "operator");
+          return filterList(list, prefix);
+        }
+        if (upper === "IS") {
+          add(list, seen, "NULL ", "NULL", "never reported", "keyword");
+          add(list, seen, "NOT NULL ", "NOT NULL", "has a value", "keyword");
+          return filterList(list, prefix);
+        }
+        if (upper === "NOT") {
+          add(list, seen, "IN ", "IN", "", "keyword");
+          add(list, seen, "LIKE ", "LIKE", "", "keyword");
+          add(list, seen, "NULL ", "NULL", "", "keyword");
+          return filterList(list, prefix);
+        }
+        const operatorIndex = ctx.tokens.length - 1;
+        const column = columnBeforeOperator(ctx.tokens, operatorIndex);
+        if (upper === "LIKE") return valueSuggestions(column, prefix, "LIKE");
+        return valueSuggestions(column, prefix, upper);
+      }
+      if (last === "(") {
+        const inIndex = ctx.tokens.map((token) => token.toUpperCase()).lastIndexOf("IN");
+        if (inIndex >= 0) {
+          const column = columnBeforeOperator(ctx.tokens, inIndex);
+          return valueSuggestions(column, prefix, "IN");
+        }
+        return columnSuggestions(prefix);
+      }
+      if (upper === "SELECT") {
+        add(list, seen, "* FROM agents ", "* FROM agents", "select every column from the fleet", "snippet");
+        add(list, seen, "* ", "*", "select every column", "operator");
+        for (const item of columnSuggestions(prefix)) add(list, seen, item.insert, item.label, item.detail, item.kind);
+        return filterList(list, prefix).slice(0, 12);
+      }
+      if (upper === "FROM") {
+        add(list, seen, "agents ", "agents", "the live fleet table", "table");
+        return filterList(list, prefix);
+      }
+      if (upper === "AGENTS") {
+        add(list, seen, "WHERE ", "WHERE", "filter the fleet", "keyword");
+        add(list, seen, "ORDER BY ", "ORDER BY", "sort the result", "keyword");
+        add(list, seen, "LIMIT ", "LIMIT", "search only; a group may not use it", "keyword");
+        return filterList(list, prefix).slice(0, 12);
+      }
+      if (upper === "WHERE" || upper === "AND" || upper === "OR" || upper === "NOT") {
+        return columnSuggestions(prefix);
+      }
+      if (upper === "ORDER" || upper === "BY") {
+        return columnSuggestions(prefix);
+      }
+      if (upper === "LIMIT") {
+        for (const value of ["10", "20", "50", "100"]) add(list, seen, value + " ", value, "rows", "number");
+        return filterList(list, prefix);
+      }
+      if (last === "*") {
+        add(list, seen, "FROM ", "FROM", "", "keyword");
+        return filterList(list, prefix);
+      }
+      if (upper === "ASC" || upper === "DESC") return keywordSuggestions(prefix);
+      if (lastColumn) return operatorSuggestions(lastColumn, prefix);
+      const combined = [];
+      const combinedSeen = new Set();
+      for (const item of keywordSuggestions(prefix)) add(combined, combinedSeen, item.insert, item.label, item.detail, item.kind);
+      for (const item of columnSuggestions(prefix)) add(combined, combinedSeen, item.insert, item.label, item.detail, item.kind);
+      return combined.slice(0, 12);
+    }
+
+    function render() {
+      popup.innerHTML = "";
+      if (!suggestions.length) {
+        popup.classList.remove("open");
+        popupOpen = false;
+        sendHeight(64);
+        return;
+      }
+      if (active < 0 || active >= suggestions.length) active = 0;
+      suggestions.forEach((item, index) => {
+        const row = document.createElement("div");
+        row.className = "item" + (index === active ? " active" : "");
+        row.setAttribute("role", "option");
+        const kind = document.createElement("span");
+        kind.className = "kind";
+        kind.textContent = item.kind;
+        const labelText = document.createElement("span");
+        labelText.className = "label";
+        labelText.textContent = item.label;
+        const detail = document.createElement("span");
+        detail.className = "detail";
+        detail.textContent = item.detail || "";
+        row.appendChild(kind);
+        row.appendChild(labelText);
+        row.appendChild(detail);
+        row.addEventListener("mousedown", (event) => event.preventDefault());
+        row.addEventListener("click", () => accept(item));
+        popup.appendChild(row);
+      });
+      popup.classList.add("open");
+      popupOpen = true;
+      const height = Math.min(360, 72 + suggestions.length * 34);
+      sendHeight(height);
+    }
+
+    function update(forceOpen) {
+      const cursor = input.selectionStart == null ? input.value.length : input.selectionStart;
+      const ctx = contextFor(input.value, cursor);
+      replaceStart = ctx.start;
+      suggestions = suggestionsFor(ctx);
+      activeMoved = false;
+      if (!forceOpen && !suggestions.length) active = -1;
+      render();
+    }
+
+    function accept(item) {
+      if (!item) return;
+      const cursor = input.selectionStart == null ? input.value.length : input.selectionStart;
+      const after = input.value.slice(cursor);
+      const insert = item.insert;
+      const needsSpace = !/[ ('"[(]$/.test(insert);
+      const spacer = needsSpace ? " " : "";
+      // Appending after a complete keyword (`SELECT` -> `* FROM agents`) needs the
+      // separating space that replacing a partial word does not.
+      const beforeChar = replaceStart > 0 ? input.value[replaceStart - 1] : "";
+      const leading = replaceStart === cursor && beforeChar && !/\s/.test(beforeChar) ? " " : "";
+      input.value = input.value.slice(0, replaceStart) + leading + insert + spacer + after.replace(/^\s+/, "");
+      const position = replaceStart + leading.length + insert.length + spacer.length;
+      input.setSelectionRange(position, position);
+      input.focus();
+      update(true);
+    }
+
+    function submit() {
+      popup.classList.remove("open");
+      popupOpen = false;
+      active = -1;
+      suggestions = [];
+      sendHeight(64);
+      sendValue(true);
+    }
+
+    input.addEventListener("input", () => update(false));
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "ArrowDown") {
+        if (!suggestions.length) return;
+        activeMoved = true;
+        active = (active + 1) % suggestions.length;
+        render();
+        event.preventDefault();
+      } else if (event.key === "ArrowUp") {
+        if (!suggestions.length) return;
+        activeMoved = true;
+        active = (active - 1 + suggestions.length) % suggestions.length;
+        render();
+        event.preventDefault();
+      } else if (event.key === "Tab") {
+        if (popupOpen && suggestions.length) {
+          accept(suggestions[active < 0 ? 0 : active]);
+          event.preventDefault();
+        }
+      } else if (event.key === "Enter") {
+        if (popupOpen && activeMoved && suggestions.length) {
+          accept(suggestions[active < 0 ? 0 : active]);
+        } else {
+          submit();
+        }
+        event.preventDefault();
+      } else if (event.key === "Escape") {
+        popup.classList.remove("open");
+        popupOpen = false;
+        event.preventDefault();
+      } else if (event.key === " " && (event.ctrlKey || event.metaKey)) {
+        update(true);
+        event.preventDefault();
+      }
+    });
+    input.addEventListener("blur", () => {
+      // Keep Python's copy of the text in sync when focus leaves the editor, without
+      // rerunning on every keystroke. The component ignores the echo while focused.
+      window.setTimeout(() => {
+        if (document.activeElement !== input) sendValue(false);
+      }, 120);
+    });
+    runButton.addEventListener("click", submit);
+
+    function applyTheme(theme) {
+      if (!theme) return;
+      document.body.classList.toggle("dark", theme.base === "dark");
+      if (theme.primaryColor) document.documentElement.style.setProperty("--accent", theme.primaryColor);
+      if (theme.backgroundColor) document.documentElement.style.setProperty("--bg", theme.backgroundColor);
+      if (theme.textColor) document.documentElement.style.setProperty("--text", theme.textColor);
+      if (theme.secondaryBackgroundColor) document.documentElement.style.setProperty("--popup", theme.secondaryBackgroundColor);
+      if (theme.font) document.documentElement.style.setProperty("--font", theme.font);
+    }
+
+    window.addEventListener("message", (event) => {
+      const data = event.data;
+      if (!data || data.type !== RENDER) return;
+      const args = data.args || {};
+      schema = args.schema || {};
+      columns = Array.isArray(schema.columns) ? schema.columns : [];
+      if (args.label) label.textContent = args.label;
+      if (args.placeholder) input.placeholder = args.placeholder;
+      applyTheme(data.theme || {});
+      const incoming = typeof args.value === "string" ? args.value : "";
+      if (incoming !== currentValue && document.activeElement !== input) {
+        currentValue = incoming;
+        input.value = incoming;
+      }
+      update(false);
+      sendHeight(popupOpen ? Math.min(360, 72 + suggestions.length * 34) : 64);
+    });
+
+    post({ type: READY, apiVersion: 1 });
+    sendHeight(64);
+  </script>
+</body>
+</html>

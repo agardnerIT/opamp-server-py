@@ -169,6 +169,53 @@ def test_healthy_zero_is_a_row_value_not_a_missing_column():
     ) == [OTHER_ID]
 
 
+def test_capability_compliance_dotted_service_and_heartbeat_columns():
+    from datetime import datetime, timedelta, timezone
+
+    from server.state import AgentState
+
+    agent = AgentState(
+        instance_uid=bytes.fromhex(UID.hex()),
+        agent_id=AGENT_ID,
+        healthy=True,
+        capabilities=0x0002 | 0x0800,  # Accepts Remote Config + Reports Health
+        compliance={"compliant": False},
+        last_heartbeat=datetime.now(timezone.utc) - timedelta(hours=2),
+        description={
+            "nonIdentifyingAttributes": [
+                {"key": "service.name", "value": {"stringValue": "collector-prod"}},
+            ]
+        },
+    )
+    agents = [agent]
+
+    def ids(query):
+        return agent_query.select_ids(query, agents)
+
+    assert ids("SELECT * FROM agents WHERE type = 'generic'") == [AGENT_ID]
+    assert ids("SELECT * FROM agents WHERE compliant = 'no'") == [AGENT_ID]
+    assert ids("SELECT * FROM agents WHERE is_compliant = 0") == [AGENT_ID]
+    assert ids("SELECT * FROM agents WHERE AcceptsRemoteConfig = 1") == [AGENT_ID]
+    assert ids("SELECT * FROM agents WHERE ReportsStatus = 0") == [AGENT_ID]
+    assert ids('SELECT * FROM agents WHERE "service.name" = \'collector-prod\'') == [
+        AGENT_ID
+    ]
+    assert ids("SELECT * FROM agents WHERE last_heartbeat < datetime('now', '-1 hour')") == [
+        AGENT_ID
+    ]
+    assert ids("SELECT * FROM agents WHERE heartbeat_age_seconds > 3600") == [AGENT_ID]
+
+    schema = agent_query.schema(agents)
+    by_name = {column["name"]: column for column in schema["columns"]}
+    assert by_name["AcceptsRemoteConfig"]["kind"] == "capability"
+    assert "1" in by_name["AcceptsRemoteConfig"]["values"]
+    assert by_name["compliant"]["values"] == ["no"]
+    assert by_name["type"]["values"] == ["generic"]
+    assert by_name["service.name"]["values"] == ["collector-prod"]
+    assert any("compliant = 'no'" in example for example in schema["examples"])
+    assert any("AcceptsRemoteConfig = 1" in example for example in schema["examples"])
+
+
 def test_a_write_multi_statement_or_unknown_table_is_refused(client):
     describe(UID, "prod", "amd64", "darwin")
     for query in (

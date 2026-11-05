@@ -79,9 +79,12 @@ PAUSE_HELP = {
     "config_conflict": (
         "An agent applied the config, but its daemon is merging a second config source "
         "that schedules the same query names — so the effective config is not what this "
-        "server thinks it is. Manage the query in one place (usually "
-        "`--config_plugin=opamp`, so the agent is the only source), then **Resume**: the "
-        "revision is fine, so nothing has to be re-proposed."
+        "server thinks it is. Fix it on the agent host: delete the duplicate from the "
+        "local config file, or run osqueryd with `--config_plugin=opamp "
+        "--extensions_require=opamp --extensions_timeout=30` so the agent is the only "
+        "source (both flags are required — without `--extensions_require` osqueryd exits "
+        "with `Unknown registry plugin: opamp`). Then **Resume**: the revision is fine, so "
+        "nothing has to be re-proposed."
     ),
     "delivery_unconfirmed": "An agent never acknowledged its delivery (attempt budget exhausted).",
     "superseded": "Another revision replaced this one on at least one agent.",

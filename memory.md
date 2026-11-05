@@ -604,6 +604,14 @@ of it.
   engine would cancel it within a tick). Layers: client `resume_config_rollout`,
   `opampctl config rollout resume`, UI button in the pause panel, **no MCP tool** (like
   abort), README/skill tables, parity + audit maps.
+- **The operator hint had to be exact.** `--config_plugin=opamp` on its own makes
+  osqueryd exit during startup (`Cannot activate opamp config plugin: Unknown registry
+  plugin: opamp`): the plugin is registered by the extension *after* the daemon resolves
+  its config plugin, so the daemon must wait for it —
+  `--config_plugin=opamp --extensions_require=opamp --extensions_timeout=30`
+  (`osquery-opamp` README/docs, measured on 5.24.0). The UI hint, the `resume` docstring
+  and this entry say both flags, and name the guaranteed alternative (delete the
+  duplicate from `/var/osquery/osquery.conf`) first.
 - `tests/test_profiles.py`'s move snapshot needed a `previous_bodies` argument in
   `golden_payloads.capture()`: its fixture agent reports the config the snapshot push
   contains, so without it every address looked like "another source's" and a stage that

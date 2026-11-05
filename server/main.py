@@ -4996,8 +4996,9 @@ def resume_config_rollout(
     A pause is terminal until a human decides (D6), and until now the only decisions were
     abort or roll back. A `config_conflict` pause is neither: the revision applied and is
     the one we want — the agent host had a second config source scheduling the same
-    query, which the operator fixes there (osquery: run with `--config_plugin=opamp`, or
-    delete the duplicate from the local file). Resume clears the pause and re-runs the
+    query, which the operator fixes there (osquery: delete the duplicate from the local
+    config file, or run the daemon with `--config_plugin=opamp --extensions_require=opamp
+    --extensions_timeout=30` so the agent is the only source). Resume clears the pause and re-runs the
     **same** gate over the same facts within one tick (`CONFIG_PUSH_TICK_SECONDS`).
 
     Nothing is re-delivered and no revision is edited; if the conflict is still present

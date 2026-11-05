@@ -951,14 +951,20 @@ def _pause(rollout: Mapping[str, Any], verdict: GateResult, now: datetime) -> No
         paused_at=now.isoformat(),
     )
     for agent_id in verdict.blocking:
-        # Keep the *specific* state (`failed`, `reverted`) that caused the pause; only an
-        # agent that was simply in flight becomes `paused`. Overwriting "failed" with
-        # "paused" would make the one detail the operator needs disappear.
+        # Keep the *specific* state (`failed`, `reverted`, `applied`) that caused the
+        # pause; only an agent that was simply in flight becomes `paused`. Overwriting
+        # "failed" with "paused" would make the one detail the operator needs disappear,
+        # and overwriting "applied" makes the summary read "0 applied" on a rollout whose
+        # config *is* on the box (a `config_conflict` agent has applied it by definition).
         current = next(
             (row for row in store.agents(rollout_id) if row["agent_id"] == agent_id),
             None,
         )
-        if current is not None and current.get("state") in ("failed", "reverted"):
+        if current is not None and current.get("state") in (
+            "failed",
+            "reverted",
+            "applied",
+        ):
             continue
         store.set_agent(rollout_id, agent_id, state="paused", detail=verdict.reason)
     if verdict.reason in PAUSE_REASONS:

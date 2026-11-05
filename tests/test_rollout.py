@@ -361,7 +361,10 @@ def test_resume_re_runs_the_conflict_gate_without_redelivering(client):
     _pause_on_config_conflict(client, agent_id)
     view = rollout.view(rollout_id)
     assert view["status"] == "paused" and view["paused_reason"] == "config_conflict"
-    assert view["agents"]["states"].get("paused") == 1
+    # The pause is a fact about the rollout, not about the agent: it applied our hash, so
+    # the summary must not read "0 applied" while the config is running on the box.
+    assert view["agents"]["states"].get("applied") == 1
+    assert view["agents"]["states"].get("paused") == 0
 
     # Resumed while the host is still unfixed: the gate sees the same facts and pauses
     # again immediately — an honest retry, not a silent second delivery.

@@ -141,6 +141,15 @@ class TestLiveOps:
         data = parse(run("agents", "list", "--attr", "environment=prod"))
         assert data["count"] == 0
 
+    def test_agents_query_and_schema(self, live):
+        register_agent("4444444444444444")
+        data = parse(run("agents", "list", "--query", "SELECT * FROM agents"))
+        assert data["count"] == 1
+        assert data["agents"][0]["id"] == "4444444444444444"
+        schema = parse(run("agents", "query-schema"))
+        assert schema["table"] == "agents"
+        assert schema["guide"] == "docs/sql-agent-queries.md"
+
     def test_agents_manifest_raw(self, live):
         register_agent("3333333333333333", with_components=True)
         result = run("agents", "manifest", "3333333333333333", "--raw")
@@ -295,6 +304,14 @@ class TestOffline:
     def test_agents_list(self, offline_db):
         data = parse(run("--db", str(offline_db), "agents", "list"))
         assert data["count"] == 2
+
+    def test_agents_list_query(self, offline_db):
+        data = parse(
+            run("--db", str(offline_db), "agents", "list", "--query",
+                "SELECT * FROM agents WHERE id = 'aaaa1111aaaa1111'")
+        )
+        assert data["count"] == 1
+        assert data["agents"][0]["id"] == "aaaa1111aaaa1111"
 
     def test_agents_list_filter(self, offline_db):
         data = parse(run("--db", str(offline_db), "agents", "list", "--status", "APPLIED"))
@@ -875,8 +892,6 @@ class TestGroups:
 
     @staticmethod
     def described(agent_id, environment="prod"):
-        from proto import anyvalue_pb2
-
         state = AgentState(instance_uid=bytes.fromhex(agent_id), agent_id=agent_id)
         state.description = {
             "nonIdentifyingAttributes": [
@@ -916,6 +931,27 @@ class TestGroups:
 
         keys = parse(run("--password", ADMIN_PW, "groups", "keys"))
         assert any(bucket["key"] == "environment" for bucket in keys["keys"])
+
+    def test_create_from_a_query_round_trip(self, live):
+        self.described("cd" * 16, environment="prod")
+        created = parse(
+            run(
+                "--password", ADMIN_PW, "groups", "create",
+                "--name", "sql-prod",
+                "--query", "SELECT * FROM agents WHERE environment = 'prod'",
+            )
+        )
+        assert created["selector_kind"] == "query"
+        assert created["definition"] == {}
+        assert created["members"] == ["cd" * 16]
+
+        edited = parse(
+            run(
+                "--password", ADMIN_PW, "groups", "update", "sql-prod",
+                "--query", "SELECT * FROM agents WHERE environment = 'staging'",
+            )
+        )
+        assert edited["members"] == []
 
     def test_group_and_attr_cannot_be_combined(self, live, tmp_path):
         config = tmp_path / "collector.yaml"

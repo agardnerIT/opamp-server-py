@@ -49,6 +49,7 @@ ADMIN_PAGES = [
 ]
 HELP_PAGE = REPO / "ui" / "pages" / "4_Help.py"
 REMOTE_CONFIG_PAGE = REPO / "ui" / "pages" / "5_Remote_Config.py"
+GROUPS_PAGE = REPO / "ui" / "pages" / "3_Groups.py"
 TOKEN = "opamp_admin_smoketoken"
 
 
@@ -127,6 +128,27 @@ class FakeServer:
         authed = self._token_ok(headers)
         # `admin_request()` goes through `.request()` for every verb, so the pages that
         # use it (Remote Config) need the agent listing here, not only in `.get()`.
+        if url.endswith("/agents/query/schema"):
+            return FakeResponse(
+                200,
+                {
+                    "table": "agents",
+                    "columns": [
+                        {"name": "healthy", "sql_name": "healthy", "kind": "core",
+                         "description": "1 healthy, 0 unhealthy", "values": [],
+                         "agent_count": 0},
+                        {"name": "host_arch", "sql_name": "host_arch",
+                         "kind": "attribute", "description": "description attribute",
+                         "values": ["amd64"], "agent_count": 1},
+                    ],
+                    "examples": [
+                        "SELECT * FROM agents",
+                        "SELECT * FROM agents WHERE host_arch = 'amd64'",
+                    ],
+                    "operators": ["=", "IN (...)", "LIKE", "AND", "OR"],
+                    "guide": "docs/sql-agent-queries.md",
+                },
+            )
         if method == "GET" and url.endswith("/agents"):
             return FakeResponse(200, {"agents": self.agents, "count": len(self.agents)})
         # The agent detail view, through the verb the Remote Config prefill uses (#131).
@@ -665,6 +687,8 @@ def test_a_viewer_is_not_offered_sign_out_everywhere(server):
         "ui/app.py",
         "ui/pages/1_Agents.py",
         "ui/pages/2_Reports.py",
+        # #132: groups are their own page now (search + save + edit a SQL selector).
+        "ui/pages/3_Groups.py",
         "ui/pages/4_Help.py",
         # #104: the page that can take down a fleet must at least render in both
         # postures — an unsigned visit and a signed-in one lead to different code.
@@ -1402,7 +1426,9 @@ def group_row(**overrides):
     row = {
         "group_id": "grp-1",
         "name": "prod-emea",
+        "selector_kind": "definition",
         "definition": {"environment": "production"},
+        "query": None,
         "include": [],
         "exclude": ["ab" * 16],
         "member_count": 1,
@@ -1447,18 +1473,19 @@ def test_a_health_defined_group_is_called_out_and_not_offered_as_a_push(server):
     assert "defined on **healthy**" in texts(app)
 
 
-def test_the_groups_section_lists_previews_and_creates_groups(server):
+def test_the_groups_page_lists_previews_and_edits_a_saved_group(server):
+    """#132: groups moved out of Remote Config into their own search/save page."""
     server.agents = [fake_agent("cd" * 16)]
     server.groups = [group_row()]
-    app = signed_in(REMOTE_CONFIG_PAGE)
+    app = signed_in(GROUPS_PAGE)
     app.run()
-    app.toggle(key="rc_manage_groups").set_value(True).run()
     assert not app.exception, app.exception
-    labels = [column.label for column in app.selectbox]
-    assert "Preview a group" in labels
-    # The builder offers keys harvested from live agents, not a free-text box.
-    assert "Definition attribute" in labels
-    assert "Value" in labels
+    labels = [widget.label for widget in app.selectbox]
+    assert "Find by group (loads its query into the editor)" in labels
+    assert "Suggestions from the live fleet" in labels
+    assert "Inspect a group" in labels
+    # The SQL editor is the primary interface, not a key/value builder.
+    assert any(widget.label == "SQL selection" for widget in app.text_area)
 
     [button for button in app.button if button.label == "Preview membership"][0].click().run()
     assert not app.exception, app.exception

@@ -1994,6 +1994,7 @@ class SQLiteGroupStore:
                     name TEXT NOT NULL,
                     name_key TEXT NOT NULL UNIQUE,
                     definition_json TEXT NOT NULL,
+                    query TEXT,
                     include_json TEXT NOT NULL DEFAULT '[]',
                     exclude_json TEXT NOT NULL DEFAULT '[]',
                     description TEXT,
@@ -2022,6 +2023,16 @@ class SQLiteGroupStore:
                 "CREATE INDEX IF NOT EXISTS collector_group_resolutions_idx "
                 "ON collector_group_resolutions(group_id, evaluated_at DESC)"
             )
+            # #132: a group may be a SQL selection instead of a filter document.
+            # Added in place so an existing database upgrades without a migration
+            # step; every pre-#132 row simply has no query and keeps resolving
+            # through its definition.
+            group_columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(collector_groups)").fetchall()
+            }
+            if "query" not in group_columns:
+                conn.execute("ALTER TABLE collector_groups ADD COLUMN query TEXT")
             conn.execute("PRAGMA journal_mode=WAL")
 
     def _connect(self) -> sqlite3.Connection:
@@ -2096,6 +2107,50 @@ class SQLiteGroupStore:
         return cleaned
 
     @classmethod
+    def validate_selector(
+        cls, definition: Optional[Dict[str, Any]], query: Optional[str]
+    ) -> tuple:
+        """Validate the one selector a group may have, returning `(definition, query)`.
+
+        `definition` is the #111 filter document; `query` is the #132 SQL selection.
+        Exactly one is required. An empty definition is refused (it would mean the
+        whole fleet), and a query is validated here so a typo cannot be saved and
+        only discovered at push time.
+        """
+        from server import agent_query
+
+        has_query = query is not None and str(query).strip() != ""
+        if query is not None and not has_query:
+            raise GroupError(422, "query must not be empty")
+        if has_query and definition not in (None, {}):
+            raise GroupError(
+                422,
+                {
+                    "message": "a group needs one selector, not two",
+                    "hint": "send either definition (a filter document) or query (SQL), "
+                    "not both",
+                },
+            )
+        if has_query:
+            try:
+                validated = agent_query.validate(str(query), for_group=True)
+            except agent_query.AgentQueryError as exc:
+                # One error vocabulary for group callers: a query refusal is a group
+                # refusal, and the routes already know how to render a GroupError.
+                raise GroupError(exc.status_code, exc.detail) from exc
+            return {}, validated
+        if definition is None:
+            raise GroupError(
+                422,
+                {
+                    "message": "a group needs a selector",
+                    "hint": "send query (SQL, recommended) or definition (a filter "
+                    "document); an empty definition would mean the whole fleet",
+                },
+            )
+        return cls.validate_definition(definition), None
+
+    @classmethod
     def validate_pins(cls, pins: Any, *, label: str) -> List[str]:
         if pins is None:
             return []
@@ -2133,7 +2188,8 @@ class SQLiteGroupStore:
         self,
         *,
         name: str,
-        definition: Dict[str, Any],
+        definition: Optional[Dict[str, Any]] = None,
+        query: Optional[str] = None,
         include: Optional[Sequence[str]] = None,
         exclude: Optional[Sequence[str]] = None,
         description: Optional[str] = None,
@@ -2141,9 +2197,15 @@ class SQLiteGroupStore:
         source: str = "api",
         created_by: str = "system",
     ) -> Dict[str, Any]:
-        """Create a group. Duplicate names are refused case-insensitively."""
+        """Create a group. Duplicate names are refused case-insensitively.
+
+        A group is defined by **either** a SQL selection (`query`, #132) or a filter
+        document (`definition`, #111). Exactly one is required: accepting both would
+        create two sources of truth for one name, and which one wins is the kind of
+        question an operator should never have to ask about a blast radius.
+        """
         name = self.validate_name(name)
-        definition = self.validate_definition(definition)
+        definition, query = self.validate_selector(definition, query)
         include_list = self.validate_pins(include, label="include")
         exclude_list = self.validate_pins(exclude, label="exclude")
         if set(include_list) & set(exclude_list):
@@ -2171,14 +2233,15 @@ class SQLiteGroupStore:
                 )
             conn.execute(
                 "INSERT INTO collector_groups (group_id, name, name_key, "
-                "definition_json, include_json, exclude_json, description, owner, "
+                "definition_json, query, include_json, exclude_json, description, owner, "
                 "source, created_by, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     group_id,
                     name,
                     name.lower(),
                     json.dumps(definition, sort_keys=True),
+                    query,
                     json.dumps(include_list),
                     json.dumps(exclude_list),
                     description,
@@ -2197,6 +2260,7 @@ class SQLiteGroupStore:
         *,
         name: Optional[str] = None,
         definition: Optional[Dict[str, Any]] = None,
+        query: Optional[str] = None,
         include: Optional[Sequence[str]] = None,
         exclude: Optional[Sequence[str]] = None,
         description: Optional[str] = None,
@@ -2210,6 +2274,15 @@ class SQLiteGroupStore:
         """
         changes: Dict[str, Any] = {}
         updates: Dict[str, Any] = {}
+        if definition is not None and query is not None:
+            raise GroupError(
+                422,
+                {
+                    "message": "a group needs one selector, not two",
+                    "hint": "send either definition (a filter document) or query (SQL), "
+                    "not both",
+                },
+            )
         if name is not None and name != current["name"]:
             validated = self.validate_name(name)
             updates["name"] = validated
@@ -2220,6 +2293,29 @@ class SQLiteGroupStore:
             if validated != current["definition"]:
                 updates["definition_json"] = json.dumps(validated, sort_keys=True)
                 changes["definition"] = diff_definitions(current["definition"], validated)
+            # Replacing a SQL selection with a filter document clears the query, so
+            # the group keeps exactly one selector.
+            if current.get("query"):
+                updates["query"] = None
+                changes["query"] = {"from": current.get("query"), "to": None}
+        if query is not None:
+            from server import agent_query
+
+            try:
+                validated_query = agent_query.validate(query, for_group=True)
+            except agent_query.AgentQueryError as exc:
+                raise GroupError(exc.status_code, exc.detail) from exc
+            if validated_query != (current.get("query") or None):
+                updates["query"] = validated_query
+                changes["query"] = {
+                    "from": current.get("query"),
+                    "to": validated_query,
+                }
+            # A #111 group being rewritten as SQL: the old definition must go, not
+            # linger as a second, contradictory selector.
+            if current.get("definition"):
+                updates["definition_json"] = "{}"
+                changes["definition"] = diff_definitions(current["definition"], {})
         if include is not None:
             validated_pins = self.validate_pins(include, label="include")
             if validated_pins != current["include"]:
@@ -2262,6 +2358,7 @@ class SQLiteGroupStore:
         actor: str,
         name: Optional[str] = None,
         definition: Optional[Dict[str, Any]] = None,
+        query: Optional[str] = None,
         include: Optional[Sequence[str]] = None,
         exclude: Optional[Sequence[str]] = None,
         description: Optional[str] = None,
@@ -2289,6 +2386,7 @@ class SQLiteGroupStore:
             current,
             name=name,
             definition=definition,
+            query=query,
             include=include,
             exclude=exclude,
             description=description,

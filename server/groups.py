@@ -39,6 +39,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from loguru import logger
 
+from server import agent_query
 from server.state import (
     COLLECTOR_GROUPS,
     RESERVED_FILTER_KEYS,
@@ -103,6 +104,21 @@ def definition_of(record: Mapping[str, Any]) -> Dict[str, Any]:
     return dict(record.get("definition") or {})
 
 
+def query_of(record: Mapping[str, Any]) -> Optional[str]:
+    """The SQL selection when this group is a #132 query group, else `None`.
+
+    A group has exactly one selector. Old (#111) groups have a definition; new ones
+    have a query. Keeping the two shapes readable side by side is what lets an
+    existing database upgrade without a rewrite of its saved groups.
+    """
+    query = record.get("query")
+    return str(query) if query else None
+
+
+def selector_kind(record: Mapping[str, Any]) -> str:
+    return "query" if query_of(record) else "definition"
+
+
 def snapshot(record: Mapping[str, Any]) -> Dict[str, Any]:
     """The immutable copy of a group that a revision records (#111 invariant 1).
 
@@ -115,6 +131,7 @@ def snapshot(record: Mapping[str, Any]) -> Dict[str, Any]:
         "group_id": record.get("group_id"),
         "name": record.get("name"),
         "definition": definition_of(record),
+        "query": query_of(record),
         "include": list(record.get("include") or []),
         "exclude": list(record.get("exclude") or []),
         "description": record.get("description"),
@@ -126,6 +143,19 @@ def snapshot(record: Mapping[str, Any]) -> Dict[str, Any]:
 
 def _dedupe(values: Sequence[str]) -> List[str]:
     return list(dict.fromkeys(str(value) for value in values))
+
+
+def select_ids(query: str, agents: Sequence[AgentState]) -> List[str]:
+    """Evaluate a saved query, translating its refusal into the group vocabulary.
+
+    A saved query is validated on write, so this is normally unreachable. It exists
+    so a database edited outside the API (or a future SQLite change) surfaces as the
+    same 422 a group caller already understands, not as a raw sqlite exception.
+    """
+    try:
+        return agent_query.select_ids(query, agents, for_group=True)
+    except agent_query.AgentQueryError as exc:
+        raise GroupError(exc.status_code, exc.detail) from exc
 
 
 def resolve_members(
@@ -145,14 +175,19 @@ def resolve_members(
     operator trusting the blast radius and re-deriving it by hand.
     """
     definition = definition_of(record)
+    query = query_of(record)
     include = [str(agent_id) for agent_id in (record.get("include") or [])]
     exclude = [str(agent_id) for agent_id in (record.get("exclude") or [])]
     by_id = {agent.agent_id: agent for agent in agents}
 
     if stored_agent_ids is None:
-        matched = [agent.agent_id for agent in agents if agent.matches_scope(definition)]
-        matched.sort()
-        base = "definition"
+        if query:
+            matched = select_ids(query, agents)
+            base = "query"
+        else:
+            matched = [agent.agent_id for agent in agents if agent.matches_scope(definition)]
+            matched.sort()
+            base = "definition"
     else:
         matched = [str(agent_id) for agent_id in stored_agent_ids]
         base = "stored"
@@ -166,8 +201,11 @@ def resolve_members(
     # like a working pin forever.
     unknown_pins = [agent_id for agent_id in include if agent_id not in by_id]
 
+    # Named for the selector that produced them: `definition` for a #111 filter
+    # document, `query` for a #132 SQL selection. Keeping one bucket for both would
+    # make "where did this member come from?" unanswerable for the newer groups.
     sources = {
-        "definition": [
+        base: [
             agent_id for agent_id in members if agent_id in matched and agent_id not in include
         ],
         "included": [agent_id for agent_id in members if agent_id in include],
@@ -180,6 +218,7 @@ def resolve_members(
         "sources": sources,
         "unknown_pins": unknown_pins,
         "definition": definition,
+        "query": query,
     }
 
 
@@ -212,6 +251,7 @@ def preview(
         "name": record.get("name"),
         "archived": bool(record.get("archived_at")),
         "definition": resolved["definition"],
+        "query": resolved.get("query"),
         "include": list(record.get("include") or []),
         "exclude": list(record.get("exclude") or []),
         "members": resolved["members"],
@@ -277,7 +317,13 @@ def expand_scope(
         )
 
     definition = definition_of(record)
-    dynamic = health_defined(definition)
+    query = query_of(record)
+    # A query is health-defined when it filters on a health column. It gets the same
+    # refusal as a filter document: a group that drops agents exactly when they break
+    # is the one group a remediation push must not silently use.
+    dynamic = health_defined(definition) or (
+        agent_query.references_health(query) if query else []
+    )
     last = store.last_resolution(record["group_id"])
     if dynamic and not use_stored_resolution:
         raise GroupError(
@@ -289,6 +335,7 @@ def expand_scope(
                     "agents break"
                 ),
                 "definition": definition,
+                "query": query,
                 "hint": (
                     "a health-based group drops the agents that need the fix; repeat "
                     "with \"use_stored_resolution\": true to push to the membership "
@@ -352,12 +399,18 @@ def expand_scope(
     group_snapshot = snapshot(record)
     return {
         "kind": "selector",
-        "filter": dict(definition),
+        # A query group has no filter document. Downstream code must resolve through
+        # `query` (or the recorded membership); an empty `filter` is the honest
+        # representation, and `group_id` is what routes it to `resolve_group_scope`.
+        "filter": dict(definition) if not query else {},
+        "query": query,
         "include_future": bool(scope.get("include_future")),
         "group_id": record["group_id"],
         "group_name": record["name"],
         "group_snapshot": group_snapshot,
         "group_definition": definition,
+        "group_query": query,
+        "selector_kind": selector_kind(record),
         "include": list(record.get("include") or []),
         "exclude": list(record.get("exclude") or []),
         # Named `group_resolved_agents` (not `resolved_agents`): the latter is
@@ -390,11 +443,15 @@ def resolve_group_scope(
     else:
         base = None
     if base is None:
-        base = [
-            agent.agent_id
-            for agent in agents
-            if agent.matches_scope(scope.get("filter") or {})
-        ]
+        query = scope.get("query") or scope.get("group_query")
+        if query:
+            base = select_ids(query, agents)
+        else:
+            base = [
+                agent.agent_id
+                for agent in agents
+                if agent.matches_scope(scope.get("filter") or {})
+            ]
     members = [str(agent_id) for agent_id in base if agent_id not in exclude]
     members = _dedupe(members + [agent_id for agent_id in include if agent_id not in members])
     return sorted(members)
@@ -480,7 +537,9 @@ def view(
     out = {
         "group_id": record.get("group_id"),
         "name": record.get("name"),
+        "selector_kind": selector_kind(record),
         "definition": definition_of(record),
+        "query": query_of(record),
         "include": list(record.get("include") or []),
         "exclude": list(record.get("exclude") or []),
         "description": record.get("description"),
@@ -496,7 +555,8 @@ def view(
         "members": resolved["members"],
         "sources": resolved["sources"],
         "unknown_pins": resolved["unknown_pins"],
-        "health_defined": health_defined(definition_of(record)),
+        "health_defined": health_defined(definition_of(record))
+        or (agent_query.references_health(query_of(record)) if query_of(record) else []),
         "last_resolution": last,
         "membership_changes": _membership_changes(store, record["group_id"]),
     }

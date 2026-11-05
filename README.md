@@ -6,7 +6,7 @@ OpenTelemetry OpAMP server in Python with FastAPI + Streamlit UI. Optional integ
 
 This server also lets you:
 
-- Filter collectors by metadata (such as `environment: production`)
+- Filter collectors by metadata (such as `environment: production`) or by **SQL** (`SELECT * FROM agents WHERE host_arch = 'amd64'`) — see [`docs/sql-agent-queries.md`](docs/sql-agent-queries.md)
 - Build minimal OTel Collectors (server generates a new `manifest.yaml` which you build with the [OpenTelemetry Collector Builder [OCB]](https://github.com/open-telemetry/opentelemetry-collector/tree/main/cmd/builder))
 - Validate connected collectors against OPA compliance policies
 - Be driven by **AI agents** — a REST API with a self-documenting OpenAPI schema, an `opampctl` CLI with JSON output, a shared `opamp_client` Python library, and an MCP server with typed tools
@@ -971,33 +971,44 @@ are enforced and tested:
   offer waits one poll because a reply carries one server-initiated action;
 - `OPAMP_CUSTOM_MESSAGES_ENABLED=false` removes the surface entirely.
 
-### Named collector groups (#111)
+### Named collector groups (#111, SQL since #132)
 
 A filter you retype every push is a filter you eventually mistype. A **group** saves
-the selector under a name:
+a **SQL selection** under a name. Search first, then save the query:
 
 ```bash
-opampctl groups keys                                   # keys/values live agents report
-opampctl --password "$ADMIN_PASSWORD" groups create -n prod-emea \
-    --attr environment=prod --attr region=emea -d "EMEA prod. Owner: platform-oncall."
-opampctl groups preview prod-emea                      # members now vs last resolution
-opampctl --password "$ADMIN_PASSWORD" config propose --file c.yaml --group prod-emea
+opampctl agents query-schema                            # columns + values live agents report
+opampctl agents list --query "SELECT * FROM agents WHERE host_arch = 'amd64'"
+opampctl --password "$ADMIN_PASSWORD" groups create -n macos-au \
+    --query "SELECT * FROM agents WHERE \"os.type\" = 'darwin' AND \"geo.country\" = 'AU'" \
+    -d "macOS gateways in Australia. Owner: platform-oncall."
+opampctl groups preview macos-au                        # members now vs last resolution
+opampctl --password "$ADMIN_PASSWORD" config propose --file c.yaml --group macos-au
 ```
 
 A group is a **named selector**, not a member list: membership is resolved at use
-time by the same code as `GET /agents`, so `--group prod-emea` hits exactly what
-`--attr environment=prod --attr region=emea` would, and cannot go stale. `include`
-forces one agent in, `exclude` forces one out (both audited); there is no nesting.
+time against the live fleet, so `--group macos-au` hits exactly what the query hits
+now, and cannot go stale. `include` forces one agent in, `exclude` forces one out
+(both audited); there is no nesting. The full language reference is
+[`docs/sql-agent-queries.md`](docs/sql-agent-queries.md).
+
+The SQL schema is deliberately small: `agents` with core columns (`id`, `healthy`,
+`health_status`, `remote_config_status`, `agent_type`, `stale`, …) and **one column
+per description attribute** (`environment`, `host_arch`, `"os.type"`, …). Only
+`SELECT` is accepted; writes, `PRAGMA`, `ATTACH` and unknown functions are refused.
+`GET /agents/query/schema` returns the columns plus the values live agents actually
+report, which is what powers the UI's suggestions. Legacy #111 filter-document groups
+still work and can be rewritten as SQL with `groups update --query`.
 
 Four deliberate refusals, each closing a way a "saved filter" feature turns into an
 outage:
 
-- **Matching is exact, case-insensitive equality** — no globs, regex or prefixes
-  (`prod-*` matches nothing). `groups keys` exists so a definition cannot be written
-  against `env` when the fleet reports `environment`.
-- **A group defined on `healthy`/`status` is refused as a push target** (400): the
-  moment an agent breaks it leaves the group, so the push that would fix it skips
-  exactly the agents that need it. `use_stored_resolution: true` sends to the
+- **A group query may not use `LIMIT`/`OFFSET`.** A group is a filter over the whole
+  fleet; an arbitrary subset would make its blast radius depend on row order. Search
+  may use them.
+- **A group defined on `healthy`/`health_status`/`status` is refused as a push target**
+  (400): the moment an agent breaks it leaves the group, so the push that would fix it
+  skips exactly the agents that need it. `use_stored_resolution: true` sends to the
   membership recorded by a `preview` instead.
 - **Silent shrinkage is loud.** Resolving smaller than the last recorded resolution
   returns the `dropped` diff and requires `confirm_scope_change: true`.
@@ -1686,14 +1697,16 @@ The UI signs in the same way the CLI does — `POST /auth/session` — and then 
 | POST | `/agent/{id}/custom-message` | operator | Send a `ServerToAgent.custom_message` (spec §Custom Messages): `{"capability", "type", "data"}` with `data` base64. 400 listing `supported_capabilities` when the agent did not advertise the capability, 422 for bad base64, 413 above 64 KiB, 404 when `OPAMP_CUSTOM_MESSAGES_ENABLED=false`. Delivered **exactly once** on the next reply |
 | POST | `/config/apply` | admin | Push one config to many agents: `{"config_map", "agents": [...] \| "filter": {...} \| "group": "prod-emea", "confirm": true}`. No selector is a 400 — never "all agents". A group target obeys the same guards as a proposal (`use_stored_resolution`, `confirm_scope_change`) |
 | POST | `/config/revisions` | operator | **Propose** a revision — validates and drafts it, delivers nothing: `{"config_map", "scope": {"agent_id" \| "agents" \| "filter" \| "group", "include_future", "use_stored_resolution"}, "confirm_scope_change", "note"}`. Returns `proposal_id`, per-agent revisions and the full verdict. 422 with every structured error |
-| GET | `/groups` | viewer | Saved selectors with a **live** member count and `last_resolution`. Membership is resolved on read, never stored |
-| POST | `/groups` | operator | Create a group: `{"name", "definition": {"environment": "prod"}, "include"?, "exclude"?, "description"?, "owner"?}`. Names are unique case-insensitively and may not be a reserved filter key; an empty definition is refused (it would mean the whole fleet) |
-| GET | `/groups/{id}` | viewer | Definition, current members, `sources` (definition vs pins), `unknown_pins`, `membership_changes` and the resolution history |
-| PUT | `/groups/{id}` | operator | Edit a group. The audit row carries the **definition diff**, and `changes` is returned. Affects future pushes only: a revision keeps its `group_snapshot` |
+| GET | `/agents?q=...` | | **SQL selection** over the live fleet (#132): `SELECT * FROM agents WHERE host_arch = 'amd64'`. Wins over `healthy`/`status`/attribute params. Only `SELECT` from `agents`; descriptions only, never a config body. Returns `agents`, `count`, `query`, `query_columns` |
+| GET | `/agents/query/schema` | | SQL schema + autosuggestion: core columns, one entry per description attribute with observed values, operators and example statements. This is what makes `host_arch = 'amd64'` a suggestion instead of a guess |
+| GET | `/groups` | viewer | Saved selectors with a **live** member count, `selector_kind` (`query`/`definition`) and `last_resolution`. Membership is resolved on read, never stored |
+| POST | `/groups` | operator | Create a group: `{"name", "query": "SELECT * FROM agents WHERE ..."}` (recommended) **or** `{"name", "definition": {"environment": "prod"}}` (legacy), plus `"include"?, "exclude"?, "description"?, "owner"?`. Exactly one selector; names are unique case-insensitively; a query may not use `LIMIT`/`OFFSET` |
+| GET | `/groups/{id}` | viewer | Query (or legacy definition), current members, `sources` (selector vs pins), `unknown_pins`, `membership_changes` and the resolution history |
+| PUT | `/groups/{id}` | operator | Edit a group; `{"query": "..."}` replaces the selector (and clears a legacy definition), `{"definition": {...}}` goes the other way. The audit row carries the **selector diff**, and `changes` is returned. Affects future pushes only: a revision keeps its `group_snapshot` |
 | DELETE | `/groups/{id}` | operator | **Archive** (there is no delete — revisions and rollouts reference the id). 409 while a live rollout uses it. Restorable |
 | POST | `/groups/{id}/restore` | operator | Un-archive |
 | POST | `/groups/{id}/preview` | viewer | `added`/`dropped`/`unchanged` versus the last recorded resolution; records the new baseline. This is how a health-defined group gets a membership for `use_stored_resolution` |
-| GET | `/groups/attribute-keys` | viewer | Attribute keys and observed values from live agents (typo-proof authoring; descriptions only, never a config body) |
+| GET | `/groups/attribute-keys` | viewer | Attribute keys and observed values from live agents (typo-proof authoring; descriptions only, never a config body). Superseded by `/agents/query/schema` for SQL authoring |
 | GET | `/config/revisions` | viewer | Revision metadata (no bodies): `?agent=`, `?status=proposed\|active\|superseded\|rolled_back\|poisoned\|rejected`, `?limit=` |
 | GET | `/config/revisions/{proposal_id}` | viewer | One proposal: each revision's status, stored verdict and delivery record (`attempts`, `last_status`, `poisoned`) |
 | POST | `/config/revisions/{id}/approve` | approver | Re-resolve the selector, **re-run validation**, supersede and activate. 409 `re-validate: …` when the config no longer passes, and 409 when the selector now matches *more* agents (repeat with `confirm_scope_change: true`); `override_reason` overrides a policy violation (audited as `config.override`) |
@@ -1744,6 +1757,8 @@ opampctl config posture                     # config push posture + why each req
 
 # Agents
 opampctl agents list --healthy true --attr environment=prod
+opampctl agents list --query "SELECT * FROM agents WHERE host_arch = 'amd64'"
+opampctl agents query-schema                # columns + values live agents report
 opampctl agents get <agent-id>              # full details incl. metrics
 opampctl agents metrics <agent-id>          # latest OTLP metric values
 opampctl agents manifest <agent-id> --raw   # OCB manifest.yaml for a slim build
@@ -1850,15 +1865,16 @@ opampctl --show-completion      # show the install command/instructions
 ## MCP Server (for AI agents)
 
 An [MCP](https://modelcontextprotocol.io) server (`opamp-mcp` / `python -m mcp_server`)
-exposes 36 typed tools mirroring the API (41 with `OPAMP_MCP_ALLOW_WRITES=true`):
-`list_agents`, `get_agent`, `list_agent_types`,
-`get_agent_metrics`, `generate_manifest`, `fleet_report`, `heavy_collectors_report`,
-`outdated_collectors_report`, `get_compliance`, `check_compliance`,
-`compliance_summary`, `list_policies`, `validate_policies`, `reload_policies`,
-`get_alerts`, `update_alerts`, `test_alerts`, `agent_report`, `health`, `auth_status`,
-`whoami`, `config_posture`, `agent_config`, `validate_config`,
-`list_config_revisions`, `list_config_rollouts`, `get_config_rollout`, `audit_log`,
-`audit_verify`, `audit_export`.
+exposes 39 typed tools mirroring the API (47 with `OPAMP_MCP_ALLOW_WRITES=true`):
+`list_agents`, `query_agents`, `agent_query_schema`, `get_agent`,
+`list_agent_types`, `get_agent_metrics`, `generate_manifest`, `fleet_report`,
+`heavy_collectors_report`, `outdated_collectors_report`, `get_compliance`,
+`check_compliance`, `compliance_summary`, `list_policies`, `validate_policies`,
+`reload_policies`, `get_alerts`, `update_alerts`, `test_alerts`, `agent_report`,
+`health`, `auth_status`, `whoami`, `config_posture`, `agent_config`,
+`validate_config`, `list_config_revisions`, `list_config_rollouts`,
+`get_config_rollout`, `list_groups`, `get_group`, `preview_group`,
+`attribute_keys`, `audit_log`, `audit_verify`, `audit_export`.
 
 **Identity is never delegated to MCP.** Logins, principals and sessions have no MCP
 tools at all — minting an identity is a human/IaC action, not a tool call an AI can

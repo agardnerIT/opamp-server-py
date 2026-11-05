@@ -210,6 +210,7 @@ def list_agents(
     healthy: Optional[str] = None,
     status: Optional[str] = None,
     attributes: Optional[Dict[str, Any]] = None,
+    query: Optional[str] = None,
 ) -> str:
     """List connected agents, optionally filtered.
 
@@ -218,11 +219,45 @@ def list_agents(
         status: Remote config status filter (UNSET/APPLIED/APPLYING/FAILED).
         attributes: Metadata filters on agent description attributes, e.g.
             {"environment": "prod"} or {"environment": ["prod", "staging"]}.
+        query: SQL selection (#132), e.g.
+            "SELECT * FROM agents WHERE host_arch = 'amd64'". Wins over the other
+            arguments. Read `agent_query_schema` first for the columns and the
+            values live agents actually report.
     """
     def call(oc: OpampClient):
         attrs = attributes or {}
+        if query is not None:
+            return oc.query_agents(query)
         return oc.list_agents(healthy=healthy, status=status, **attrs)
     return _tool(call)
+
+
+@mcp.tool()
+def query_agents(query: str) -> str:
+    """Run a SQL selection over the live fleet (#132). Read-only.
+
+    The only table is `agents`. Description attributes are columns named exactly as
+    the agent reports them (quote a key containing a dot or a space), and `attr('key')`
+    is shorthand. `healthy` is 1, 0 or NULL. Only SELECT is accepted. A group saved
+    from a query may not use LIMIT/OFFSET; this search may.
+
+    Call `agent_query_schema` first rather than guessing a column name: it lists the
+    columns and the values observed on connected agents, which is what makes a
+    suggestion (`host_arch = 'amd64'`) different from a guess.
+    """
+    return _tool(lambda oc: oc.query_agents(query))
+
+
+@mcp.tool()
+def agent_query_schema() -> str:
+    """Columns, live values, operators and example SQL for query_agents (#132).
+
+    The autosuggestion payload: core columns (`id`, `healthy`, `remote_config_status`,
+    `agent_type`, ...) plus every description attribute a live agent reports, with
+    sample values. Descriptions only — never an effective config. The language guide
+    is `docs/sql-agent-queries.md`.
+    """
+    return _tool(lambda oc: oc.agent_query_schema())
 
 
 @mcp.tool()
@@ -405,13 +440,18 @@ def attribute_keys() -> str:
 
 def create_group(
     name: str,
-    definition: Dict[str, Any],
+    definition: Optional[Dict[str, Any]] = None,
+    query: Optional[str] = None,
     include: Optional[list] = None,
     exclude: Optional[list] = None,
     description: Optional[str] = None,
     owner: Optional[str] = None,
 ) -> str:
     """Create a named selector (operator; write-gated). Pushes nothing.
+
+    Pass exactly one selector: `query` (SQL, #132, recommended) or `definition` (a
+    legacy filter document). Use `agent_query_schema` to write a query that matches
+    real columns and values.
 
     Only present when OPAMP_MCP_ALLOW_WRITES=true: a group changes the blast radius
     of every future push that names it, which is exactly the sort of decision a human
@@ -421,6 +461,7 @@ def create_group(
     return _tool(
         lambda oc: oc.create_group(
             name,
+            query=query,
             definition=definition,
             include=include,
             exclude=exclude,

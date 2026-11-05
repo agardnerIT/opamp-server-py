@@ -21,7 +21,7 @@ Control plane for OpenTelemetry collectors speaking the
 | Layer | When |
 |-------|------|
 | **`opampctl` CLI** | Default choice for shell agents. JSON output by default; `--raw` prints markdown/YAML. |
-| **MCP server** (`opamp-mcp`) | When running as an MCP client (Claude Desktop/Code, etc.). 36 typed tools by default (41 with `OPAMP_MCP_ALLOW_WRITES=true`), stdio by default. |
+| **MCP server** (`opamp-mcp`) | When running as an MCP client (Claude Desktop/Code, etc.). 39 typed tools by default (47 with `OPAMP_MCP_ALLOW_WRITES=true`), stdio by default. |
 | **`opamp_client` Python lib** | Inside Python code. One client for all HTTP/auth/error handling. |
 | **Raw REST API** | Only when the above don't cover it. Self-documenting: `GET /openapi.json`, `/docs`. |
 
@@ -52,6 +52,7 @@ otelcol-contrib --config=collector/config.yaml
 opampctl health                 # server status + agent count
 opampctl agents list            # connected agents
 opampctl agents list --healthy true --attr environment=prod
+opampctl agents list --query "SELECT * FROM agents WHERE host_arch = 'amd64'"
 opampctl agents get <agent-id>  # instance UID is the hex id from list output
 opampctl reports fleet --raw    # markdown fleet report
 ```
@@ -79,6 +80,8 @@ opampctl agents compliance <agent-id>
 | Task | opampctl | MCP tool | API |
 |------|----------|----------|-----|
 | List/filter agents | `agents list [--healthy] [--status] [--attr k=v]` | `list_agents` | `GET /agents` |
+| Select agents with SQL | `agents list --query "SELECT ..."` | `query_agents` | `GET /agents?q=...` |
+| Columns + values to write SQL against | `agents query-schema` | `agent_query_schema` | `GET /agents/query/schema` |
 | Agent details | `agents get <id>` | `get_agent` | `GET /agent/{id}` |
 | Agent metrics | `agents metrics <id>` | `get_agent_metrics` | `GET /agent/{id}/metrics` |
 | Agent types this build recognises | `agents types` | `list_agent_types` | `GET /agent/types` |
@@ -109,7 +112,7 @@ opampctl agents compliance <agent-id>
 | Validate a config (safe) | `config validate --file f.yaml` | `validate_config` | `POST /config/validate` |
 | Propose a revision (draft) | `config propose --file f.yaml --attr env=prod` | `propose_config` (write-gated) | `POST /config/revisions` |
 | Propose to a saved selector | `config propose --file f.yaml --group prod-emea` | `propose_config` with `scope={"group": …}` | `POST /config/revisions` (`scope.group`) |
-| List/save groups | `groups list` / `groups create -n prod-emea --attr environment=prod` | `list_groups` / `create_group` (write-gated) | `GET /groups` / `POST /groups` |
+| List/save groups | `groups list` / `groups create -n macos-au --query "SELECT ..."` | `list_groups` / `create_group` (write-gated) | `GET /groups` / `POST /groups` |
 | One group, its members and history | `groups show prod-emea` | `get_group` | `GET /groups/{id}` |
 | Edit / archive / restore a group (operator) | `groups update` / `groups archive` / `groups restore` | — | `PUT`/`DELETE`/`POST …/restore` |
 | Who would a group hit now? | `groups preview prod-emea` | `preview_group` | `POST /groups/{id}/preview` |
@@ -415,30 +418,34 @@ opampctl --password "$ADMIN_PASSWORD" agents custom send <id> \
 - The config offer waits one poll while a custom message is delivered, so one reply
   carries one server-initiated action.
 
-### Collector groups — named selectors (#111)
+### Collector groups — saved SQL selections (#111, SQL since #132)
 
-A group is a **name for a filter document**, plus `include` (force in) / `exclude`
-(force out) pins. Membership is resolved at use time by the same code as
-`GET /agents`, so `--group prod-emea` hits exactly what
-`--attr environment=prod --attr region=emea` would. Prefer a group when the same
-selector is used more than once, or when someone else will run it: the point is that
-"prod" is written down and reviewable, not retyped.
+A group is a **saved SQL `SELECT`** (legacy groups still hold a filter document),
+plus `include` (force in) / `exclude` (force out) pins. Membership is resolved at use
+time against the live fleet, so `--group macos-au` hits exactly what its query hits
+now. Prefer a group when the same selector is used more than once, or when someone
+else will run it: the point is that the query is written down and reviewable, not
+retyped. The language guide is `docs/sql-agent-queries.md`.
 
 ```bash
-opampctl groups keys                                  # what live agents actually report
-opampctl --password "$ADMIN_PASSWORD" groups create -n prod-emea \
-    --attr environment=prod --attr region=emea -d "EMEA prod. Owner: platform-oncall."
-opampctl groups preview prod-emea                     # members now vs last resolution
+opampctl agents query-schema                          # columns + values live agents report
+opampctl agents list --query "SELECT * FROM agents WHERE host_arch = 'amd64'"
+opampctl --password "$ADMIN_PASSWORD" groups create -n macos-au \
+    --query "SELECT * FROM agents WHERE \"os.type\" = 'darwin' AND \"geo.country\" = 'AU'" \
+    -d "macOS gateways in Australia. Owner: platform-oncall."
+opampctl groups preview macos-au                      # members now vs last resolution
 opampctl --password "$ADMIN_PASSWORD" config propose --file c.yaml --group prod-emea
 opampctl --password "$ADMIN_PASSWORD" config apply --file c.yaml --group prod-emea --dry-run
 ```
 
 Four things that will otherwise bite you:
 
-- **Matching is exact, case-insensitive equality.** No globs, no regex, no prefix:
-  `--attr environment=prod-*` matches nothing. `groups keys` exists so a definition
-  cannot be written against `env` when the fleet says `environment`.
-- **A group defined on `healthy`/`status` is refused as a push target** (400). The
+- **The only table is `agents`; only `SELECT` is accepted.** Description attributes
+  are columns (`host_arch`, `environment`, `"os.type"`, …), `attr('key')` is shorthand,
+  and `healthy` is 1/0/NULL. A group query may **not** use `LIMIT`/`OFFSET`.
+  `agents query-schema` lists the real names and observed values, so a query is not
+  written against `env` when the fleet reports `environment`.
+- **A group defined on `healthy`/`health_status`/`status` is refused as a push target** (400). The
   moment an agent breaks it leaves the group, so the push that would fix it skips it.
   `use_stored_resolution: true` sends to the membership recorded by a `preview`
   instead — that is the only way to push to a health-based group, deliberately.

@@ -47,6 +47,9 @@ nav = st.navigation(
             # look at. The old landing page only told the reader to use the sidebar.
             page("1_Agents.py", "Agents", "📡", "agents", default=True),
             page("2_Reports.py", "Reports", "📄", "reports"),
+            # #132: groups are saved SQL selections, so they get their own page
+            # instead of a section under Remote Config (which only consumes them).
+            page("3_Groups.py", "Groups", "🗂️", "groups"),
             page("5_Remote_Config.py", "Remote Config", "🎛️", "remote-config"),
             page("4_Help.py", "Help", "❓", "help"),
         ],

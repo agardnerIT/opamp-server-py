@@ -43,7 +43,14 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from loguru import logger
 
-from server import alerts, audit, config_validation, groups, posture, remote_config
+from server import (
+    alerts,
+    audit,
+    config_validation,
+    groups,
+    posture,
+    remote_config,
+)
 from server.state import (
     COLLECTOR_GROUPS,
     AgentState,
@@ -582,7 +589,12 @@ def approve(
         )
 
     matched: Optional[set] = None
-    if scope.get("kind") == SCOPE_SELECTOR and scope.get("filter"):
+    # A group scope may carry a `filter` document (#111) or a SQL `query` (#132).
+    # The group id is what routes both through the one resolver; an empty filter on
+    # a query group must not be read as "no selector to re-resolve".
+    if scope.get("kind") == SCOPE_SELECTOR and (
+        scope.get("filter") or scope.get("query") or scope.get("group_id")
+    ):
         if scope.get("group_id"):
             # Group pins are part of the meaning of the name, so they apply to the
             # approve-time re-resolution as well; a stored-resolution push has no
@@ -925,7 +937,9 @@ def reconcile_future(agents: Sequence[AgentState]) -> int:
     proposals: Dict[str, List[Dict[str, Any]]] = {}
     for row in active:
         scope = _scope_of(row)
-        if not scope.get("include_future") or not scope.get("filter"):
+        if not scope.get("include_future") or not (
+            scope.get("filter") or scope.get("query") or scope.get("group_id")
+        ):
             continue
         if not row.get("proposal_id"):
             continue
@@ -941,11 +955,24 @@ def reconcile_future(agents: Sequence[AgentState]) -> int:
         # cannot re-attach the same agent.
         resolved = {row["agent_id"] for row in store.by_proposal(proposal_id)}
         excluded = set(scope.get("exclude") or [])
-        matched = [
-            agent.agent_id
-            for agent in agents
-            if agent.agent_id not in excluded and _matches(agent, scope["filter"])
-        ]
+        if scope.get("group_id"):
+            matched = [
+                agent_id
+                for agent_id in groups.resolve_group_scope(scope, agents)
+                if agent_id not in excluded
+            ]
+        elif scope.get("query"):
+            matched = [
+                agent_id
+                for agent_id in groups.select_ids(scope["query"], agents)
+                if agent_id not in excluded
+            ]
+        else:
+            matched = [
+                agent.agent_id
+                for agent in agents
+                if agent.agent_id not in excluded and _matches(agent, scope["filter"])
+            ]
         newcomers = [agent_id for agent_id in matched if agent_id not in resolved]
         if not newcomers:
             continue
@@ -1166,7 +1193,12 @@ def _group_view(record: Mapping[str, Any]) -> Dict[str, Any]:
     current = COLLECTOR_GROUPS.get(group_id)
     changed = None
     if snapshot is not None and current is not None:
-        changed = (snapshot.get("definition") or {}) != (current.get("definition") or {})
+        # #132: a group may have been rewritten from a filter document to SQL (or
+        # the other way). Both halves have to be compared, or an edit that replaced
+        # the selector would read as "nothing changed".
+        changed = (snapshot.get("definition") or {}) != (
+            current.get("definition") or {}
+        ) or (snapshot.get("query") or None) != (current.get("query") or None)
     return {
         "group_id": group_id,
         "group_name": (snapshot or {}).get("name") or (current or {}).get("name"),

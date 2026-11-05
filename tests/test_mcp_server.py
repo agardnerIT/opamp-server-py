@@ -99,6 +99,8 @@ class TestRegistry:
             # #111: groups are propose-side. Reading them is how an agent picks a
             # target instead of inventing a filter; creating one is write-gated.
             "list_groups", "get_group", "preview_group", "attribute_keys",
+            # #132: SQL selection plus the live schema that makes it writable.
+            "query_agents", "agent_query_schema",
             # #118: an agent's type decides whether its component list or a verdict
             # means anything, so the type catalogue has to be readable.
             "list_agent_types",
@@ -141,6 +143,19 @@ class TestAgentTools:
         assert data["count"] == 1
         data = call(mcp_srv.list_agents, attributes={"environment": "prod"})
         assert data["count"] == 0
+
+    def test_query_agents_and_schema(self, wired):
+        register_agent("4444444444444444")
+        data = call(mcp_srv.query_agents, "SELECT * FROM agents")
+        assert data["count"] == 1
+        assert data["agents"][0]["id"] == "4444444444444444"
+        via_list = call(
+            mcp_srv.list_agents, query="SELECT * FROM agents WHERE id = '4444444444444444'"
+        )
+        assert via_list["count"] == 1
+        schema = call(mcp_srv.agent_query_schema)
+        assert schema["table"] == "agents"
+        assert schema["guide"] == "docs/sql-agent-queries.md"
 
     def test_get_agent(self, wired):
         register_agent("3333333333333333")

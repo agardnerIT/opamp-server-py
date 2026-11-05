@@ -75,6 +75,7 @@ from server.alerts import get_alert_config, update_alert_config, send_test_alert
 from server import (
     admin_auth,
     agent_auth,
+    agent_query,
     audit,
     auth,
     commands,
@@ -2176,6 +2177,14 @@ def list_agents(
             "Use this when the agent description has its own 'status' attribute."
         ),
     ),
+    q: Optional[str] = Query(
+        default=None,
+        description=(
+            "SQL selection over the live fleet (#132), e.g. "
+            "SELECT * FROM agents WHERE host_arch = 'amd64'. Wins over the "
+            "healthy/status/attribute parameters; see GET /agents/query/schema."
+        ),
+    ),
 ):
     """List agents, optionally filtered.
 
@@ -2185,27 +2194,42 @@ def list_agents(
     Repeated params match any value (OR): ``?environment=prod&environment=staging``.
     Agents missing an attribute are excluded.
 
+    ``q`` runs a read-only SQL selection over a throwaway in-memory table built from
+    live agents (#132); the other filter parameters are ignored when it is present.
+    The schema and live values for writing a query are at ``GET /agents/query/schema``.
+
     Unauthenticated. Returns `{"agents": [...], "count": n, "filters": {...}}`.
     Each entry carries a `credential` block (#94) — `enrolled`, `active`,
     `last_seen_at`, `revoked_at` — so an operator can watch a fleet finish the
     token cutover. It never contains a token or a token hash.
     """
     remote_config_status = remote_config_status if remote_config_status is not None else status
-    reserved = {"healthy", "status", "remote_config_status"}
-    attr_filters: Dict[str, list] = {}
-    for key, value in request.query_params.multi_items():
-        if key not in reserved:
-            attr_filters.setdefault(key, []).append(value)
+    query_result: Optional[Dict[str, Any]] = None
+    if q is not None:
+        # A SQL query is the selector; mixing it with the ad-hoc params would mean two
+        # filters whose combination nobody can predict from reading either one.
+        try:
+            query_result = agent_query.run(q, AGENT_REGISTRY.list_all())
+        except agent_query.AgentQueryError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+        selected = list(query_result["agents"])
+        attr_filters = {}
+    else:
+        reserved = {"healthy", "status", "remote_config_status", "q"}
+        attr_filters = {}
+        for key, value in request.query_params.multi_items():
+            if key not in reserved:
+                attr_filters.setdefault(key, []).append(value)
 
-    selected = [
-        agent
-        for agent in AGENT_REGISTRY.list_all()
-        if agent.matches_filters(
-            healthy=healthy,
-            remote_config_status=remote_config_status,
-            attributes=attr_filters,
-        )
-    ]
+        selected = [
+            agent
+            for agent in AGENT_REGISTRY.list_all()
+            if agent.matches_filters(
+                healthy=healthy,
+                remote_config_status=remote_config_status,
+                attributes=attr_filters,
+            )
+        ]
     credentials = agent_auth.credential_summaries([agent.agent_id for agent in selected])
     agents = []
     for agent in selected:
@@ -2214,14 +2238,41 @@ def list_agents(
         agents.append(entry)
 
     filters = {}
-    if healthy is not None:
-        filters["healthy"] = healthy
-    if remote_config_status is not None:
-        filters["remote_config_status"] = remote_config_status
-    if attr_filters:
-        filters["attributes"] = attr_filters
+    # `q` wins over the ad-hoc parameters, so reporting them as applied would be a
+    # lie about how the result was selected.
+    if query_result is None:
+        if healthy is not None:
+            filters["healthy"] = healthy
+        if remote_config_status is not None:
+            filters["remote_config_status"] = remote_config_status
+        if attr_filters:
+            filters["attributes"] = attr_filters
 
-    return {"agents": agents, "count": len(agents), "filters": filters}
+    response: Dict[str, Any] = {"agents": agents, "count": len(agents), "filters": filters}
+    if query_result is not None:
+        response["query"] = query_result["query"]
+        response["query_columns"] = query_result["columns"]
+    return response
+
+
+@app.get(
+    "/agents/query/schema",
+    tags=["agents"],
+    summary="SQL schema, live values and suggestions for agent queries",
+)
+def agent_query_schema():
+    """What a selection query can name, with the values live agents actually report.
+
+    This is the autosuggestion payload for the SQL search box (#132): core columns
+    and example statements on one side, observed description attributes and their
+    values on the other. `host_arch = 'amd64'` is suggested only because an agent
+    reported `amd64` — a suggestion, not a guess.
+
+    Unauthenticated for the same reason `GET /agents` is: it exposes descriptions,
+    which that route already returns. An effective config is never read here (D8).
+    The language guide is `docs/sql-agent-queries.md`.
+    """
+    return agent_query.schema(AGENT_REGISTRY.list_all())
 
 
 @app.get(
@@ -3003,10 +3054,15 @@ class FleetConfigRequest(RemoteConfigRequest):
 
 
 class GroupCreateRequest(BaseModel):
-    """Body for `POST /groups` (#111): a name for a selector, not a member list."""
+    """Body for `POST /groups`: a name for a selector, not a member list.
+
+    A selector is **either** `query` (SQL, #132) or `definition` (a filter document,
+    #111). Exactly one is required; sending both is refused.
+    """
 
     name: str
-    definition: Dict[str, Any]
+    definition: Optional[Dict[str, Any]] = None
+    query: Optional[str] = None
     include: List[str] = Field(default_factory=list)
     exclude: List[str] = Field(default_factory=list)
     description: Optional[str] = None
@@ -3018,6 +3074,7 @@ class GroupUpdateRequest(BaseModel):
 
     name: Optional[str] = None
     definition: Optional[Dict[str, Any]] = None
+    query: Optional[str] = None
     include: Optional[List[str]] = None
     exclude: Optional[List[str]] = None
     description: Optional[str] = None
@@ -3930,12 +3987,14 @@ def create_group(
             target_kind="group",
             target_id=body.name,
             definition=body.definition,
+            query=body.query,
             include=body.include,
             exclude=body.exclude,
         )
         record = COLLECTOR_GROUPS.create(
             name=body.name,
             definition=body.definition,
+            query=body.query,
             include=body.include,
             exclude=body.exclude,
             description=body.description,
@@ -3994,6 +4053,7 @@ def update_group(
             current,
             name=body.name,
             definition=body.definition,
+            query=body.query,
             include=body.include,
             exclude=body.exclude,
             description=body.description,
@@ -4013,6 +4073,7 @@ def update_group(
             actor=principal.name,
             name=body.name,
             definition=body.definition,
+            query=body.query,
             include=body.include,
             exclude=body.exclude,
             description=body.description,

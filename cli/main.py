@@ -356,8 +356,12 @@ def groups_show(
 @groups_app.command("create")
 def groups_create(
     name: str = typer.Option(..., "--name", "-n", help="Group name (lowercase, a-z0-9._-)"),
+    query: Optional[str] = typer.Option(
+        None, "--query", "-q",
+        help="SQL selection (#132), e.g. \"SELECT * FROM agents WHERE host_arch = 'amd64'\"",
+    ),
     attr: List[str] = typer.Option([], "--attr",
-                                   help="Definition: --attr environment=prod (repeatable)"),
+                                   help="Legacy filter document: --attr environment=prod"),
     include: List[str] = typer.Option([], "--include",
                                       help="Force an agent in, even if it fails the definition"),
     exclude: List[str] = typer.Option([], "--exclude",
@@ -368,12 +372,14 @@ def groups_create(
 ) -> None:
     """Create a named selector (operator). Creating one pushes nothing.
 
-    The definition is `--attr` pairs, matched with **exact, case-insensitive
-    equality** — no globs, no regex, no prefix (`prod-*` matches nothing). Names are
-    unique regardless of case and may not be a reserved filter key (`healthy`,
-    `status`, `remote_config_status`). A group with zero members is valid; a push to
-    one is not. `opampctl groups keys` lists what live agents actually report.
+    Prefer `--query`: a SQL selection is the group, and it can be edited later. The
+    legacy `--attr` form is still accepted for a filter document. Names are unique
+    regardless of case and may not be a reserved filter key (`healthy`, `status`,
+    `remote_config_status`). A group with zero members is valid; a push to one is not.
+    `opampctl agents query-schema` lists the columns and live values to write against.
     """
+    if query is not None and attr:
+        _fail("use --query or --attr, not both: a group has one selector")
     definition: Dict[str, Any] = {}
     for item in attr:
         key, _, value = item.partition("=")
@@ -386,15 +392,16 @@ def groups_create(
             existing.append(value)
         else:
             definition[key] = [existing, value]
-    if not definition:
+    if query is None and not definition:
         _fail(
-            "at least one --attr is required",
+            "a selector is required: --query \"SELECT ...\" (recommended) or --attr key=value",
             data={"hint": "an empty definition would mean the whole fleet"},
         )
     _run(
         lambda oc: oc.create_group(
             name,
-            definition=definition,
+            query=query,
+            definition=definition if query is None else None,
             include=include or None,
             exclude=exclude or None,
             description=description,
@@ -407,7 +414,10 @@ def groups_create(
 def groups_update(
     group: str = typer.Argument(..., help="Group name or id (grp-…)"),
     name: Optional[str] = typer.Option(None, "--name", "-n", help="New name"),
-    attr: List[str] = typer.Option([], "--attr", help="Replace the definition: key=value"),
+    query: Optional[str] = typer.Option(
+        None, "--query", "-q", help="Replace the selector with this SQL selection (#132)",
+    ),
+    attr: List[str] = typer.Option([], "--attr", help="Replace with a legacy filter document: key=value"),
     include: List[str] = typer.Option([], "--include", help="Replace the include pins"),
     exclude: List[str] = typer.Option([], "--exclude", help="Replace the exclude pins"),
     description: Optional[str] = typer.Option(None, "--description", "-d"),
@@ -421,9 +431,13 @@ def groups_update(
     revision approved against the old definition keeps its snapshot and its resolved
     agent list.
     """
+    if query is not None and attr:
+        _fail("use --query or --attr, not both: a group has one selector")
     body: Dict[str, Any] = {}
     if name is not None:
         body["name"] = name
+    if query is not None:
+        body["query"] = query
     if attr:
         definition: Dict[str, Any] = {}
         for item in attr:
@@ -447,7 +461,7 @@ def groups_update(
     if owner is not None:
         body["owner"] = owner
     if not body:
-        _fail("nothing to change: pass at least one of --name/--attr/--include/--exclude/--description/--owner")
+        _fail("nothing to change: pass at least one of --name/--query/--attr/--include/--exclude/--description/--owner")
     _run(lambda oc: oc.update_group(group, **body))
 
 
@@ -1489,36 +1503,77 @@ def agents_list(
     attr: List[str] = typer.Option(
         [], "--attr", "-a", help="Metadata filter, repeatable: --attr environment=prod",
     ),
+    query: Optional[str] = typer.Option(
+        None, "--query", "-q",
+        help="SQL selection (#132), e.g. \"SELECT * FROM agents WHERE host_arch = 'amd64'\". "
+        "Wins over --healthy/--status/--attr. See `agents query-schema`.",
+    ),
 ) -> None:
-    """List agents with optional health/status/metadata filters."""
+    """List agents with optional health/status/metadata filters, or a SQL selection."""
     if _settings.offline:
+        from server import agent_query
         from server.agent_auth import credential_summaries
         from server.state import SQLiteCredentialStore
 
-        attr_filters: Dict[str, list] = {}
-        for item in attr:
-            key, _, value = item.partition("=")
-            attr_filters.setdefault(key, []).append(value)
         states = _offline_states()
+        if query is not None:
+            try:
+                states = agent_query.run(query, states)["agents"]
+            except agent_query.AgentQueryError as exc:
+                _fail(f"HTTP {exc.status_code}", data={"detail": exc.detail})
+        else:
+            attr_filters: Dict[str, list] = {}
+            for item in attr:
+                key, _, value = item.partition("=")
+                attr_filters.setdefault(key, []).append(value)
+            states = [
+                state
+                for state in states
+                if state.matches_filters(
+                    healthy=healthy, remote_config_status=status, attributes=attr_filters
+                )
+            ]
         credentials = credential_summaries(
             [state.agent_id for state in states], store=SQLiteCredentialStore(_settings.db)
         )
         dicts = []
         for state in states:
-            if not state.matches_filters(healthy=healthy, remote_config_status=status,
-                                        attributes=attr_filters):
-                continue
             entry = state.to_dict()
             entry["credential"] = credentials.get(state.agent_id)
             dicts.append(entry)
-        _emit({"agents": dicts, "count": len(dicts),
-               "filters": {"offline_db": str(_settings.db)}})
+        payload: Dict[str, Any] = {
+            "agents": dicts,
+            "count": len(dicts),
+            "filters": {"offline_db": str(_settings.db)},
+        }
+        if query is not None:
+            payload["query"] = query
+        _emit(payload)
+        return
+    if query is not None:
+        _run(lambda oc: oc.query_agents(query))
         return
     kwargs: Dict[str, Any] = {}
     for item in attr:
         key, _, value = item.partition("=")
         kwargs.setdefault(key, []).append(value)
     _run(lambda oc: oc.list_agents(healthy=healthy, status=status, **kwargs))
+
+
+@agents_app.command("query-schema")
+def agents_query_schema() -> None:
+    """Columns, live values and SQL examples for `agents list --query` (#132).
+
+    The payload is built for autosuggestion: `host_arch = 'amd64'` appears only
+    because a live agent reported that value. Works offline (`--db`) against the
+    agents in the database.
+    """
+    if _settings.offline:
+        from server import agent_query
+
+        _emit(agent_query.schema(_offline_states()))
+        return
+    _run(lambda oc: oc.agent_query_schema())
 
 
 @agents_app.command("get")

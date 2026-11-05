@@ -397,6 +397,7 @@ class OpampClient:
         healthy: Optional[str] = None,
         status: Optional[str] = None,
         remote_config_status: Optional[str] = None,
+        query: Optional[str] = None,
         **attributes: Any,
     ) -> Dict[str, Any]:
         """``GET /agents`` — list agents, optionally filtered.
@@ -405,20 +406,43 @@ class OpampClient:
             healthy: ``"true"``, ``"false"`` or ``"unknown"``.
             status: Remote config status filter (UNSET/APPLIED/APPLYING/FAILED).
             remote_config_status: Explicit alias for ``status``.
+            query: SQL selection (#132), e.g.
+                ``"SELECT * FROM agents WHERE host_arch = 'amd64'"``. Wins over
+                the other filter arguments. See :meth:`agent_query_schema`.
             **attributes: Any other keyword filters on agent description
                 metadata, e.g. ``environment="prod"`` (repeated values pass a
                 list: ``environment=["prod", "staging"]``).
         """
         params: Dict[str, Any] = {}
+        if query is not None:
+            params["q"] = query
         if healthy is not None:
             params["healthy"] = healthy
         if remote_config_status is not None:
             params["remote_config_status"] = remote_config_status
         elif status is not None:
             params["status"] = status
-        for key, value in attributes.items():
-            params[key] = value if isinstance(value, list) else [value]
+        if query is None:
+            for key, value in attributes.items():
+                params[key] = value if isinstance(value, list) else [value]
         return self._get("/agents", params=params or None)
+
+    def query_agents(self, query: str) -> Dict[str, Any]:
+        """``GET /agents?q=...`` — run a SQL selection over the live fleet (#132).
+
+        Read-only. The query may only ``SELECT`` from ``agents``; a group saved from
+        it may not use ``LIMIT``/``OFFSET`` (a group is a filter over the whole
+        fleet). Use :meth:`agent_query_schema` for the columns and observed values.
+        """
+        return self.list_agents(query=query)
+
+    def agent_query_schema(self) -> Dict[str, Any]:
+        """``GET /agents/query/schema`` — columns, live values and SQL examples (#132).
+
+        The autosuggestion payload for the search box and for an agent writing a
+        selection filter. Description attributes only, never an effective config.
+        """
+        return self._get("/agents/query/schema")
 
     def get_agent(self, agent_id: str) -> Dict[str, Any]:
         """``GET /agent/{id}`` — full details for one agent (incl. metrics)."""
@@ -974,7 +998,8 @@ class OpampClient:
     def create_group(
         self,
         name: str,
-        definition: Dict[str, Any],
+        definition: Optional[Dict[str, Any]] = None,
+        query: Optional[str] = None,
         include: Optional[List[str]] = None,
         exclude: Optional[List[str]] = None,
         description: Optional[str] = None,
@@ -982,12 +1007,20 @@ class OpampClient:
     ) -> Dict[str, Any]:
         """``POST /groups`` — create a named selector (operator).
 
-        Names are unique regardless of case, may not collide with the reserved filter
-        keys (``healthy``, ``status``, ``remote_config_status``), and a definition may
-        not be empty (``{}`` would mean the whole fleet). A newly created group with
-        zero members is valid; pushing to it is not.
+        Pass exactly one of ``query`` (SQL, #132) or ``definition`` (a filter
+        document, #111). Names are unique regardless of case and may not collide with
+        the reserved filter keys (``healthy``, ``status``, ``remote_config_status``).
+        A newly created group with zero members is valid; pushing to it is not.
         """
-        body: Dict[str, Any] = {"name": name, "definition": definition}
+        if query is not None and definition is not None:
+            raise OpampClientError("create_group takes query or definition, not both")
+        if query is None and definition is None:
+            raise OpampClientError("create_group needs query or definition")
+        body: Dict[str, Any] = {"name": name}
+        if query is not None:
+            body["query"] = query
+        else:
+            body["definition"] = definition
         if include:
             body["include"] = include
         if exclude:
@@ -1003,6 +1036,7 @@ class OpampClient:
         group_id: str,
         name: Optional[str] = None,
         definition: Optional[Dict[str, Any]] = None,
+        query: Optional[str] = None,
         include: Optional[List[str]] = None,
         exclude: Optional[List[str]] = None,
         description: Optional[str] = None,
@@ -1018,6 +1052,7 @@ class OpampClient:
         for key, value in (
             ("name", name),
             ("definition", definition),
+            ("query", query),
             ("include", include),
             ("exclude", exclude),
             ("description", description),

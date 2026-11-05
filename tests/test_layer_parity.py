@@ -37,6 +37,8 @@ from server.main import app
 ROUTE_TO_CLIENT = {
     ("GET", "/health"): "health",
     ("GET", "/agents"): "list_agents",
+    # #132: SQL selection schema/autosuggestion is its own route.
+    ("GET", "/agents/query/schema"): "agent_query_schema",
     ("GET", "/agent/types"): "agent_types",
     ("PUT", "/agent/{agent_id}/type"): "set_agent_type",
     ("GET", "/agent/{agent_id}"): "get_agent",
@@ -125,6 +127,8 @@ CLI_COMMANDS = {
     "groups restore": ("groups", "restore"),
     "groups preview": ("groups", "preview"),
     "groups keys": ("groups", "keys"),
+    # #132: `agents list --query` and the schema that makes it writable.
+    "agents query-schema": ("agents", "query-schema"),
 }
 
 # MCP tools that must exist, and the write-shaped ones that must NEVER exist (D9).
@@ -146,6 +150,9 @@ MCP_READ_TOOLS = {
     "get_group",
     "preview_group",
     "attribute_keys",
+    # #132: SQL selection and the live schema that makes it writable.
+    "query_agents",
+    "agent_query_schema",
 }
 MCP_FORBIDDEN_TOOLS = {
     "create_config_rollout",
@@ -230,6 +237,7 @@ def test_every_client_config_method_is_reachable_from_a_route():
     aliases = {
         "plan_config_rollout",  # create_config_rollout(dry_run=True)
         "ha_health",  # multi-node convenience
+        "query_agents",  # list_agents(query=...)
     }
     unrouteable = sorted(public - mapped - aliases - _non_route_methods())
     assert not unrouteable, (

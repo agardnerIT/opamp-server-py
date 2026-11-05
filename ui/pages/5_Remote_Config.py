@@ -273,7 +273,7 @@ target_mode = st.radio(
     ["Ad-hoc filter", "Saved group"],
     horizontal=True,
     key=TARGET_MODE_KEY,
-    help="A saved group is a named selector (exact, case-insensitive equality). It is "
+    help="A saved group is a named SQL selection (or a legacy filter document). It is "
     "the same filter spelled once, and it records what the name meant at approval time.",
 )
 saved_group = None
@@ -282,8 +282,8 @@ if target_mode == "Saved group":
     group_rows = (_payload(groups_response, {}) or {}).get("groups") or []
     if not group_rows:
         st.info(
-            "No saved groups yet. Create one under **Groups** at the bottom of this page "
-            "— it stores a definition, not a member list."
+            "No saved groups yet. Search the fleet and save a query on the **Groups** "
+            "page — a group stores a selector, not a member list."
         )
     else:
         by_name = {row["name"]: row for row in group_rows}
@@ -297,7 +297,12 @@ if target_mode == "Saved group":
         )
         saved_group = by_name.get(picked)
     if saved_group:
-        st.code(json.dumps(saved_group.get("definition") or {}, indent=2), language="json")
+        if saved_group.get("selector_kind") == "query":
+            st.code(saved_group.get("query") or "", language="sql")
+        else:
+            st.code(
+                json.dumps(saved_group.get("definition") or {}, indent=2), language="json"
+            )
         health_defined = saved_group.get("health_defined") or []
         if health_defined:
             st.warning(
@@ -306,13 +311,14 @@ if target_mode == "Saved group":
                 + "**, so it drops the agents that break — exactly the ones a config "
                 "push is usually meant to fix. The API refuses a push to it unless you "
                 "send `use_stored_resolution`, and this page does not offer that: edit "
-                "the definition to match attributes instead."
+                "the query on the **Groups** page instead."
             )
         sources = saved_group.get("sources") or {}
         pinned_in = len(sources.get("included") or [])
         pinned_out = len(sources.get("excluded") or [])
+        selector_members = sources.get("query") or sources.get("definition") or []
         st.caption(
-            f"{len(sources.get('definition') or [])} from the definition · "
+            f"{len(selector_members)} from the selector · "
             f"{pinned_in} pinned in · {pinned_out} pinned out"
         )
         if saved_group.get("unknown_pins"):
@@ -324,7 +330,7 @@ if target_mode == "Saved group":
             st.warning(
                 "This group has **zero** members right now. An empty group is a valid "
                 "thing to save, but a push that ships nothing is refused — check the "
-                "definition against the attribute keys under **Groups**."
+                "query against the live schema under **Groups**."
             )
 
 filter_cols = st.columns([1, 1, 1, 1])
@@ -883,195 +889,12 @@ with tab_revisions:
     )
 
 
-# ------------------------------------------------------------------- 8 groups (#111)
+# ------------------------------------------------------------------- groups (#132)
 
 
 st.header("8. Groups", divider="gray")
 st.caption(
-    "A group is a **saved selector**: a name for a filter document plus explicit "
-    "`include`/`exclude` pins. Membership is resolved on read, so a group cannot drift "
-    "from the fleet. Matching is exact, case-insensitive equality — no globs, no regex, "
-    "no prefix (`prod-*` matches nothing)."
+    "A group is a **saved SQL selection** now. Search and manage groups on the "
+    "**Groups** page; this page only consumes them as a push target."
 )
-
-manage_groups = st.toggle("Manage groups", key="rc_manage_groups")
-
-if manage_groups:
-    listing = _payload(
-        admin_request(
-            "GET", "/groups", required_role=ROLE_VIEWER, params={"include_archived": True}
-        ),
-        {},
-    ) or {}
-    rows = listing.get("groups") or []
-    if rows:
-        st.dataframe(
-            [
-                {
-                    "group": row.get("name"),
-                    "members": row.get("member_count"),
-                    "definition": json.dumps(row.get("definition") or {}),
-                    "health-defined": ", ".join(row.get("health_defined") or []) or "",
-                    "owner": row.get("owner") or "",
-                    "updated": format_local_time(row.get("updated_at")),
-                    "archived": format_local_time(row.get("archived_at"))
-                    if row.get("archived_at")
-                    else "",
-                }
-                for row in rows
-            ],
-            use_container_width=True,
-            hide_index=True,
-        )
-    else:
-        st.caption("No groups saved yet.")
-
-    # ---- preview: who would a push to this group hit, versus last time? --------
-    if rows:
-        preview_cols = st.columns([2, 1])
-        with preview_cols[0]:
-            preview_name = st.selectbox(
-                "Preview a group",
-                options=[row["name"] for row in rows],
-                key="rc_preview_group",
-                help="Compares against the group's last recorded resolution. Adds the "
-                "current membership to that history.",
-            )
-        with preview_cols[1]:
-            st.write("")
-            preview_clicked = st.button("Preview membership", key="rc_preview_clicked")
-        if preview_clicked:
-            preview = _payload(
-                admin_request(
-                    "POST",
-                    f"/groups/{preview_name}/preview",
-                    required_role=ROLE_VIEWER,
-                    json={},
-                ),
-                {},
-            ) or {}
-            if preview.get("group_id"):
-                st.metric("Members now", preview.get("count", 0))
-                st.caption(
-                    f"Previously {preview.get('previous_count', 0)} · "
-                    f"{len(preview.get('dropped') or [])} dropped · "
-                    f"{len(preview.get('added') or [])} added"
-                )
-                for label, key_name in (("Dropped", "dropped"), ("Added", "added")):
-                    if preview.get(key_name):
-                        st.write(f"**{label}:** " + ", ".join(preview[key_name]))
-                sources = preview.get("sources") or {}
-                st.caption(
-                    f"{len(sources.get('definition') or [])} from the definition · "
-                    f"{len(sources.get('included') or [])} pinned in · "
-                    f"{len(sources.get('excluded') or [])} pinned out"
-                )
-            else:
-                st.error("Preview failed:")
-                st.code(json.dumps(preview, indent=2))
-
-    # ---- create a group, from keys the fleet actually reports -----------------
-    st.subheader("Create a group")
-    st.caption(
-        "Keys and values come from live agents, so a definition cannot be written "
-        "against `env` when the fleet reports `environment`."
-    )
-    keys_payload = _payload(
-        admin_request("GET", "/groups/attribute-keys", required_role=ROLE_VIEWER), {}
-    ) or {}
-    attribute_keys = keys_payload.get("keys") or []
-
-    with st.form("rc_create_group"):
-        name = st.text_input("Name", key="rc_group_name", placeholder="prod-emea")
-        key_options = [bucket["key"] for bucket in attribute_keys]
-        key_options += keys_payload.get("reserved") or []
-        chosen_key = st.selectbox(
-            "Definition attribute",
-            options=key_options or ["environment"],
-            key="rc_group_key",
-            help="Exact, case-insensitive equality. Reserved keys (healthy/status/"
-            "remote_config_status) make a group that drops agents when they break.",
-        )
-        bucket = next(
-            (item for item in attribute_keys if item["key"] == chosen_key), {}
-        )
-        values = bucket.get("values") or []
-        chosen_value = st.selectbox(
-            "Value",
-            options=values or [""],
-            key="rc_group_value",
-            help="Values observed on live agents. A value no agent reports creates an "
-            "empty group, which is legal to save and impossible to push to.",
-        )
-        include_text = st.text_input(
-            "Force in (agent ids, comma separated)", key="rc_group_include"
-        )
-        exclude_text = st.text_input(
-            "Force out (agent ids, comma separated)", key="rc_group_exclude"
-        )
-        description = st.text_input(
-            "Description / owner", key="rc_group_description",
-            placeholder="EMEA production gateways. Owner: platform-oncall.",
-        )
-        submitted = st.form_submit_button("Create group", type="primary")
-    if submitted:
-        definition = {chosen_key: chosen_value} if chosen_value else {}
-        response = admin_request(
-            "POST",
-            "/groups",
-            required_role=ROLE_OPERATOR,
-            json={
-                "name": name,
-                "definition": definition,
-                "include": [item.strip() for item in include_text.split(",") if item.strip()],
-                "exclude": [item.strip() for item in exclude_text.split(",") if item.strip()],
-                "description": description or None,
-            },
-        )
-        if response is not None and response.status_code == 200:
-            created = _payload(response, {}) or {}
-            st.success(
-                f"Created `{created.get('name')}` with {created.get('member_count', 0)} "
-                "member(s). Creating a group pushes nothing."
-            )
-        elif response is not None:
-            st.error(f"Group refused ({response.status_code}):")
-            st.code(_detail(response))
-
-    # ---- archive / restore ----------------------------------------------------
-    if rows:
-        st.subheader("Archive or restore")
-        st.caption(
-            "Groups are archived, never deleted: revisions and rollouts reference the "
-            "id. A live rollout using the group refuses the archive."
-        )
-        action_cols = st.columns([2, 1, 1])
-        with action_cols[0]:
-            action_name = st.selectbox(
-                "Group", options=[row["name"] for row in rows], key="rc_group_action"
-            )
-        with action_cols[1]:
-            st.write("")
-            if st.button("Archive", key="rc_group_archive"):
-                response = admin_request(
-                    "DELETE", f"/groups/{action_name}", required_role=ROLE_OPERATOR
-                )
-                if response is not None and response.status_code == 200:
-                    st.success(f"Archived `{action_name}`.")
-                elif response is not None:
-                    st.error(f"Archive refused ({response.status_code}):")
-                    st.code(_detail(response))
-        with action_cols[2]:
-            st.write("")
-            if st.button("Restore", key="rc_group_restore"):
-                response = admin_request(
-                    "POST",
-                    f"/groups/{action_name}/restore",
-                    required_role=ROLE_OPERATOR,
-                    json={},
-                )
-                if response is not None and response.status_code == 200:
-                    st.success(f"Restored `{action_name}`.")
-                elif response is not None:
-                    st.error(f"Restore refused ({response.status_code}):")
-                    st.code(_detail(response))
+st.markdown("Open the **Groups** page from the sidebar to search, save or edit one.")

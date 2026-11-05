@@ -440,6 +440,55 @@
   after an edit → shrink/empty refusal → archive blocked/unblocked. Suite: **1332
   passed** (was 1304; +19 groups, +4 CLI, +2 MCP, +3 UI).
 
+## #132 — groups are saved SQL selections, 2026-11-05
+
+- **`server/agent_query.py`** is the whole language: a throwaway in-memory SQLite table
+  built from live agents, then one user `SELECT`. It is *not* the server's SQLite
+  database. `PRAGMA query_only` after the table is populated + an authorizer that allows
+  only `SELECT`/`READ` on `agents` and a function whitelist (`like`, `lower`,
+  `json_extract`, …) are two independent barriers. `ALLOWED_FUNCTIONS` must include
+  `like`/`glob`: SQLite implements `LIKE` as a function, so omitting it rejects a
+  perfectly normal query with "not authorized".
+- **Schema:** core columns (`id`, `healthy`, `health_status`, `remote_config_status`,
+  `status`, `connected_at`, `last_heartbeat`, `agent_type`, `service_name`,
+  `service_version`, `stale`, `attributes`) plus **one column per description
+  attribute**, named exactly as the agent reports it. Dotted keys need `"os.type"`;
+  `attr('key')` is rewritten to `json_extract(attributes, '$."key"')` because a scalar
+  UDF cannot see the current row. Values are text; `healthy` is 1/0/NULL.
+- **Unknown attribute columns are added as NULL** from identifiers found in the query,
+  so a saved group whose attribute disappeared resolves to zero (and trips the shrink
+  guard) instead of erroring months later. A typo therefore means "no rows", not 422;
+  the schema endpoint is the typo-proofing path.
+- **Groups:** `collector_groups.query` added in place by `PRAGMA table_info` (pre-#132
+  rows keep their definition). Exactly one selector: `query` or `definition`.
+  `validate_selector` enforces it on create; `compute_changes` clears the other field on
+  update, so switching kinds cannot leave two contradictory selectors. Query refusals
+  are translated to `GroupError` in `state.validate_selector`/`compute_changes` and
+  `groups.select_ids` — otherwise the route's `except GroupError` misses a 422.
+- **Group guards:** a query that references `healthy`/`health_status`/
+  `remote_config_status`/`status` gets the same health-defined refusal as a filter
+  document (`agent_query.references_health`). A group query may not use
+  `LIMIT`/`OFFSET` (search may). `sources` now names the selector bucket `query` or
+  `definition`; UI must read `sources.query` for SQL groups.
+- **Scope plumbing:** `expand_scope` returns `filter: {}` plus `query`/`group_query`
+  for a SQL group. `resolve_group_scope` evaluates `query` when there is no recorded
+  membership. `config_control` approve-time re-resolution and the `include_future` sweep
+  must treat `query`/`group_id` as a selector, not only a non-empty `filter`.
+  `_group_view.group_definition_changed` compares both definition and query.
+- **Layers:** client `query_agents` (alias of `list_agents(query=)`) +
+  `agent_query_schema`; CLI `agents list --query`, `agents query-schema`, `groups
+  create/update --query`; MCP `query_agents`, `agent_query_schema`, `list_agents(query=)`
+  and `create_group(query=)`. MCP tool count is **39** (47 with writes). `create_group`'s
+  second positional argument stays `definition` for compatibility.
+- **UI:** new `ui/pages/3_Groups.py` (registered in `ui/app.py`): SQL editor,
+  find-by-group loader, suggestion picker from `/agents/query/schema`, run search, save
+  as group, preview/edit/archive/restore. Groups were removed from Remote Config, which
+  now only consumes them as a target and links to the page. `st.page_link` cannot be
+  used from a page rendered standalone by `AppTest`; use a markdown pointer instead.
+- **Docs:** `docs/sql-agent-queries.md` is the language reference for humans and agents.
+- Tests: `tests/test_agent_query.py` (language, refusals, query groups, selector-kind
+  switching, in-place schema upgrade) plus parity/MCP/CLI/UI updates.
+
 ## #85 — custom capabilities and custom messages, 2026-11-03
 
 - **The server is a transport, not a feature layer.** Upstream marks both messages

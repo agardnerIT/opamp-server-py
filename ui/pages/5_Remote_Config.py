@@ -56,6 +56,11 @@ OBJECT_KEY_KEY = "rc_object_key"
 ROLE_KEY = "rc_object_role"
 PROPOSAL_KEY = "rc_proposal"
 PLAN_KEY = "rc_plan"
+# The health gate the rollout is created with, and the server's configured default it
+# was seeded from. Two keys, because the second is only ever read back as documentation
+# of what the first started as.
+GATE_KEY = "rc_health_gate"
+GATE_DEFAULT_KEY = "rc_health_gate_default"
 ROLLOUT_KEY = "rc_rollout"
 ROLLOUT_AUTOFILL_KEY = "rc_rollout_autofill"
 REVEAL_KEY = "rc_reveal"
@@ -134,6 +139,38 @@ def _config_map(body, content_type, role="", name=""):
 
 def _is_redacted(text):
     return "<redacted>" in (text or "")
+
+
+def _plan_body(gate=None):
+    """The dry-run body, carrying a gate only when there is one to carry.
+
+    `0` is a legal gate (`CONFIG_PUSH_HEALTH_GATE_SECONDS=0` in a lab), so the test is
+    `is not None`, never truthiness: `gate or None` would turn "no waiting" back into
+    "whatever the server defaults to".
+    """
+    body = {"dry_run": True}
+    if gate is not None:
+        body["health_gate_seconds"] = int(gate)
+    return body
+
+
+def _rollout_body(note, restart, gate=None):
+    """The create body: the gate in the box is **the** gate, sent explicitly.
+
+    Omitting it makes the server fall back to `CONFIG_PUSH_HEALTH_GATE_SECONDS`, so an
+    operator who changed the number and then approved would silently get 90s again —
+    the box would be a suggestion, not a decision.
+    """
+    body = {"note": note or None, "restart_after_apply": bool(restart)}
+    if gate is not None:
+        body["health_gate_seconds"] = int(gate)
+    return body
+
+
+def _gate_override():
+    """The gate currently in the box, or `None` when the server has not reported one yet."""
+    value = st.session_state.get(GATE_KEY)
+    return None if value is None else int(value)
 
 
 def _prefill_from_agent(agent_id):
@@ -529,7 +566,8 @@ if proposal_id:
     if st.button("Plan the rollout (dry run)"):
         response = admin_request(
             "POST", "/config/rollouts", required_role=ROLE_OPERATOR,
-            params={"proposal_id": proposal_id}, json={"dry_run": True},
+            params={"proposal_id": proposal_id},
+            json=_plan_body(_gate_override()),
         )
         plan = _payload(response, {}) or {}
         if plan.get("dry_run"):
@@ -540,11 +578,12 @@ if proposal_id:
 plan = st.session_state.get(PLAN_KEY) or {}
 if plan:
     st.subheader("Rollout plan (nothing has been delivered)")
+    plan_batch = plan.get("batch") or {}
     plan_cols = st.columns(4)
-    plan_cols[0].metric("Batches", plan.get("batch", {}).get("count"))
+    plan_cols[0].metric("Batches", plan_batch.get("count"))
     plan_cols[1].metric("Canary", plan["batches"][0]["agents"] if plan.get("batches") else 0)
-    plan_cols[2].metric("Batch cap", plan.get("batch", {}).get("max_agents_per_batch"))
-    plan_cols[3].metric("Health gate", f"{plan.get('batch', {}).get('health_gate_seconds')}s")
+    plan_cols[2].metric("Batch cap", plan_batch.get("max_agents_per_batch"))
+    plan_cols[3].metric("Health gate", f"{plan_batch.get('health_gate_seconds')}s")
     st.dataframe(
         [
             {
@@ -557,6 +596,58 @@ if plan:
         use_container_width=True,
         hide_index=True,
     )
+
+    # The health gate is the one number an operator sets per rollout, so it is a field
+    # and not a fact read off the server. `CONFIG_PUSH_HEALTH_GATE_SECONDS` is only the
+    # *seed*: the first plan sends no override and reports the value actually in force,
+    # the box is filled from that, and from then on the box is what the rollout is
+    # created with — always sent, so an empty box can never quietly mean "90 again".
+    # Seeded once and never rewritten, so a re-plan cannot move the number under the
+    # operator's hands mid-decision. Must happen before the widget exists (same rule as
+    # the rollout-id autofill below).
+    reported_gate = plan_batch.get("health_gate_seconds")
+    if GATE_KEY not in st.session_state and isinstance(reported_gate, int):
+        st.session_state[GATE_KEY] = int(reported_gate)
+        st.session_state[GATE_DEFAULT_KEY] = int(reported_gate)
+    if GATE_KEY in st.session_state:
+        gate = st.number_input(
+            "Health gate (seconds the whole batch must stay green)",
+            min_value=0,
+            max_value=86400,
+            step=5,
+            key=GATE_KEY,
+            help=(
+                "Counted from the last delivery in the batch. The rollout is created "
+                "with **this** number — it is not a hint and it does not follow the "
+                "server's default once the plan exists. 0 promotes as soon as every "
+                "agent reports APPLIED with our hash, with no settling time at all."
+            ),
+        )
+        server_default = st.session_state.get(GATE_DEFAULT_KEY)
+        if server_default is not None and int(gate) != int(server_default):
+            st.caption(
+                f"The server default is {server_default}s; this rollout will use "
+                f"**{int(gate)}s**."
+            )
+        if isinstance(reported_gate, int) and int(gate) != int(reported_gate):
+            st.warning(
+                f"The plan above used {reported_gate}s. Re-plan to check it at "
+                f"{int(gate)}s before approving — the batches do not change, the "
+                "waiting does."
+            )
+        if st.button("Re-plan with this gate (dry run)"):
+            response = admin_request(
+                "POST", "/config/rollouts", required_role=ROLE_OPERATOR,
+                params={"proposal_id": proposal_id},
+                json=_plan_body(_gate_override()),
+            )
+            replanned = _payload(response, {}) or {}
+            if replanned.get("dry_run"):
+                st.session_state[PLAN_KEY] = replanned
+                st.rerun()
+            else:
+                st.error("Could not re-plan: " + _detail(response))
+
     restart = st.checkbox(
         "Restart each agent once its batch passes the gate",
         key="rc_restart",
@@ -578,7 +669,7 @@ if plan:
         response = admin_request(
             "POST", "/config/rollouts", required_role=ROLE_APPROVER,
             params={"proposal_id": proposal_id},
-            json={"note": note or None, "restart_after_apply": bool(restart)},
+            json=_rollout_body(note, restart, _gate_override()),
         )
         if response is not None and response.status_code == 200:
             st.session_state[ROLLOUT_KEY] = _payload(response, {}) or {}

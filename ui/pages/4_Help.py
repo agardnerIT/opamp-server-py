@@ -143,6 +143,12 @@ review rather than a single "push" button. The flow:
 5. **Approve & roll out** (approver) — the canary batch is released first; the rest of
    the fleet is **held** until every agent in the canary reports `APPLIED` with our
    hash, stays healthy, and the health-gate window has elapsed.
+
+   The **Health gate** field on the plan is where that window is set. It starts at the
+   server's configured default (`CONFIG_PUSH_HEALTH_GATE_SECONDS`) and then it *is* the
+   number: the rollout is created with whatever is in the box, so a rollout reviewed at
+   30s runs at 30s. `0` means promote as soon as every agent reports `APPLIED` with our
+   hash, with no settling time — useful in a lab, not on a fleet.
 6. **Stop** — *abort* stops promotion (it cannot recall a config already on an agent);
    *roll back* creates a new revision per applied agent and runs it as its own gated
    rollout.

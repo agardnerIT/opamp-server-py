@@ -937,6 +937,107 @@ def test_approving_a_rollout_fills_the_live_progress_field(server):
     assert "auto_reverted" in texts(app)
 
 
+def planned_rollout(server, role="approver"):
+    """Drive steps 1–4 to a dry-run plan, which is where the gate field appears."""
+    server.agents = [fake_agent()]
+    app = signed_in(
+        REMOTE_CONFIG_PAGE, role=role, rc_body="exporters:\n  debug: {}\n"
+    ).run()
+    [button for button in app.button if (button.label or "") == "Validate"][0].click().run()
+    [button for button in app.button
+     if (button.label or "") == "Propose revision"][0].click().run()
+    [button for button in app.button
+     if (button.label or "") == "Plan the rollout (dry run)"][0].click().run()
+    assert not app.exception, app.exception
+    return app
+
+
+def rollout_bodies(server):
+    """`(body, is_dry_run)` for every POST /config/rollouts the page made."""
+    return [
+        (body, bool(body.get("dry_run")))
+        for url, body in server.bodies
+        if url.endswith("/config/rollouts")
+    ]
+
+
+def test_the_health_gate_box_starts_at_the_server_default(server):
+    """`CONFIG_PUSH_HEALTH_GATE_SECONDS` seeds the field; it does not own it.
+
+    The first plan carries no override, so the number the server reports *is* the
+    configured default (90 in the fake, as in `server/rollout.py`). That reported value
+    is what the box is filled from — the page has no other way to know it, and hardcoding
+    90 here would rot the moment an operator changed the env var.
+    """
+    app = planned_rollout(server)
+    field = [widget for widget in app.number_input if widget.key == "rc_health_gate"][0]
+    assert field.value == 90
+    # Not an override: the plan asked the server what the default is.
+    body, dry_run = rollout_bodies(server)[-1]
+    assert dry_run and "health_gate_seconds" not in body
+
+
+def test_the_number_in_the_health_gate_box_is_what_the_rollout_gets(server):
+    """Editing the box and approving must not fall back to the env default.
+
+    The bug this pins: the create body used to carry only `note`/`restart_after_apply`,
+    so the gate was whatever the server env said — a plan reviewed at 30s would silently
+    run at 90s.
+    """
+    app = planned_rollout(server)
+    app.number_input(key="rc_health_gate").set_value(30).run()
+    assert not app.exception, app.exception
+    # The plan above is now stale, and the page says so rather than letting the operator
+    # approve against numbers that no longer match the box.
+    assert "The plan above used 90s" in texts(app)
+
+    [button for button in app.button
+     if (button.label or "") == "Re-plan with this gate (dry run)"][0].click().run()
+    assert not app.exception, app.exception
+    body, dry_run = rollout_bodies(server)[-1]
+    assert dry_run and body["health_gate_seconds"] == 30
+
+    [button for button in app.button
+     if (button.label or "") == "Approve & roll out"][0].click().run()
+    assert not app.exception, app.exception
+    body, dry_run = rollout_bodies(server)[-1]
+    assert not dry_run
+    assert body["health_gate_seconds"] == 30
+
+
+def test_a_zero_health_gate_is_sent_rather_than_dropped(server):
+    """`0` is a legal gate (a fast lab) and must survive the trip to the server.
+
+    `gate or None` would turn "promote immediately" into "wait 90s", and a body built
+    with `if gate:` would do the same. Only `is not None` is correct.
+    """
+    app = planned_rollout(server)
+    app.number_input(key="rc_health_gate").set_value(0).run()
+    [button for button in app.button
+     if (button.label or "") == "Approve & roll out"][0].click().run()
+    assert not app.exception, app.exception
+    body, dry_run = rollout_bodies(server)[-1]
+    assert not dry_run
+    assert body["health_gate_seconds"] == 0
+
+
+def test_the_health_gate_box_is_not_overwritten_by_a_re_plan(server):
+    """Seeded once. A re-plan echoes a gate back, and that echo must not reseed.
+
+    If the seeding keyed off "what the plan reported", the next plan would rewrite the
+    box from its own echo — harmless here, but the same rule applied after a proposal
+    change would quietly restore the env default over an operator's number.
+    """
+    app = planned_rollout(server)
+    app.number_input(key="rc_health_gate").set_value(45).run()
+    [button for button in app.button
+     if (button.label or "") == "Re-plan with this gate (dry run)"][0].click().run()
+    # The fake echoes a fixed 90 regardless; the box must still hold the operator's 45.
+    field = [widget for widget in app.number_input if widget.key == "rc_health_gate"][0]
+    assert field.value == 45
+    assert "Re-plan to check it at 45s" in texts(app)
+
+
 def test_description_attribute_reads_the_serialised_list_shape():
     """The blast radius must read the API's real shape, not a fixture's convenience."""
     from ui.shared import description_attribute

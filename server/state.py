@@ -3160,6 +3160,22 @@ class AgentState:
         """
         return self.profile.extract_components(self)
 
+    @property
+    def components_status(self) -> str:
+        """Can this agent have a component inventory at all, and has it given us one? (#120)
+
+        Three answers, deliberately distinct, because an empty dict means all three and
+        the reports used to print it as a measurement of zero:
+
+        * `unsupported` — the profile has no component concept (a `generic` agent);
+        * `unreported` — the profile can inventory, but the agent has not told us yet
+          (the hash-only report case in README §"Hash-only component lists");
+        * `reported` — an inventory exists and is what `components` returns.
+        """
+        if self.profile.components_spec is None:
+            return "unsupported"
+        return "reported" if self.components else "unreported"
+
     def get_attr(self, key: str) -> Optional[str]:
         """Return the stringified value of a description attribute.
 
@@ -3311,6 +3327,9 @@ class AgentState:
             "components_request_ignored": self.components_request_ignored,
             "package_statuses": self.package_statuses,
             "available_components": self.available_components,
+            # #120: `components` alone cannot say "this product has no components" from
+            # "we have not been told yet", and both used to render as "0".
+            "components_status": self.components_status,
             "components": self.components,
             "compliance": self.compliance,
             # #118: what the server believes this agent is, how it decided, and the

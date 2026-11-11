@@ -43,6 +43,9 @@ config_formats:
 # guardrail 4). Since #119 the rules themselves live in `server/profiles/otelcol.py`,
 # not in the shared validator: a file may name an engine, never import one.
 validates_structure: true
+# #120: a slim collector is built with the OpenTelemetry Collector Builder, so the
+# manifest and the `ocb` command are this product's artefact and nobody else's.
+ocb_manifest: true
 structure:
   # The collector's own rules — pipelines, component references, the `opamp` extension's
   # protected invariants, the `memory_limiter`/`batch` advice and the exporter allowlist.

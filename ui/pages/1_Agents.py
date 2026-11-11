@@ -753,13 +753,17 @@ if agent_id_param:
                 st.caption("No config object in this agent's report is readable as YAML or JSON")
     
     if profile.has_components:
+        # #120: the slim-distro builder is OCB's, not "anything with components".
+        ocb = profile.ocb_manifest
         st.divider()
 
         col1, col2 = st.columns([4, 1])
         with col1:
             st.markdown("**Components**")
         with col2:
-            show_slim_distro_builder_inline = st.checkbox("Create Slim Distro", key="slim_distro_toggle")
+            show_slim_distro_builder_inline = ocb and st.checkbox(
+                "Create Slim Distro", key="slim_distro_toggle"
+            )
 
         if show_slim_distro_builder_inline:
             show_slim_distro_builder_page(comps)

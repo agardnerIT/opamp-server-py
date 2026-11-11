@@ -173,6 +173,9 @@ def capture() -> Dict[str, Any]:
             "agent_type_ambiguous",
             "health_status",
             "health_error",
+            # #120: new fields, same rule as above — the *values* that existed before
+            # must be unchanged, and a new field is not a changed value.
+            "components_status",
         ):
             payload.pop(key, None)
         payloads.append(payload)

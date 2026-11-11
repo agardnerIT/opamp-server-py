@@ -169,6 +169,7 @@ def compile_document(document: ProfileDocument) -> AgentProfile:
         priority=document.priority,
         config_formats=formats,
         validates_structure=document.validates_structure,
+        ocb_manifest=document.ocb_manifest,
         structure=structure,
         address_sections=tuple(document.structure.address_sections)
         if document.structure is not None

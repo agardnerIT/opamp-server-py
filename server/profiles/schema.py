@@ -277,6 +277,11 @@ class ProfileDocument(_Strict):
     #: says *that* a body is judged; this says *by what*, and the two are checked
     #: against each other so a profile cannot claim one without the other.
     structure: Optional[StructureDocument] = None
+    #: Is this product built by the OpenTelemetry Collector Builder? "Generate a slim
+    #: distro manifest" is that builder's concept, so it is data: a product that is not
+    #: built that way answers 409 instead of "you have no components in use", which is
+    #: true and misleading at the same time (#120).
+    ocb_manifest: bool = False
     identity: IdentityDocument = Field(default_factory=IdentityDocument)
     reports: Tuple[str, ...] = ()
     telemetry: Optional[TelemetryDocument] = None

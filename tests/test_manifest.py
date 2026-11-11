@@ -76,16 +76,23 @@ def effective_config_json() -> str:
     return json.dumps({"configMap": {"configMap": {"": {"body": body}}}})
 
 
-def register_agent(agent_id, available_components=None, effective_config=None):
-    AGENT_REGISTRY.register(
-        agent_id,
-        AgentState(
-            instance_uid=f"manifest-test-{agent_id}".encode(),
-            agent_id=agent_id,
-            available_components=available_components or {},
-            effective_config=effective_config,
-        ),
+def register_agent(
+    agent_id, available_components=None, effective_config=None, agent_type="otelcol"
+):
+    """Register an agent; `otelcol` by default because OCB is the collector's builder.
+
+    #120: the manifest is a Collector Builder artefact, so it is the profile's data
+    (`ocb_manifest: true`) and a non-collector agent answers 409 naming its profile
+    instead of "you have no components in use".
+    """
+    state = AgentState(
+        instance_uid=f"manifest-test-{agent_id}".encode(),
+        agent_id=agent_id,
+        available_components=available_components or {},
+        effective_config=effective_config,
     )
+    state.agent_type = agent_type
+    AGENT_REGISTRY.register(agent_id, state)
     return agent_id
 
 
@@ -212,3 +219,30 @@ class TestManifestEndpoint:
         # the injection never reaches the generated manifest
         assert "manifest_yaml" not in resp.text
         assert "evil: true" not in resp.text
+
+def test_the_manifest_is_refused_for_a_profile_that_is_not_built_by_ocb(client):
+    """#120: "no components in use" was true and misleading for a non-collector.
+
+    The feature stays OTel-only by decision (#115), but the refusal has to say why: the
+    agent's *profile* has no OCB build, which is a different answer from "you have
+    nothing worth building".
+    """
+    agent_id = register_agent(
+        "ab" * 16, AVAILABLE_COMPONENTS, effective_config_json(), agent_type="generic"
+    )
+
+    response = client.post(f"/agent/{agent_id}/manifest", json={})
+
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert "OpenTelemetry Collector Builder" in detail
+    assert "'generic'" in detail
+
+
+def test_the_manifest_still_works_for_a_collector(client):
+    agent_id = register_agent("cd" * 16, AVAILABLE_COMPONENTS, effective_config_json())
+
+    response = client.post(f"/agent/{agent_id}/manifest", json={})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["manifest_yaml"].startswith("dist:")

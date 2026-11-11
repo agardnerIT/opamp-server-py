@@ -15,10 +15,17 @@ from server.reports import (
 from server.state import AGENT_REGISTRY, AgentState
 
 
-def make_agent(agent_id, components, healthy=True):
+def make_agent(agent_id, components, healthy=True, agent_type="otelcol"):
+    """One `GET /agents` row.
+
+    `agent_type` is not decoration since #120: a report is scoped to the profiles that
+    declare it, so a row without a profile is "unattributed" — counted as not applicable
+    rather than as a collector with nothing to report.
+    """
     return {
         "id": agent_id,
         "healthy": healthy,
+        "agent_type": agent_type,
         "components": components,
     }
 
@@ -124,3 +131,103 @@ class TestEndpoints:
         resp = client.get(f"/agent/{agent_id}/report")
         assert resp.status_code == 200
         assert resp.json()["report_markdown"].startswith("# Agent Report")
+
+
+# ------------------------------------- scoped reports and "not applicable" (#120)
+
+
+class TestReportsAreScopedToTheProfilesThatDeclareThem:
+    """"Found 0 heavy collector(s)" was a measurement where a refusal belongs (#120).
+
+    A FluentBit agent cannot be a heavy collector, so counting it as "not heavy" makes a
+    mixed fleet read clean. The scope comes from the dictionary (`reports:` on each
+    profile), never from a product name in this module.
+    """
+
+    def test_a_generic_agent_is_not_applicable_and_says_so(self):
+        data = {"agents": [make_agent("c1", HEAVY_COMPS), make_agent("g1", {}, agent_type="generic")]}
+
+        md = generate_heavy_collectors_report(data, 0.4)
+
+        assert "Found 1 heavy collector(s)" in md
+        assert "> Not applicable to 1 agent(s) on profiles: generic (1)." in md
+        # And the collector that *was* judged still appears.
+        assert "c1" in md
+
+    def test_an_all_collector_fleet_has_no_footer(self):
+        """The all-otelcol markdown must not move: the footer is for skipped agents only."""
+        data = {"agents": [make_agent("c1", HEAVY_COMPS)]}
+
+        assert "Not applicable" not in generate_heavy_collectors_report(data, 0.4)
+        assert "Not applicable" not in generate_outdated_collectors_report(data, "0.149.0")
+
+    def test_the_outdated_report_skips_and_counts_only_applicable_agents(self):
+        data = {
+            "agents": [
+                make_agent("old", OUTDATED_COMPS),
+                make_agent("g1", OUTDATED_COMPS, agent_type="generic"),
+                make_agent("g2", {}, agent_type="generic"),
+            ]
+        }
+
+        md = generate_outdated_collectors_report(data, "0.149.0")
+        collectors, components = _count_outdated_collectors(data["agents"], "0.149.0")
+
+        assert "Found 1 outdated collector(s)" in md
+        assert "> Not applicable to 2 agent(s) on profiles: generic (2)." in md
+        assert (collectors, components) == (1, 1), (
+            "the count must mean the same thing as the markdown beside it"
+        )
+
+    def test_a_legacy_payload_without_a_profile_is_still_reported_on(self):
+        """Absent evidence is not the same as evidence of "not a collector".
+
+        A row from before #118 (or one a caller built by hand) carries no `agent_type`,
+        and the historical behaviour — report on it — has to stand, or every existing
+        caller's report silently empties.
+        """
+        legacy = {"id": "legacy", "healthy": True, "components": HEAVY_COMPS}
+
+        md = generate_heavy_collectors_report({"agents": [legacy]}, 0.4)
+
+        assert "Found 1 heavy collector(s)" in md
+        assert "Not applicable" not in md
+
+    def test_the_endpoint_reports_the_skipped_agents_by_profile(self, client_with_agents):
+        client, _agent_id = client_with_agents  # a `generic` agent, no components
+
+        body = client.get("/reports/heavy-collectors").json()
+
+        assert body["applicable_count"] == 0
+        assert body["not_applicable"] == {"generic": 1}
+        assert body["heavy_count"] == 0
+        assert "Not applicable to 1 agent(s) on profiles: generic (1)." in body["report_markdown"]
+
+
+class TestComponentsStatus:
+    """`unsupported` ≠ `unreported` ≠ empty, and the API keeps them apart (#120)."""
+
+    def _agent(self, **kwargs):
+        return AgentState(
+            instance_uid=bytes.fromhex("ab" * 16), agent_id="ab" * 16, **kwargs
+        )
+
+    def test_a_profile_with_no_component_concept_is_unsupported(self):
+        agent = self._agent()  # resolves to `generic`
+        assert agent.components_status == "unsupported"
+        assert agent.components == {}
+        assert agent.to_dict()["components_status"] == "unsupported"
+
+    def test_a_collector_that_has_not_reported_is_unreported(self):
+        agent = self._agent()
+        agent.agent_type = "otelcol"
+        assert agent.components_status == "unreported"
+
+    def test_a_collector_that_reported_is_reported(self):
+        agent = self._agent()
+        agent.agent_type = "otelcol"
+        agent.available_components = {
+            "components": {"receivers": {"subComponentMap": {"otlp": {"version": "0.1"}}}}
+        }
+        assert agent.components_status == "reported"
+        assert agent.to_dict()["components_status"] == "reported"

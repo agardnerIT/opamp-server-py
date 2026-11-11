@@ -91,6 +91,7 @@ opampctl agents compliance <agent-id>
 | Compliance (admin) | `compliance check <id>` | `check_compliance` | `POST /compliance/check/{id}` |
 | Fleet report | `reports fleet --raw` | `fleet_report` | `GET /reports/fleet` |
 | Heavy collectors | `reports heavy [--threshold]` | `heavy_collectors_report` | `GET /reports/heavy-collectors` |
+|  |  |  | Scoped to profiles that declare the `heavy` report; a mixed fleet is counted in `not_applicable` (#120) |
 | Outdated components | `reports outdated [--version]` | `outdated_collectors_report` | `GET /reports/outdated-collectors` |
 | Alerts config (redacted read / operator write) | `alerts get` / `alerts set @f.json` | `get_alerts` / `update_alerts` | `GET`/`PUT /alerts` |
 | Test alert (operator) | `alerts test` | `test_alerts` | `POST /alerts/test` |

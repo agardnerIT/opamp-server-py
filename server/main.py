@@ -89,6 +89,7 @@ from server import (
     protocol,
     redaction,
     remote_config,
+    reports,
     rollout,
     sequence,
     throttle,
@@ -2697,6 +2698,18 @@ def generate_agent_manifest(agent_id: str, request: ManifestRequest | None = Non
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
+    # #120: OCB is the *collector's* build tool. For anything else, "no components in
+    # use" is true and misleading — the honest refusal names the profile.
+    if not agent.profile.ocb_manifest:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "the OCB manifest is an OpenTelemetry Collector Builder artefact; this "
+                f"agent's profile is {agent.profile.name!r}, which is not built that way "
+                "(#120)"
+            ),
+        )
+
     components = agent.components
     if not components or not any(
         comp.get("used") for group in components.values() for comp in group
@@ -2757,11 +2770,17 @@ def heavy_collectors_report(
     "threshold": float}`. `threshold` must be within [0, 1] (FastAPI 422 otherwise).
     """
     agents = [a.to_dict() for a in AGENT_REGISTRY.list_all()]
-    heavy = [a for a in agents if _is_heavy(a, threshold)]
+    # #120: "not applicable" is not "not heavy". The count is over the agents the report
+    # is about, and the skipped ones are reported by profile so a mixed fleet cannot read
+    # "Found 0" as a clean bill of health.
+    applicable, skipped = reports.split_applicable(agents, reports.REPORT_HEAVY)
+    heavy = [a for a in applicable if _is_heavy(a, threshold)]
     return {
         "report_markdown": generate_heavy_collectors_report({"agents": agents}, threshold),
         "heavy_count": len(heavy),
         "threshold": threshold,
+        "applicable_count": len(applicable),
+        "not_applicable": skipped,
     }
 
 
@@ -2787,8 +2806,11 @@ def outdated_collectors_report(
         raise HTTPException(status_code=422, detail=str(exc))
 
     agents = [a.to_dict() for a in AGENT_REGISTRY.list_all()]
+    applicable, skipped = reports.split_applicable(agents, reports.REPORT_OUTDATED)
     collectors_count, components_count = _count_outdated_collectors(agents, version)
     return {
+        "applicable_count": len(applicable),
+        "not_applicable": skipped,
         "report_markdown": generate_outdated_collectors_report({"agents": agents}, version),
         "collectors_count": collectors_count,
         "components_count": components_count,

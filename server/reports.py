@@ -9,6 +9,62 @@ from datetime import datetime
 from typing import Dict, List
 
 
+#: Which profile declares each report, and the wording used when one is skipped. The
+#: report *names* stay (they are API paths, `opampctl` commands and MCP tools — #117's
+#: non-goal), but their scope becomes the profiles that say the question means something.
+REPORT_HEAVY = "heavy"
+REPORT_OUTDATED = "outdated"
+
+
+def _profile_of(agent: Dict) -> str:
+    """The resolved profile name on an agent dict, or "" when it has none (#120)."""
+    return str((agent or {}).get("agent_type") or "")
+
+
+def split_applicable(agents: List[Dict], report: str) -> tuple:
+    """`(applicable, skipped_by_profile)` for one report (#120).
+
+    A report is *about* a question one product can answer. "Which collector has
+    components it never uses" is not a question a FluentBit agent can fail; counting it
+    as "not heavy" and printing "0" is a measurement where a refusal belongs. The profile
+    declares its reports (`reports: [fleet, agent, heavy, outdated]`), so this asks the
+    dictionary rather than testing for a product name.
+    """
+    from server import profiles
+
+    applicable: List[Dict] = []
+    skipped: Dict[str, int] = {}
+    for agent in agents or []:
+        if "agent_type" not in (agent or {}):
+            # A payload from before #118, or one a caller built by hand. It carries no
+            # claim about what the agent is, so the historical behaviour stands (the
+            # report applies) rather than the row silently becoming "not applicable" —
+            # absent is not the same evidence as "resolved to something that does not
+            # declare this report".
+            applicable.append(agent)
+            continue
+        name = _profile_of(agent)
+        profile = profiles.get(name) if name else None
+        if profile is not None and report in profile.reports:
+            applicable.append(agent)
+        else:
+            label = name or "unattributed"
+            skipped[label] = skipped.get(label, 0) + 1
+    return applicable, skipped
+
+
+def _not_applicable_line(skipped: Dict[str, int]) -> str:
+    """The footer that makes a skipped agent visible instead of silently green."""
+    if not skipped:
+        return ""
+    total = sum(skipped.values())
+    detail = ", ".join(f"{name} ({count})" for name, count in sorted(skipped.items()))
+    return (
+        f"\n> Not applicable to {total} agent(s) on profiles: {detail}. "
+        "Their profile does not declare this report.\n"
+    )
+
+
 def parse_version(v):
     try:
         parts = v.lstrip("v").split(".")
@@ -18,6 +74,11 @@ def parse_version(v):
 
 
 def _is_heavy(agent, threshold=0.5):
+    """Whether one agent is "heavy" — over `threshold` of its components are unused.
+
+    Callers filter by profile first (`split_applicable`): an agent whose profile has no
+    component concept is *not applicable*, which is not the same as "not heavy" (#120).
+    """
     comps = agent.get("components", {})
     total_count = sum(len(c) for c in comps.values())
     unused_count = sum(1 for cl in comps.values() for c in cl if not c.get("used"))
@@ -102,7 +163,7 @@ def generate_agent_report(data: Dict, format: str = "markdown") -> str:
 
 
 def generate_heavy_collectors_report(data: Dict, threshold: float = 0.5) -> str:
-    agents = data.get("agents", [])
+    agents, skipped = split_applicable(data.get("agents", []), REPORT_HEAVY)
 
     lines = ["# Heavy Collectors Report\n"]
     lines.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -130,11 +191,12 @@ def generate_heavy_collectors_report(data: Dict, threshold: float = 0.5) -> str:
         for aid, unused, total, pct in sorted(heavy_agents, key=lambda x: -x[3]):
             lines.append(f"- **{aid}**: {unused}/{total} unused ({pct}%)\n")
 
+    lines.append(_not_applicable_line(skipped))
     return "".join(lines)
 
 
 def generate_outdated_collectors_report(data: Dict, latest_version: str = "0.149.0") -> str:
-    agents = data.get("agents", [])
+    agents, skipped = split_applicable(data.get("agents", []), REPORT_OUTDATED)
     latest = parse_version(latest_version)
 
     lines = ["# Outdated Collectors Report\n"]
@@ -169,11 +231,17 @@ def generate_outdated_collectors_report(data: Dict, latest_version: str = "0.149
                 lines.append(f"  - {comp_type}/{comp_id}: v{ver}\n")
             lines.append("\n")
 
+    lines.append(_not_applicable_line(skipped))
     return "".join(lines)
 
 
 def _count_outdated_collectors(agents: List[Dict], latest_version: str) -> tuple:
-    """Return tuple of (collectors_count, components_count) with outdated versions."""
+    """Return tuple of (collectors_count, components_count) with outdated versions.
+
+    Only agents whose profile declares the report are counted (#120): the number has to
+    mean the same thing as the markdown it is returned beside.
+    """
+    agents, _skipped = split_applicable(agents, REPORT_OUTDATED)
     latest = parse_version(latest_version)
     collectors_count = 0
     components_count = 0

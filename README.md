@@ -1804,7 +1804,7 @@ The UI signs in the same way the CLI does — `POST /auth/session` — and then 
 | POST | `/config/revisions/{id}/reactivate` | approver | Resume a **poisoned** revision after a fresh validation pass. Nothing retries on a timer |
 | POST | `/config/validate` | viewer | Validate a config map without storing it: `{"config_map", "agent_id"?, "allow_endpoint_change"?}`. Always 200: `{valid, errors, details, warnings, policy, fingerprint, config_hash, size_bytes, objects, profile, profile_source}` — the last two name the agent profile whose rules produced the verdict |
 | GET | `/reports/fleet` | | Full fleet summary report (markdown, same as the UI Reports page) |
-| GET | `/reports/heavy-collectors` | | Collectors with many unused components. Param: `threshold` (0–1, default 0.5) |
+| GET | `/reports/heavy-collectors` | | Collectors with many unused components. Params: `threshold` (0–1, default 0.5). Also returns `applicable_count` and `not_applicable` (agents per profile the report does not cover — #120) |
 | GET | `/reports/outdated-collectors` | | Collectors with components older than `version` (default `0.149.0`) |
 | POST | `/compliance/check/{id}` | operator | Force a compliance check (503 if OPA disabled) |
 | GET | `/compliance/summary` | | Fleet-wide compliance counts |

@@ -324,6 +324,8 @@ class AgentProfile:
     #: This product's "address" sections for the merge-collision warning (#119); empty
     #: means the shipped defaults in `server.config_vocabulary`.
     address_sections: Tuple[str, ...] = ()
+    #: Whether an OCB build manifest is a meaningful artefact for this product (#120).
+    ocb_manifest: bool = False
     #: Evidence of identity from `AgentDescription` attributes.
     identity_match_any: Tuple[IdentityRule, ...] = ()
     #: The same evidence in declared form, for the API and for `--strict-profiles`.
@@ -488,6 +490,8 @@ class AgentProfile:
             "telemetry": self.telemetry.to_dict() if self.telemetry else None,
             "detectable": bool(self.identity_match_any or self.sniff),
             "has_components": self.has_components,
+            # #120: OCB is a builder, not a validator: "unsupported" is an answer.
+            "ocb_manifest": self.ocb_manifest,
             "has_onboarding_snippet": self.onboarding is not None,
             "identity": {
                 "match_any": [rule.to_dict() for rule in self.identity_match_any],

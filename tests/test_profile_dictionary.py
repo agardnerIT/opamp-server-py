@@ -113,8 +113,15 @@ class TestTheSchemaIsStrict:
         """Guardrail 3: no code from data, so there is no key that names a module."""
         assert "hooks" not in schema.ProfileDocument.model_fields
 
-    def test_structural_validation_requires_a_components_block(self, dictionary):
-        """Guardrail 4 — the one place a data file could make the server less safe."""
+    def test_structural_validation_needs_an_engine_and_a_components_block(self, dictionary):
+        """Guardrail 4 — the one place a data file could make the server less safe.
+
+        Since #119 the claim alone is not enough: a profile that judges bodies must name
+        the rules it judges them by (`structure.engine`, a closed set the loader knows),
+        *and* declare the components those rules report on. All three failures here are
+        load errors, because a profile that half-claims this would be judged by someone
+        else's rules or by none, silently.
+        """
         _write(
             dictionary,
             "claims",
@@ -123,7 +130,31 @@ class TestTheSchemaIsStrict:
         )
         with pytest.raises(loader.ProfileLoadError) as caught:
             loader.load_all(dictionary, strict=True)
-        assert "components" in str(caught.value)
+        assert "structure block" in str(caught.value)
+
+        # An engine without the claim is a field nobody reads.
+        _write(
+            dictionary,
+            "claims",
+            MINIMAL.format(name="claims", display_name="Claims", priority=1)
+            + "structure:\n  engine: otelcol\n",
+        )
+        with pytest.raises(loader.ProfileLoadError) as caught:
+            loader.load_all(dictionary, strict=True)
+        assert "validates_structure: true" in str(caught.value)
+
+        # An unknown engine is a typo, not a feature: the set is closed on purpose.
+        _write(
+            dictionary,
+            "claims",
+            MINIMAL.format(name="claims", display_name="Claims", priority=1)
+            + "validates_structure: true\n"
+            "components:\n  sections:\n    receivers: receiver\n"
+            "structure:\n  engine: no-such-engine\n",
+        )
+        with pytest.raises(loader.ProfileLoadError) as caught:
+            loader.load_all(dictionary, strict=True)
+        assert "unknown structure engine" in str(caught.value)
 
     @pytest.mark.parametrize(
         "block",
@@ -189,12 +220,32 @@ class TestTheSchemaIsStrict:
 
 
 class TestTheShippedDictionary:
-    def test_otelcol_is_data_and_has_no_module_any_more(self):
-        """Acceptance: the collector is expressible as YAML, with no Python hooks."""
+    def test_otelcol_is_described_by_data_and_judged_by_an_engine(self):
+        """#134 made the collector's *description* data; #119 kept its *rules* as code.
+
+        Both halves are asserted, because they pull in opposite directions and the split
+        is the design: identity, snippet, panels, telemetry and components are a YAML
+        file an operator can edit, while the rules that judge a collector config are a
+        named engine (`structure: {engine: otelcol}`) — a file may name it, never import
+        it. An agent type that needs no such rules still gets one file and no Python.
+        """
         assert (SHIPPED / "otelcol.yaml").is_file()
-        assert not (Path(profiles.__file__).parent / "otelcol.py").exists()
-        with pytest.raises(ImportError):
-            __import__("server.profiles.otelcol")
+        module = Path(profiles.__file__).parent / "otelcol.py"
+        assert module.is_file(), "the structure engine lives next to the dictionary"
+
+        # The module is *only* the rules: no profile object, no snippet, no panels.
+        source = module.read_text()
+        assert "AgentProfile(" not in source
+        assert "bootstrap_snippet" not in source and "panels" not in source
+
+        # And the profile itself is still the file, pointing at that engine by name.
+        otelcol = profiles.get("otelcol")
+        assert otelcol.structure is not None
+        assert otelcol.structure.ENGINE == "otelcol"
+        assert otelcol.components_spec is not None
+
+        # `generic` owns no rules at all, which is what makes it the honest default.
+        assert profiles.get("generic").structure is None
 
     def test_otelcol_keeps_everything_it_had(self):
         otelcol = profiles.get("otelcol")

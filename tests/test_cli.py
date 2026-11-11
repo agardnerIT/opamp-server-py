@@ -56,6 +56,8 @@ def register_agent(agent_id, with_components=False):
         state.available_components = AVAILABLE_COMPONENTS
         state.effective_config = effective_config()
     AGENT_REGISTRY.register(agent_id, state)
+    # #119: the config push flow in this suite is a collector flow.
+    state.agent_type = "otelcol"
     return state
 
 

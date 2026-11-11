@@ -36,7 +36,13 @@ from server import admin_auth, agent_auth, crypto, remote_config, ws
 from server.framing import decode_message, encode_message
 from server.state import AGENT_REGISTRY, SQLiteCredentialStore
 from server.ws import REGISTRY, ProcessedMessage
-from tests.support import ADMIN, admin_headers, bearer, spec_wire_hash
+from tests.support import (
+    ADMIN,
+    admin_headers,
+    bearer,
+    pin_collector,
+    spec_wire_hash,
+)
 
 UID = bytes.fromhex("ab" * 16)
 AGENT_ID = "ab" * 16
@@ -129,6 +135,9 @@ def poll(client, token: str | None = None, uid: bytes = UID, **kwargs):
     assert response.status_code == 200, response.text
     reply = opamp_pb2.ServerToAgent()
     reply.ParseFromString(response.content)
+    # #119: this suite pushes collector configs, and a profile owns the rules that judge
+    # one. `pin_collector` is a no-op before the first report registered the agent.
+    pin_collector(uid.hex())
     return reply
 
 

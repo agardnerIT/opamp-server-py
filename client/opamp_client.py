@@ -693,6 +693,7 @@ class OpampClient:
         note: Optional[str] = None,
         confirm_endpoint_change: bool = False,
         confirm_scope_change: bool = False,
+        confirm_unchecked_structure: bool = False,
         override_reason: Optional[str] = None,
     ) -> Dict[str, Any]:
         """``POST /config/revisions/{id}/approve`` — activate a proposal (approver).
@@ -705,6 +706,11 @@ class OpampClient:
         If the selector now matches agents it did not at propose time, the call is
         refused until ``confirm_scope_change=True``: an approval that quietly widens
         its own blast radius is what the two-phase flow exists to prevent.
+
+        ``confirm_unchecked_structure=True`` is required when a target's profile owns no
+        structural rules (#119): the server validated the bytes and nothing else, so the
+        approver is the only thing that can catch a config that leaves the agent unable
+        to start. The acknowledgement is recorded on the revision and in the audit log.
         """
         body: Dict[str, Any] = {}
         if note:
@@ -713,6 +719,8 @@ class OpampClient:
             body["confirm_endpoint_change"] = True
         if confirm_scope_change:
             body["confirm_scope_change"] = True
+        if confirm_unchecked_structure:
+            body["confirm_unchecked_structure"] = True
         if override_reason:
             body["override_reason"] = override_reason
         return self._post(f"/config/revisions/{proposal_id}/approve", json=body)
@@ -816,6 +824,7 @@ class OpampClient:
         restart_after_apply: bool = False,
         confirm_endpoint_change: bool = False,
         confirm_scope_change: bool = False,
+        confirm_unchecked_structure: bool = False,
         override_reason: Optional[str] = None,
     ) -> Dict[str, Any]:
         """``POST /config/rollouts`` — approve **and** stage a proposal (approver).
@@ -847,6 +856,8 @@ class OpampClient:
             body["confirm_endpoint_change"] = True
         if confirm_scope_change:
             body["confirm_scope_change"] = True
+        if confirm_unchecked_structure:
+            body["confirm_unchecked_structure"] = True
         if override_reason:
             body["override_reason"] = override_reason
         return self._post("/config/rollouts", params={"proposal_id": proposal_id}, json=body)

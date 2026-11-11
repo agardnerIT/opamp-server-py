@@ -24,7 +24,7 @@ from proto import anyvalue_pb2, opamp_pb2
 from server import admin_auth, config_control, crypto
 from server.main import _handle_agent_message
 from server.state import COLLECTOR_GROUPS, SQLiteGroupStore
-from tests.support import ADMIN, admin_headers
+from tests.support import ADMIN, admin_headers, pin_collector
 
 UID = bytes.fromhex("ab" * 16)
 AGENT_ID = "ab" * 16
@@ -80,6 +80,8 @@ def describe(uid: bytes, env: str = "prod", region: str = "emea") -> None:
         key="region", value=anyvalue_pb2.AnyValue(string_value=region)
     )
     _handle_agent_message(msg.SerializeToString())
+    # #119: the collector rules judge collector configs, and this is one.
+    pin_collector(uid.hex())
 
 
 def create(client, name="prod-emea", definition=None, **extra):

@@ -19,22 +19,33 @@ hundred structural complaints about a tree that does not exist:
 
 1. shape + size (:func:`check_shape`)
 2. decode + parse with alias/depth/duplicate-key guards (:func:`parse_document`)
-3. structural rules (:func:`check_structure`)
-4. protected invariants (:func:`check_invariants`)
-5. inventory warnings (:func:`check_inventory`)
-6. config-object-name warnings (:func:`check_object_names`)
-7. merge-collision warnings (:func:`check_merge_collisions`)
-8. policy gate (:func:`check_policy`)
-9. a :class:`Verdict` that the caller stores on the revision
+3. format layer: what the declared ``content_type`` means, and whether a parse failure
+   is blocking or advisory (:func:`looks_yaml_like`)
+4. **the profile's** structural rules — ``profile.structure`` in
+   ``server/profiles/otelcol.py``; the collector's pipeline, invariant and inventory
+   checks live there, not here (#119)
+5. config-object-name warnings (:func:`check_object_names`)
+6. merge-collision warnings (:func:`check_merge_collisions`)
+7. policy gate (:func:`check_policy`)
+8. a :class:`Verdict` that the caller stores on the revision
+
+Steps 1–3, 5–8 are true of any config body and stay here. Everything OpenTelemetry
+knows — `receivers`/`processors`/`exporters`, `service.pipelines`, the `opamp`
+extension's protected invariants, the `memory_limiter` advice — is a *profile's* rules,
+because a FluentBit or ossuary agent is not a broken collector. A profile with no
+structure engine is not judged at all: the body is stored and relayed as opaque text, the
+verdict says so, and :attr:`Verdict.structure_checked` is `False` so the approve step can
+demand an acknowledgement from a human.
 
 Severity policy, because "everything is an error" is how a validator gets switched off:
 
-* a document with **no** collector sections is not a collector config (a routing
-  table, a certificate, a shell fragment) and is not judged;
-* a document with collector sections but no `service` is a **fragment** and only
-  warns — we cannot tell whether it is the whole config or a piece of one;
-* a document with `service` is a complete collector config: structural rules and the
-  protected invariants are **errors**, because that is the config that will run.
+* **format** failures (oversize, non-UTF-8, duplicate keys, an alias bomb, a redaction
+  marker) are errors for every profile — they are true of the bytes, not of a product;
+* a declared type that will not parse is an error **when a profile judges structure**,
+  and a warning when none does: an opaque body may be INI, a certificate or a script,
+  and refusing it would make the feature useless for the agents it is meant to serve;
+* what a *profile's* engine does with a parsed document is that engine's business, and
+  it reports through this same verdict.
 """
 
 from __future__ import annotations
@@ -42,13 +53,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
-from urllib.parse import urlparse
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import yaml
 from loguru import logger
+
+from server.config_vocabulary import ADDRESS_SECTIONS
 
 DEFAULT_MAX_BYTES = 1024 * 1024
 DEFAULT_MAX_ALIASES = 10_000
@@ -60,23 +72,9 @@ DEFAULT_MAX_NODES = 100_000
 MAX_ROLE_CHARS = 128
 
 # Top-level sections of a collector config. `service` is what makes it runnable.
-COMPONENT_SECTIONS = (
-    "receivers",
-    "processors",
-    "exporters",
-    "extensions",
-    "connectors",
-)
-CONFIGURATOR_SECTIONS = COMPONENT_SECTIONS + ("service",)
 
 # Pipeline component sections, mapped to the top-level section that must define them.
-PIPELINE_SECTIONS = {
-    "receivers": "receivers",
-    "processors": "processors",
-    "exporters": "exporters",
-}
 
-OPAMP_EXTENSION = "opamp"
 
 #: Sections whose children are **addresses** in the merged config rather than plain
 #: settings: a component id, a pipeline id, a scheduled query name. Two config sources
@@ -84,11 +82,6 @@ OPAMP_EXTENSION = "opamp"
 #: merge and reports `config_conflict` — which is why this set drives the collision
 #: warning. `service.telemetry.logs` is deliberately *not* one of these: a scalar leaf
 #: supplied by a second source is merged, not duplicated.
-ADDRESS_SECTIONS = frozenset(COMPONENT_SECTIONS) | {
-    "pipelines",  # collector: service.pipelines.<id>
-    "schedule",  # osquery: schedule.<query name>
-    "packs",  # osquery: packs.<pack name>
-}
 
 REDACTION_MARKER = "<redacted>"
 
@@ -129,39 +122,6 @@ def max_depth() -> int:
 def max_nodes() -> int:
     """Maximum *expanded* node count for one parsed document (alias-bomb ceiling)."""
     return _env_int("CONFIG_MAX_NODES", DEFAULT_MAX_NODES)
-
-
-def allowed_exporter_hosts() -> Tuple[str, ...]:
-    """`CONFIG_ALLOWED_EXPORTER_HOSTS` (comma-separated); empty means "no opinion"."""
-    raw = (os.environ.get("CONFIG_ALLOWED_EXPORTER_HOSTS") or "").strip()
-    if not raw:
-        return ()
-    return tuple(part.strip().lower() for part in raw.split(",") if part.strip())
-
-
-def allowed_opamp_endpoints() -> Tuple[str, ...]:
-    """Endpoints a pushed config may keep/point the `opamp` extension at.
-
-    Deliberately built from *this* server's advertised addresses plus an explicit
-    allowlist: moving a fleet's control channel is exactly the chicken-and-egg
-    outage #83 warns about, so it needs a deliberate opt-in, not a typo.
-    """
-    from server import posture
-
-    values: List[str] = []
-    for name in ("OPAMP_SERVER_ENDPOINT", "OPAMP_WS_ENDPOINT", "OPAMP_HTTP_ENDPOINT"):
-        value = (os.environ.get(name) or "").strip()
-        if value:
-            values.append(value)
-    public_url = (posture.public_url() or "").strip()
-    if public_url:
-        values.append(public_url)
-        parsed = urlparse(public_url)
-        if parsed.hostname:
-            values.append(parsed.hostname)
-    raw = (os.environ.get("CONFIG_ALLOWED_OPAMP_ENDPOINTS") or "").strip()
-    values.extend(part.strip() for part in raw.split(",") if part.strip())
-    return tuple(dict.fromkeys(values))
 
 
 # ----------------------------------------------------------------------- verdict
@@ -205,6 +165,12 @@ class Verdict:
     )
     normalised: Dict[str, Dict[str, str]] = field(default_factory=dict, repr=False)
     parsed: Dict[str, Any] = field(default_factory=dict, repr=False)
+    #: Did a profile actually judge the **structure** of every accepted body? (#119)
+    #: `False` for an agent whose profile has no structure engine: its config is opaque
+    #: text to this server, so "valid" means well-formed and nothing more, and the approve
+    #: step makes a human say they know that. Not part of `fingerprint()` — a body does
+    #: not become different because a profile stopped interpreting it.
+    structure_checked: bool = False
     checked_at: str = field(default_factory=lambda: _now())
     # #118: *which* rules produced this verdict, and how that was decided
     # (`pinned`/`declared`/`sniffed`/`fallback`, or `mixed` for a target set that
@@ -257,6 +223,7 @@ class Verdict:
             "checked_at": self.checked_at,
             "profile": self.profile,
             "profile_source": self.profile_source,
+            "structure_checked": self.structure_checked,
         }
 
 
@@ -437,373 +404,10 @@ def _path(*parts: Any) -> str:
     return ".".join(str(part) for part in parts if str(part) != "")
 
 
-def check_structure(doc: Any, path: str, verdict: Verdict) -> None:
-    """Structural rules for a complete collector config (#100 stage 3)."""
-    if not _is_mapping(doc):
-        verdict.add_error(
-            path or "<root>",
-            "config body must be a YAML/JSON mapping at the top level",
-            "a collector config is a mapping of sections (`receivers`, `exporters`, `service`, …)",
-        )
-        return
-
-    present = [section for section in CONFIGURATOR_SECTIONS if section in doc]
-    if "service" not in doc:
-        if present:
-            verdict.add_warning(
-                path or "<root>",
-                "no `service` section: this is a config fragment, so pipeline and "
-                "protected-invariant checks were skipped",
-                "include the full config (with `service.pipelines`) to get the full checks",
-            )
-        return
-
-    service = doc.get("service")
-    if not _is_mapping(service):
-        verdict.add_error(
-            _path(path, "service"),
-            "`service` must be a mapping",
-            "e.g. `service: {pipelines: {traces: {receivers: [otlp], exporters: [debug]}}}`",
-        )
-        return
-
-    for section in COMPONENT_SECTIONS:
-        if section in doc and not _is_mapping(doc[section]):
-            verdict.add_error(
-                _path(path, section),
-                f"`{section}` must be a mapping of id → configuration",
-            )
-    for section in COMPONENT_SECTIONS:
-        if section not in doc:
-            continue
-        for comp_id in doc[section]:
-            if not isinstance(comp_id, str) or not comp_id:
-                verdict.add_error(
-                    _path(path, section),
-                    f"`{section}` keys must be non-empty strings (got {comp_id!r})",
-                )
-
-    pipelines = service.get("pipelines")
-    if not _is_mapping(pipelines) or not pipelines:
-        verdict.add_error(
-            _path(path, "service", "pipelines"),
-            "`service.pipelines` must be a non-empty mapping",
-            "a pipeline is what makes the collector run: `traces: {receivers: [...], exporters: [...]}`",
-        )
-        return
-
-    for name, pipeline in pipelines.items():
-        pipeline_path = _path(path, "service", "pipelines", name)
-        if not _is_mapping(pipeline):
-            verdict.add_error(pipeline_path, "pipeline must be a mapping")
-            continue
-        for section, top_level in PIPELINE_SECTIONS.items():
-            ids = _as_list(pipeline.get(section))
-            required = section in ("receivers", "exporters")
-            if not ids:
-                if required:
-                    verdict.add_error(
-                        _path(pipeline_path, section),
-                        f"pipeline `{name}` has no {section}",
-                        f"a pipeline needs at least one entry in `{section}`",
-                    )
-                continue
-            declared = doc.get(top_level) if _is_mapping(doc.get(top_level)) else {}
-            for index, component in enumerate(ids):
-                item_path = f"{_path(pipeline_path, section)}[{index}]"
-                if not isinstance(component, str) or not component:
-                    verdict.add_error(
-                        item_path, f"{section} entries must be component ids (strings)"
-                    )
-                    continue
-                if component not in declared:
-                    verdict.add_error(
-                        item_path,
-                        f"`{component}` is referenced but not defined under `{top_level}`",
-                        f"add `{top_level}.{component}` or remove it from the pipeline",
-                    )
-
-    # `service.extensions` is a list of ids that must exist under `extensions`.
-    extensions = doc.get("extensions") if _is_mapping(doc.get("extensions")) else {}
-    for index, extension in enumerate(_as_list(service.get("extensions"))):
-        item_path = f"{_path(path, 'service', 'extensions')}[{index}]"
-        if not isinstance(extension, str) or not extension:
-            verdict.add_error(item_path, "extensions entries must be component ids (strings)")
-        elif extension not in extensions:
-            verdict.add_error(
-                item_path,
-                f"`{extension}` is enabled in `service.extensions` but not defined under `extensions`",
-                f"add `extensions.{extension}` or remove it from `service.extensions`",
-            )
-
-    # Connectors are referenced from a pipeline end via `receivers`/`exporters` too;
-    # catch a connector defined in a section it does not belong to (cheap sanity).
-    for section in ("connectors",):
-        if section in doc and not _is_mapping(doc[section]):
-            verdict.add_error(_path(path, section), f"`{section}` must be a mapping")
-
-
 # ---------------------------------------------------------------------- invariants
-
-_MEMORY_LIMITER = "memory_limiter"
-_BATCH = "batch"
-
-
-def _iter_endpoints(value: Any, path: str) -> Iterable[Tuple[str, str, str]]:
-    """Yield `(path, field, url)` for every `endpoint`/`url` string in a subtree."""
-    if _is_mapping(value):
-        for key, child in value.items():
-            child_path = _path(path, key)
-            if key in ("endpoint", "url", "server_url", "ws_endpoint") and isinstance(child, str):
-                yield child_path, str(key), child
-            else:
-                yield from _iter_endpoints(child, child_path)
-    elif isinstance(value, (list, tuple)):
-        for index, child in enumerate(value):
-            yield from _iter_endpoints(child, f"{path}[{index}]")
-
-
-def _normalise_endpoint(url: str) -> str:
-    """`scheme://host[:port][/path]` lowercased, no trailing slash — for comparison."""
-    value = (url or "").strip()
-    if not value:
-        return ""
-    parsed = urlparse(value if "://" in value else f"//{value}")
-    host = (parsed.hostname or "").lower()
-    port = parsed.port
-    path = (parsed.path or "").rstrip("/")
-    netloc = f"{host}:{port}" if port else host
-    return f"{parsed.scheme.lower()}://{netloc}{path}" if parsed.scheme else f"{netloc}{path}"
-
-
-def _endpoint_host(url: str) -> str:
-    """`host[:port]`, lowercased — the part that decides *who* receives the traffic."""
-    value = (url or "").strip()
-    if not value:
-        return ""
-    parsed = urlparse(value if "://" in value else f"//{value}")
-    host = (parsed.hostname or "").lower()
-    return f"{host}:{parsed.port}" if parsed.port else host
-
-
-def _endpoint_allowed(pushed: str, allowed: Sequence[str]) -> bool:
-    """True when the pushed endpoint is exactly allowed or lands on an allowed host.
-
-    Host-level matching is the security-relevant half: moving a fleet's control
-    channel to another machine is the outage #83 warns about, while a path or scheme
-    change on the same host is not. An allowlist entry with no scheme is treated as
-    a bare host[:port].
-    """
-    candidate = _normalise_endpoint(pushed)
-    if not candidate:
-        return True
-    candidate_host = _endpoint_host(pushed)
-    for entry in allowed:
-        normalised = _normalise_endpoint(entry)
-        if not normalised:
-            continue
-        if candidate == normalised:
-            return True
-        if candidate_host and candidate_host == _endpoint_host(entry):
-            return True
-    return False
-
-
-def check_invariants(
-    doc: Any,
-    path: str,
-    verdict: Verdict,
-    *,
-    allow_endpoint_change: bool = False,
-    allowed_endpoints: Optional[Sequence[str]] = None,
-    allowed_exporters: Optional[Sequence[str]] = None,
-) -> None:
-    """The protected invariants (D7): never let a push cut the control channel.
-
-    Removing the `opamp` extension is the one mistake the server cannot fix from a
-    distance — the agent stops talking, so the next push has nowhere to go. It is an
-    error, not a warning.
-    """
-    if not _is_mapping(doc) or "service" not in doc:
-        return
-    allowed_endpoints = (
-        tuple(allowed_endpoints) if allowed_endpoints is not None else allowed_opamp_endpoints()
-    )
-    allowed_exporters = (
-        tuple(allowed_exporters) if allowed_exporters is not None else allowed_exporter_hosts()
-    )
-
-    extensions = doc.get("extensions") if _is_mapping(doc.get("extensions")) else {}
-    service = doc.get("service") if _is_mapping(doc.get("service")) else {}
-    enabled = [item for item in _as_list(service.get("extensions")) if isinstance(item, str)]
-
-    if OPAMP_EXTENSION not in extensions:
-        verdict.add_error(
-            _path(path, "extensions", OPAMP_EXTENSION),
-            "the `opamp` extension is missing from `extensions`",
-            "without it the agent loses its control channel and can never be fixed "
-            "remotely; keep the existing `extensions.opamp` block",
-        )
-    if OPAMP_EXTENSION not in enabled:
-        verdict.add_error(
-            _path(path, "service", "extensions"),
-            "`opamp` is not listed in `service.extensions`",
-            "an extension that is not enabled does not run: add `opamp` to `service.extensions`",
-        )
-
-    opamp_config = extensions.get(OPAMP_EXTENSION)
-    endpoints = list(_iter_endpoints(opamp_config, _path(path, "extensions", OPAMP_EXTENSION)))
-    if not endpoints:
-        verdict.add_warning(
-            _path(path, "extensions", OPAMP_EXTENSION),
-            "no endpoint is set for the `opamp` extension in this config",
-            "the agent will keep its local endpoint; state it explicitly if the "
-            "control channel must be verifiable",
-        )
-    for endpoint_path, _, url in endpoints:
-        if _endpoint_allowed(url, allowed_endpoints):
-            continue
-        if allow_endpoint_change:
-            verdict.add_warning(
-                endpoint_path,
-                f"the `opamp` endpoint moves to {url!r}; the change was explicitly allowed",
-                "an agent that cannot reach the new endpoint is unreachable until someone "
-                "fixes it on the host",
-            )
-            continue
-        verdict.add_error(
-            endpoint_path,
-            f"the `opamp` endpoint would move to {url!r}, which is not this server",
-            "set `allow_endpoint_change: true` and confirm it as an approver if that is "
-            "intended (it is the chicken-and-egg outage #83 warns about), or configure "
-            "CONFIG_ALLOWED_OPAMP_ENDPOINTS",
-        )
-
-    # -- warnings: things that usually mean "this config will hurt" --------------
-    if not _is_mapping(service.get("telemetry")):
-        verdict.add_warning(
-            _path(path, "service", "telemetry"),
-            "`service.telemetry` is not set: the collector's own logs/metrics are not configured",
-            "keeping telemetry is how you find out a rollout went wrong",
-        )
-
-    processors_used = set()
-    for pipeline in (service.get("pipelines") or {}).values():
-        if _is_mapping(pipeline):
-            processors_used.update(
-                item for item in _as_list(pipeline.get("processors")) if isinstance(item, str)
-            )
-    if _MEMORY_LIMITER not in processors_used:
-        verdict.add_warning(
-            _path(path, "processors", _MEMORY_LIMITER),
-            "no `memory_limiter` processor is used in any pipeline",
-            "without it a collector under load is OOM-killed, which looks like a crash loop",
-        )
-    if _BATCH not in processors_used:
-        verdict.add_warning(
-            _path(path, "processors", _BATCH),
-            "no `batch` processor is used in any pipeline",
-            "batching is what keeps exporter throughput and cost sane",
-        )
-
-    if allowed_exporters:
-        exporters = doc.get("exporters") if _is_mapping(doc.get("exporters")) else {}
-        for exporter_id, exporter_config in exporters.items():
-            for endpoint_path, _, url in _iter_endpoints(
-                exporter_config, _path(path, "exporters", exporter_id)
-            ):
-                if _endpoint_allowed(url, allowed_exporters):
-                    continue
-                verdict.add_warning(
-                    endpoint_path,
-                    f"exporter host is not on CONFIG_ALLOWED_EXPORTER_HOSTS: {url!r}",
-                    "an exporter is an egress path; if this host is expected, allowlist it",
-                )
 
 
 # ---------------------------------------------------------------------- inventory
-
-
-def inventory_components(available_components: Any) -> Dict[str, set]:
-    """`{section: {component ids}}` from an agent's reported `available_components`.
-
-    Shape comes from the proto (`components.<section>.subComponentMap`); anything
-    unexpected yields an empty map rather than an exception, because a malformed
-    report must degrade the warning, not the push path.
-    """
-    result: Dict[str, set] = {}
-    try:
-        container = (available_components or {}).get("components", {})
-    except AttributeError:
-        return result
-    if not isinstance(container, dict):
-        return result
-    for section, body in container.items():
-        if not isinstance(body, dict):
-            continue
-        sub = body.get("subComponentMap") or body.get("sub_component_map") or {}
-        if isinstance(sub, dict):
-            result[str(section)] = {str(key) for key in sub}
-    return result
-
-
-def check_inventory(
-    doc: Any,
-    path: str,
-    verdict: Verdict,
-    agents: Sequence[Any],
-) -> None:
-    """Warn when the config references a component a target agent does not ship.
-
-    The "you pushed a config for a distro that does not build `redismetricsreceiver`"
-    class of outage. A warning, not an error: an inventory can be stale (an agent
-    that just upgraded), and refusing on it would make a rollout depend on report
-    timing rather than on the config. Findings are aggregated across agents, so a
-    400-agent selector produces one warning naming a few affected agents instead of
-    400 warnings nobody reads.
-    """
-    if not _is_mapping(doc):
-        return
-    service = doc.get("service") if _is_mapping(doc.get("service")) else {}
-    referenced: Dict[str, set] = {}
-    for section in COMPONENT_SECTIONS:
-        if _is_mapping(doc.get(section)):
-            referenced[section] = {str(key) for key in doc[section]}
-    for section, top_level in PIPELINE_SECTIONS.items():
-        referenced.setdefault(top_level, set())
-        for pipeline in (service.get("pipelines") or {}).values():
-            if _is_mapping(pipeline):
-                referenced[top_level].update(
-                    item for item in _as_list(pipeline.get(section)) if isinstance(item, str)
-                )
-    for extension in _as_list(service.get("extensions")):
-        if isinstance(extension, str):
-            referenced.setdefault("extensions", set()).add(extension)
-
-    # (section, component) -> agent ids that do not ship it
-    missing: Dict[tuple, List[str]] = {}
-    for agent in agents or ():
-        known = inventory_components(getattr(agent, "available_components", None))
-        if not known:
-            continue
-        agent_id = str(getattr(agent, "agent_id", "") or "")
-        for section, wanted in referenced.items():
-            shipped = known.get(section)
-            if shipped is None:
-                continue
-            for component in wanted - shipped:
-                missing.setdefault((section, component), []).append(agent_id)
-
-    for (section, component), agent_ids in sorted(missing.items()):
-        affected = ", ".join(agent_id[:8] for agent_id in agent_ids[:3])
-        more = f" (+{len(agent_ids) - 3} more)" if len(agent_ids) > 3 else ""
-        verdict.add_warning(
-            _path(path, section, component),
-            f"`{component}` is not in the available components of {len(agent_ids)} "
-            f"target agent(s): {affected}{more}",
-            "the config will fail to start on that agent; check the collector "
-            "distribution (`ocb` manifest) shipped there",
-        )
 
 
 def _reported_object_names(agent: Any) -> List[str]:
@@ -893,18 +497,20 @@ def check_object_names(
 # ------------------------------------------------------------- merge collisions
 
 
-def _addresses(document: Any, path: str = "") -> set:
-    """Every address a document defines, as dotted paths (see `ADDRESS_SECTIONS`)."""
+def _addresses(
+    document: Any, sections: Sequence[str] = ADDRESS_SECTIONS, path: str = ""
+) -> set:
+    """Every address a document defines, as dotted paths (see `address_sections`)."""
     found: set = set()
     if isinstance(document, Mapping):
         for key, value in document.items():
             child = f"{path}.{key}" if path else str(key)
-            if path.rsplit(".", 1)[-1] in ADDRESS_SECTIONS:
+            if path.rsplit(".", 1)[-1] in sections:
                 found.add(child)
-            found |= _addresses(value, child)
+            found |= _addresses(value, sections, child)
     elif isinstance(document, (list, tuple)):
         for item in document:
-            found |= _addresses(item, path)
+            found |= _addresses(item, sections, path)
     return found
 
 
@@ -952,6 +558,7 @@ def check_merge_collisions(
     verdict: Verdict,
     agents: Sequence[Any],
     previous_bodies: Optional[Mapping[str, Sequence[str]]] = None,
+    address_sections: Sequence[str] = ADDRESS_SECTIONS,
 ) -> None:
     """Warn when this revision defines an address another source already provides.
 
@@ -980,7 +587,9 @@ def check_merge_collisions(
     proposed: Dict[str, set] = {}
     for key, entry in normalised.items():
         document = _parse_or_none(entry.get("body"))
-        addresses = _addresses(document) if document is not None else set()
+        addresses = (
+            _addresses(document, address_sections) if document is not None else set()
+        )
         if addresses:
             proposed[str(key)] = addresses
     if not proposed:
@@ -998,12 +607,12 @@ def check_merge_collisions(
         agent_id = str(getattr(agent, "agent_id", "") or "")
         reported: set = set()
         for document in documents:
-            reported |= _addresses(document)
+            reported |= _addresses(document, address_sections)
         owned: set = set()
         for body in previous.get(agent_id, ()) or ():
             document = _parse_or_none(body)
             if document is not None:
-                owned |= _addresses(document)
+                owned |= _addresses(document, address_sections)
         foreign = reported - owned
         for key, addresses in proposed.items():
             for address in addresses & foreign:
@@ -1245,11 +854,12 @@ def _annotate_profile(
 ) -> None:
     """Record the profile on the verdict, and say so when it is not interpreted.
 
-    This is the attribution half of #118 (the gating half is #119): a `generic` target
-    still gets the collector-specific checks, but the verdict now *says* that they are
-    collector-specific, so nobody reads a pass as "this agent's config is valid for
-    this agent". For every `otelcol` target this adds nothing — which is what keeps the
-    golden no-change test byte-identical.
+    #118 attributed the verdict to a profile; #119 made that attribution *decide* the
+    rules. So the non-interpreting case no longer means "the findings below are
+    collector-specific" — there are no findings below, because no engine ran — it means
+    "nothing judged this body's structure, so a pass is only about the bytes". For every
+    target whose profile has an engine this adds nothing, which is what keeps the
+    otelcol verdict byte-identical.
     """
     verdict.profile = profile_name
     verdict.profile_source = source
@@ -1271,12 +881,49 @@ def _annotate_profile(
     if profile is not None and not profile.validates_structure:
         verdict.add_warning(
             "",
-            f"the target profile is {profile_name!r}: the server does not interpret "
-            "this agent's configuration, so collector-specific findings below may not "
-            "apply",
-            "if this agent is an OpenTelemetry Collector, pin it with "
-            "PUT /agent/{id}/type; if it is not, expect these findings to be noise (#119)",
+            f"the target profile is {profile_name!r}: no structural checks ran — the "
+            "server does not interpret this agent's configuration, so the body is stored "
+            "and relayed as opaque text. The format checks (size, encoding, duplicate "
+            "keys, redaction markers) and the policy gate still apply",
+            "an approver must confirm an unchecked body before it is applied "
+            "(confirm_unchecked_structure); to judge this agent's config on its own "
+            "terms, its profile needs a structure engine (#119)",
         )
+
+
+@dataclass(frozen=True)
+class StructureContext:
+    """What a profile's structural rules get besides the document itself (#119).
+
+    Deliberately a value object: an engine is a pure function of `(document, context,
+    verdict)`, so the collector's rules can be exercised without a server, a registry or
+    a request — the same property that made them testable where they used to live.
+    """
+
+    content_type: str = ""
+    allow_endpoint_change: bool = False
+    allowed_endpoints: Optional[Tuple[str, ...]] = None
+    allowed_exporters: Optional[Tuple[str, ...]] = None
+    agents: Tuple[Any, ...] = ()
+
+
+def _structure_engine(profile_name: str) -> Tuple[Optional[Callable], Any]:
+    """The rules that judge this fleet's bodies, and the profile they belong to (#119).
+
+    Unattributed deployments keep the historical behaviour: `POST /config/validate` with
+    no `agent_id` is the common "just check this config" call, and resolving *no* profile
+    must not turn it into a no-op. The shipped bootstrap profile (the same one whose
+    snippet a new agent is given) answers in that case — and if that profile has no
+    structure engine, then nothing does, which is the honest answer for a dictionary with
+    no interpreter in it.
+    """
+    from server import profiles
+
+    name = (profile_name or "").strip()
+    profile = profiles.get(name) if name and name != "mixed" else None
+    if profile is None:
+        profile = profiles.bootstrap_default()
+    return getattr(profile, "structure", None), profile
 
 
 #: The profile a verdict was produced under, and how it was decided (#118).
@@ -1292,6 +939,7 @@ def check_config_map(
     agents: Optional[Sequence[Any]] = None,
     run_policy: bool = True,
     previous_bodies: Optional[Mapping[str, Sequence[str]]] = None,
+    profile: Optional[str] = None,
 ) -> Verdict:
     """Run the whole pipeline and return the verdict. **Never raises.**
 
@@ -1300,6 +948,11 @@ def check_config_map(
     `previous_bodies` maps an agent id to the config bodies this server already
     pushes to it (its current assignment), so :func:`check_merge_collisions` can tell
     *our* keys from another source's.
+
+    `profile` names the rules to judge the body by (#119). Without it the profile is
+    resolved from `agents` — the existing call sites (API, `opampctl --db`, MCP, the
+    tests) keep working unchanged — and with neither, the shipped bootstrap profile
+    answers, because "validate this for me" must not become a no-op.
     """
     verdict = Verdict()
     normalised = check_shape(config_map, verdict, allow_empty=allow_empty)
@@ -1307,9 +960,33 @@ def check_config_map(
         return verdict
 
     agent_list = list(agents or ())
-    _annotate_profile(verdict, *_target_profile(agent_list), agent_list)
+    if profile:
+        _annotate_profile(verdict, profile, "declared", agent_list)
+        engine, engine_profile = _structure_engine(profile)
+    else:
+        resolved, source = _target_profile(agent_list)
+        _annotate_profile(verdict, resolved, source, agent_list)
+        engine, engine_profile = _structure_engine(resolved)
+    # Which keys are addresses is the product's vocabulary when it declares one (#119),
+    # and the shipped defaults otherwise: osquery's `schedule` has nothing to do with a
+    # collector's `receivers`, so a single global answer was always a compromise.
+    address_sections = (
+        tuple(getattr(engine_profile, "address_sections", ()) or ()) or ADDRESS_SECTIONS
+    )
+    # A body judged by no engine is only ever well-formed, and the approve step says so.
+    verdict.structure_checked = engine is not None
+
     check_object_names(normalised, verdict, agent_list)
-    check_merge_collisions(normalised, verdict, agent_list, previous_bodies)
+    check_merge_collisions(
+        normalised, verdict, agent_list, previous_bodies, address_sections
+    )
+
+    context = StructureContext(
+        allow_endpoint_change=allow_endpoint_change,
+        allowed_endpoints=tuple(allowed_endpoints) if allowed_endpoints is not None else None,
+        allowed_exporters=tuple(allowed_exporters) if allowed_exporters is not None else None,
+        agents=tuple(agent_list),
+    )
 
     for key, entry in normalised.items():
         body = entry["body"]
@@ -1317,55 +994,46 @@ def check_config_map(
         try:
             doc = parse_document(body)
         except ConfigParseError as exc:
+            # Format-level refusals (bytes, duplicate keys, an alias bomb) are errors for
+            # every profile: they are true of the bytes, not of a product.
             verdict.add_error(key, str(exc), "fix the document and re-validate")
             continue
         except yaml.YAMLError as exc:
             message = f"body is not valid {entry['content_type'] or 'YAML'}: {exc}"
-            if kind == "unknown":
-                # Undeclared type: the body may not be a config fragment at all (a PEM
-                # certificate, a shell script), so a parse failure is advisory.
+            if kind == "unknown" or engine is None:
+                # Undeclared type, or a profile that does not interpret the body at all:
+                # it may be INI, a certificate or a shell script. Advisory by contract.
                 verdict.add_warning(key, message)
                 continue
             verdict.add_error(
                 key,
                 message,
-                "the collector errors out and stays down until it is restarted by hand, "
+                "the agent errors out and stays down until it is restarted by hand, "
                 "so an unparseable body is refused",
             )
             continue
 
-        verdict.parsed[key] = doc
-
-        if kind == "unknown" and not _looks_like_collector_config(doc):
-            verdict.add_warning(
-                key,
-                "no content type and not a recognisable collector config; "
-                "structural checks skipped",
-                "declare `content_type: text/yaml` to get the full checks",
-            )
+        if doc is None:
+            # Nothing but whitespace or comments is not a document, whatever the product
+            # is: format-level, so it is refused for every profile instead of being left
+            # to whichever engine happens to look at it.
+            verdict.add_error(key, "body is empty", "a revision must carry a document")
             continue
-        if kind == "unknown" and _looks_like_collector_config(doc):
-            verdict.add_warning(
-                key,
-                "content type is not declared; treating it as a collector config",
-                "set `content_type: text/yaml` so nobody has to guess",
-            )
 
-        before = len(verdict.errors)
-        check_structure(doc, key, verdict)
-        structure_failed = len(verdict.errors) > before
-
-        # Invariants and inventory warnings only make sense on a tree we could read.
-        if not structure_failed:
-            check_invariants(
-                doc,
-                key,
-                verdict,
-                allow_endpoint_change=allow_endpoint_change,
-                allowed_endpoints=allowed_endpoints,
-                allowed_exporters=allowed_exporters,
-            )
-        check_inventory(doc, key, verdict, list(agents or ()))
+        verdict.parsed[key] = doc
+        if engine is None:
+            # Opaque by declaration: the "no structural checks ran" warning is on the
+            # verdict already (`_annotate_profile`), and there is nothing to add per key.
+            continue
+        if not engine(
+            doc,
+            key,
+            replace(context, content_type=entry["content_type"] or ""),
+            verdict,
+        ):
+            # The engine looked at it and declined (not its product's shape), which is
+            # the same fact for the approver as "no engine at all".
+            verdict.structure_checked = False
 
     if run_policy and verdict.parsed and not verdict.errors:
         policy = check_policy(
@@ -1395,10 +1063,6 @@ def check_config_map(
 
     verdict.normalised = normalised
     return verdict
-
-
-def _looks_like_collector_config(doc: Any) -> bool:
-    return _is_mapping(doc) and any(section in doc for section in CONFIGURATOR_SECTIONS)
 
 
 def validate_config_map(
@@ -1488,25 +1152,49 @@ def document_drift(desired_bodies: Sequence[Tuple[str, str]], effective_bodies: 
     return missing
 
 
+def __getattr__(name: str):
+    """Keep the pre-#119 names importable from here, and resolve them to the engine.
+
+    The collector's rules moved to `server/profiles/otelcol.py`, but `check_structure`,
+    `check_invariants`, `check_inventory`, `inventory_components`,
+    `allowed_exporter_hosts` and `allowed_opamp_endpoints` were semi-public — the docs,
+    the README and a year of muscle memory point at this module. Resolving them lazily
+    keeps those callers working without copying a single rule back into the core.
+    """
+    if name in _PROFILE_OWNED:
+        from server.profiles import otelcol
+
+        return getattr(otelcol, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+#: Names that moved to a profile engine in #119 and are still importable from here.
+_PROFILE_OWNED = frozenset(
+    {
+        "allowed_exporter_hosts",
+        "allowed_opamp_endpoints",
+        "check_invariants",
+        "check_inventory",
+        "check_structure",
+        "inventory_components",
+    }
+)
+
 __all__ = [
+    "ADDRESS_SECTIONS",
     "ConfigParseError",
     "ConfigValidationError",
     "Finding",
+    "StructureContext",
     "Verdict",
-    "allowed_exporter_hosts",
-    "allowed_opamp_endpoints",
     "check_config_map",
-    "check_invariants",
-    "check_inventory",
     "check_merge_collisions",
     "check_policy",
     "check_shape",
-    "check_structure",
     "contains_document",
     "document_drift",
-    "inventory_components",
     "looks_yaml_like",
     "max_bytes",
     "parse_document",
     "validate_config_map",
-]
+] + sorted(_PROFILE_OWNED)

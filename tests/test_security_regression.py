@@ -54,7 +54,7 @@ from server.main import app
 from server.state import AGENT_REGISTRY, SQLiteCredentialStore
 from server.ws import CLOSE_POLICY_VIOLATION, REGISTRY as WS_REGISTRY
 from tests.fake_agent import FakeAgent
-from tests.support import ADMIN, admin_headers, basic, spec_wire_hash
+from tests.support import ADMIN, admin_headers, basic, pin_collector, spec_wire_hash
 
 FIXTURES = Path(__file__).parent / "fixtures" / "configs"
 SECRET = "s3cr3t-config-value"
@@ -116,8 +116,25 @@ def new_agent(mode: str = "apply_ok", uid: bytes | None = None, **kwargs) -> Fak
     return agent
 
 
+def pin_otelcol(client: TestClient, agent_id: str) -> None:
+    """Pin an agent to the collector profile (#119: rules follow the profile)."""
+    response = client.put(
+        f"/agent/{agent_id}/type",
+        json={"agent_type": "otelcol"},
+        headers=admin_headers(),
+    )
+    assert response.status_code == 200, response.text
+
+
 def register(agent: FakeAgent, client: TestClient) -> FakeAgent:
+    """Register the agent and pin it to `otelcol`.
+
+    #119: the structural rules this suite exercises (protected invariants, the exporter
+    allowlist, the poison/auto-revert flows) are the collector's, and they follow the
+    agent's profile now. The opaque-profile case has its own tests.
+    """
     agent.poll_http(client, headers=agent.headers)
+    pin_collector(agent.agent_id)
     return agent
 
 
@@ -377,6 +394,11 @@ class TestValidationCorpus:
     @pytest.mark.parametrize("fixture,needle", CORPUS)
     def test_every_bad_config_is_a_structured_4xx(self, client, fixture, needle):
         register(new_agent(), client)
+        # #119: these are *collector* rules, and since the split a profile that owns no
+        # rules is not judged by them — a `generic` agent accepts an opaque body on
+        # purpose. The corpus therefore names its target, instead of relying on every
+        # agent being graded as a collector.
+        pin_otelcol(client, "ab" * 16)
         started = time.monotonic()
 
         response = client.put(

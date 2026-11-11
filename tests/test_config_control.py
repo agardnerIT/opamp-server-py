@@ -37,7 +37,7 @@ from tests.conformance.harness import handle_message as reply
 from server.main import _handle_agent_message
 from server.state import AGENT_REGISTRY, SQLiteCredentialStore
 from server.ws import REGISTRY as WS_REGISTRY
-from tests.support import ADMIN, admin_headers
+from tests.support import ADMIN, admin_headers, pin_collector
 
 UID = bytes.fromhex("ab" * 16)
 AGENT_ID = "ab" * 16
@@ -148,6 +148,8 @@ def push_enabled(monkeypatch, tmp_path):
 @pytest.fixture
 def registered():
     reply(agent_message())
+    # #119: the structural rules these tests pin belong to the collector's profile.
+    AGENT_REGISTRY.get(AGENT_ID).agent_type = "otelcol"
     return AGENT_ID
 
 
@@ -480,6 +482,10 @@ def _describe(client, uid: bytes, env: str = "prod"):
         key="environment", value=anyvalue_pb2.AnyValue(string_value=env)
     )
     _handle_agent_message(msg.SerializeToString())
+    # `collector-prod` is not one of the identity prefixes, so this agent resolves to
+    # `generic`; the configs these tests push are collector configs, and structural
+    # rules follow the profile since #119.
+    pin_collector(uid.hex())
 
 
 def test_selector_resolves_at_approve_time_and_does_not_capture_later_agents(client):
@@ -984,3 +990,120 @@ def test_a_revision_still_has_one_storage_identity(client, registered):
     assert remote_config.compute_hash(without_role) != remote_config.compute_hash(with_role)
     # ... and the wire hash covers the role too, because the serialised map does.
     assert remote_config.spec_hash(without_role) != remote_config.spec_hash(with_role)
+
+
+# --------------------------------- the opaque profile and the approver ack (#119)
+
+
+OPAQUE_BODY = """\
+[service]
+    Flush           5
+    Daemon          off
+
+[input]
+    Name  cpu
+"""
+
+
+def _opaque(agent_id=AGENT_ID):
+    """A `generic` agent: no structure engine, so no structural rules (#119)."""
+    AGENT_REGISTRY.get(agent_id).agent_type = "generic"
+
+
+def test_an_opaque_body_is_accepted_with_a_warning_not_a_refusal(client, registered):
+    """#119: 50 KB of INI used to be refused as "not a collector config".
+
+    A profile that owns no rules must not be graded by someone else's: the format
+    checks (encoding, duplicate keys, size, redaction) still apply, the body is stored
+    as opaque text, and the verdict says no structural check ran.
+    """
+    _opaque()
+    body = OPAQUE_BODY * 200  # ~8 KB of a format YAML cannot parse, well under the cap
+
+    response = propose(client, config_map={"": {"body": body, "content_type": "text/plain"}})
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["verdict"]["ok"] is True
+    assert payload["verdict"]["structure_checked"] is False
+    assert payload["status"] == "proposed"
+    # The agent's own words, and the warning that says what did *not* happen.
+    assert "no structural checks ran" in json.dumps(payload["verdict"]["warnings"])
+    assert "not valid" in json.dumps(payload["verdict"]["warnings"])
+
+
+def test_an_opaque_body_still_refuses_a_redaction_marker(client, registered):
+    """The format-layer refusals are the ones that hold for every profile (#98)."""
+    _opaque()
+
+    response = propose(
+        client,
+        config_map={"": {"body": "[service]\nDaemon = <redacted>\n", "content_type": "text/plain"}},
+    )
+
+    assert response.status_code == 422
+    assert "redaction marker" in json.dumps(response.json())
+
+
+def test_approving_an_unchecked_body_needs_the_acknowledgement(client, registered):
+    """The one failure with no remote way back, and no validator to notice it.
+
+    For an opaque profile the server cannot tell a working config from one that leaves
+    the agent unable to start, so an approver has to say they know — and the refusal
+    names the agents and their profiles instead of failing generically.
+    """
+    _opaque()
+    proposal_id = propose(
+        client, config_map={"": {"body": OPAQUE_BODY, "content_type": "text/plain"}}
+    ).json()["proposal_id"]
+
+    refused = approve(client, proposal_id)
+
+    assert refused.status_code == 409, refused.text
+    detail = refused.json()["detail"]
+    assert detail["unchecked_agents"] == [AGENT_ID]
+    assert detail["profiles"] == ["generic"]
+    assert "confirm_unchecked_structure" in detail["hint"]
+    # Nothing moved: the revision is still only proposed.
+    assert remote_config.REGISTRY.get(AGENT_ID) is None
+
+
+def test_the_acknowledgement_is_recorded_on_the_revision_and_in_the_audit_log(
+    client, registered
+):
+    """A duck-typed "yes" is not enough: a review has to be able to find it afterwards."""
+    _opaque()
+    proposal_id = propose(
+        client, config_map={"": {"body": OPAQUE_BODY, "content_type": "text/plain"}}
+    ).json()["proposal_id"]
+
+    approved = approve(client, proposal_id, confirm_unchecked_structure=True)
+
+    assert approved.status_code == 200, approved.text
+    payload = approved.json()
+    assert payload["structure_checked"] is False
+    assert payload["unchecked_agents"] == [AGENT_ID]
+
+    # The stored verdict carries the fact, so `GET /config/revisions` shows it too.
+    view = config_control.proposal_view(proposal_id)
+    assert view["revisions"][0]["verdict"]["structure_checked"] is False
+
+    # And the audit row says the approver acknowledged it — read back through the API,
+    # which is the surface a review actually uses.
+    ledger = client.get("/audit", params={"action": "config.approve"}, headers=admin_headers())
+    assert ledger.status_code == 200, ledger.text
+    entries = ledger.json()["entries"]
+    assert entries, "the approval must be audited"
+    details = json.loads(entries[0]["detail_json"])
+    assert details["confirm_unchecked_structure"] is True
+
+
+def test_a_collector_target_needs_no_acknowledgement(client, registered):
+    """The interpreted case must not grow a checkbox nobody needs."""
+    proposal_id = propose(client).json()["proposal_id"]
+
+    approved = approve(client, proposal_id)
+
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["structure_checked"] is True
+    assert approved.json()["unchecked_agents"] == []

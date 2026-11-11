@@ -151,7 +151,7 @@ def _plan_body(gate=None):
     return body
 
 
-def _rollout_body(note, restart, gate=None):
+def _rollout_body(note, restart, gate=None, confirm_unchecked=False):
     """The create body: the gate in the box is **the** gate, sent explicitly.
 
     Omitting it makes the server fall back to `CONFIG_PUSH_HEALTH_GATE_SECONDS`, so an
@@ -161,6 +161,8 @@ def _rollout_body(note, restart, gate=None):
     body = {"note": note or None, "restart_after_apply": bool(restart)}
     if gate is not None:
         body["health_gate_seconds"] = int(gate)
+    if confirm_unchecked:
+        body["confirm_unchecked_structure"] = True
     return body
 
 
@@ -679,6 +681,48 @@ if plan:
         "AcceptsRestartCommand receive it; the others are skipped and logged.",
     )
 
+    # #119: a profile with no structure engine means the server checked the bytes and
+    # nothing else. A config that leaves such an agent unable to start is the one failure
+    # with no remote way back, so the approver is the only thing that can catch it — and
+    # the approval is refused until they say they know. The fact comes from the stored
+    # verdict, so the page cannot disagree with the server.
+    proposal_detail = _payload(
+        admin_request(
+            "GET", f"/config/revisions/{proposal_id}", required_role=ROLE_VIEWER
+        ),
+        {},
+    ) or {}
+    unchecked_rows = [
+        row
+        for row in proposal_detail.get("revisions") or []
+        if (row.get("verdict") or {}).get("structure_checked") is False
+    ]
+    confirm_unchecked = False
+    if unchecked_rows:
+        judged = ", ".join(
+            f"`{profile}`"
+            for profile in sorted(
+                {
+                    (row.get("verdict") or {}).get("profile") or "unknown"
+                    for row in unchecked_rows
+                }
+            )
+        )
+        st.warning(
+            f"**No structural checks ran for {len(unchecked_rows)} agent(s)** — the "
+            f"server does not interpret the configuration of {judged}, so validation "
+            "covered the bytes, the object name and the policies, and nothing about "
+            "what this agent will do with the document. A config that stops it "
+            "starting cannot be noticed here."
+        )
+        confirm_unchecked = st.checkbox(
+            "I understand no structural checks ran and I accept it",
+            key="rc_confirm_unchecked",
+            help="Recorded on the revision and in the audit log. Pin the agent "
+            "(`opampctl agents set-type`) or add a structure engine for its profile to "
+            "get real checks instead.",
+        )
+
     st.caption(
         f"Approving and rolling out needs the **approver** role. You are "
         f"**{session.role}**." if not session.can(ROLE_APPROVER) else
@@ -687,13 +731,15 @@ if plan:
     if st.button(
         "Approve & roll out",
         type="primary",
-        disabled=not session.can(ROLE_APPROVER),
+        disabled=not (
+            session.can(ROLE_APPROVER) and (not unchecked_rows or confirm_unchecked)
+        ),
         help="Creates the rollout: approves the proposal, releases the canary only.",
     ):
         response = admin_request(
             "POST", "/config/rollouts", required_role=ROLE_APPROVER,
             params={"proposal_id": proposal_id},
-            json=_rollout_body(note, restart, _gate_override()),
+            json=_rollout_body(note, restart, _gate_override(), confirm_unchecked),
         )
         if response is not None and response.status_code == 200:
             st.session_state[ROLLOUT_KEY] = _payload(response, {}) or {}

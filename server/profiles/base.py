@@ -314,8 +314,16 @@ class AgentProfile:
     priority: int = 0
     #: Formats this profile accepts. Empty means "anything, as opaque bytes".
     config_formats: Tuple[ConfigFormat, ...] = ()
-    #: May the server judge the *structure* of a body for this agent? (#119 reads it)
+    #: May the server judge the *structure* of a body for this agent?
     validates_structure: bool = False
+    #: The rules that do it, when `validates_structure` is set (#119):
+    #: `validate(doc, path, ctx, verdict) -> bool`, where the return value says whether
+    #: this body was actually judged (an engine may decline a document that is not its
+    #: product's shape — that is a fact the approve step needs, not an error).
+    structure: Optional[Callable] = None
+    #: This product's "address" sections for the merge-collision warning (#119); empty
+    #: means the shipped defaults in `server.config_vocabulary`.
+    address_sections: Tuple[str, ...] = ()
     #: Evidence of identity from `AgentDescription` attributes.
     identity_match_any: Tuple[IdentityRule, ...] = ()
     #: The same evidence in declared form, for the API and for `--strict-profiles`.
@@ -467,6 +475,10 @@ class AgentProfile:
             "summary": self.summary,
             "guidance": self.guidance,
             "validates_structure": self.validates_structure,
+            # #119: which rules judge a body, if any. A name, not a callable: the API
+            # says *that* this profile interprets bodies, and the code is loaded anyway.
+            "structure_engine": getattr(self.structure, "ENGINE", None),
+            "address_sections": list(self.address_sections),
             "content_types": sorted(
                 {ct for fmt in self.config_formats for ct in fmt.content_types}
             ),

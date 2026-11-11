@@ -18,7 +18,8 @@ Top-level shape, with the `otelcol` file as the worked example
       - content_types: ["", "text/yaml", ...]
         default_filename: otelcol-config.yaml
         distinctive: false         # only a distinctive type may *identify* a profile
-    validates_structure: true      # requires `components` (guardrail 4)
+    validates_structure: true      # requires `components` and `structure` (rule 4)
+    structure: {engine: otelcol}   # which rules judge a body (#119)
     identity:
       match_any:
         - attr: service.name
@@ -55,7 +56,8 @@ Three rules are enforced here rather than documented and hoped for:
 2. **A profile may only subtract** (`base.py`, rule 1). Nothing here can grant a
    capability, a trust level or a validation exemption; `validates_structure` is the
    one field that could make the server *less* safe, so it requires a component spec
-   and is documented as OTel-shaped until #119 lands.
+   *and* a `structure` block naming a known engine (#119) — a profile may only claim
+   to interpret bodies if it brings the rules to do it.
 3. **A bad file must not take the server down.** Invalid document -> the profile is
    absent and the fleet is still served (see `loader.py`).
 """
@@ -243,6 +245,24 @@ class PanelDocument(_Strict):
         return self
 
 
+class StructureDocument(_Strict):
+    """Which rules judge a body's **structure**, for this product (#119).
+
+    `engine` names a closed set the loader knows (`server.profiles.engines`); a file
+    cannot name a Python module, because an editable dictionary that could import code
+    is remote code execution with a YAML front end (`schema.py` rule 1). Adding a
+    product that the server interprets means adding an engine — that is the price of
+    judging a config, and it is paid once per product rather than once per push.
+
+    `address_sections` is this product's vocabulary for "this key names a thing, so a
+    second config source defining it is a merge conflict rather than an override". Empty
+    means "use the shipped defaults" (`server.config_vocabulary`).
+    """
+
+    engine: str
+    address_sections: Tuple[str, ...] = ()
+
+
 class ProfileDocument(_Strict):
     """One agent type, as authored. The loader compiles this; nothing else reads it."""
 
@@ -253,6 +273,10 @@ class ProfileDocument(_Strict):
     summary: str = ""
     config_formats: Tuple[ConfigFormatDocument, ...] = ()
     validates_structure: bool = False
+    #: The rules that judge this product's config structure (#119). `validates_structure`
+    #: says *that* a body is judged; this says *by what*, and the two are checked
+    #: against each other so a profile cannot claim one without the other.
+    structure: Optional[StructureDocument] = None
     identity: IdentityDocument = Field(default_factory=IdentityDocument)
     reports: Tuple[str, ...] = ()
     telemetry: Optional[TelemetryDocument] = None
@@ -321,18 +345,28 @@ class ProfileDocument(_Strict):
         return self
 
     @model_validator(mode="after")
-    def _structure_needs_components(self):
-        """Guardrail 4: structural validation is OTel-shaped until #119 splits it.
+    def _structure_needs_components_and_an_engine(self):
+        """Guardrail 4, after #119: a claim to judge structure needs rules to judge by.
 
-        A data-only profile that claims `validates_structure` would apply collector
-        pipeline rules to a non-collector, so it must declare a component spec (the
-        thing that makes the claim meaningful) or it is a load error, not a warning.
+        A profile that says `validates_structure: true` without naming an engine would be
+        claiming the authority and having none — either a load error or, worse, a silent
+        fallback to someone else's rules. The reverse is refused too: shipping an engine
+        no field points at is a typo, not a feature.
         """
+        if self.validates_structure and self.structure is None:
+            raise ValueError(
+                "validates_structure: true requires a structure block naming its engine "
+                "(#119); a profile that judges bodies must say which rules do it"
+            )
+        if self.structure is not None and not self.validates_structure:
+            raise ValueError(
+                "a structure block requires validates_structure: true — naming an engine "
+                "without claiming the judgement is a field nobody reads"
+            )
         if self.validates_structure and self.components is None:
             raise ValueError(
-                "validates_structure: true requires a components block — until #119 "
-                "splits structural validation from OpenTelemetry's pipeline rules, a "
-                "profile that does not declare one would be judged by someone else's"
+                "validates_structure: true requires a components block: the rules that "
+                "judge a structured config are the ones that also report its components"
             )
         return self
 

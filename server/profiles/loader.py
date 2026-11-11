@@ -125,6 +125,13 @@ def compile_document(document: ProfileDocument) -> AgentProfile:
         )
         components = engines.components_from(components_spec)
 
+    structure = None
+    if document.structure is not None:
+        try:
+            structure = engines.structure_from(document.structure.engine)
+        except KeyError as exc:
+            raise ProfileLoadError(document.name, str(exc)) from exc
+
     telemetry = None
     if document.telemetry is not None:
         telemetry = TelemetrySpec(
@@ -162,6 +169,10 @@ def compile_document(document: ProfileDocument) -> AgentProfile:
         priority=document.priority,
         config_formats=formats,
         validates_structure=document.validates_structure,
+        structure=structure,
+        address_sections=tuple(document.structure.address_sections)
+        if document.structure is not None
+        else (),
         identity_match_any=rules,
         sniff_spec=sniff_spec,
         sniff=sniff,

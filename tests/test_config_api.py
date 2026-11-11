@@ -97,8 +97,15 @@ def push_enabled(monkeypatch, tmp_path):
 
 @pytest.fixture
 def registered():
-    """The agent has spoken once, so the server knows it."""
+    """The agent has spoken once, so the server knows it.
+
+    Pinned to `otelcol` (#119): these tests are about the collector's structural rules,
+    and after the split a profile that owns no rules is not judged by them. Which profile
+    a body is judged by now follows the agent, so the fixture says which agent it is
+    instead of relying on every agent being graded as a collector.
+    """
     reply(agent_message())
+    AGENT_REGISTRY.get(AGENT_ID).agent_type = "otelcol"
     return AGENT_ID
 
 

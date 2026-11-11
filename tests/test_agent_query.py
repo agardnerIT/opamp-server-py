@@ -21,7 +21,7 @@ from proto import anyvalue_pb2, opamp_pb2
 from server import admin_auth, agent_query, config_control, crypto
 from server.main import _handle_agent_message
 from server.state import AGENT_REGISTRY, SQLiteGroupStore
-from tests.support import ADMIN, admin_headers
+from tests.support import ADMIN, admin_headers, pin_collector
 
 UID = bytes.fromhex("11" * 16)
 AGENT_ID = "11" * 16
@@ -73,6 +73,9 @@ def describe(uid: bytes, env: str, arch: str, os_type: str, healthy: bool = True
             key=key, value=anyvalue_pb2.AnyValue(string_value=value)
         )
     _handle_agent_message(msg.SerializeToString())
+    # #119: the config this suite pushes is a collector config, and structural rules
+    # follow the profile.
+    pin_collector(uid.hex())
 
 
 @pytest.fixture(autouse=True)

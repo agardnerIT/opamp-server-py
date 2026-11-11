@@ -525,6 +525,7 @@ def approve(
     agents: Sequence[AgentState],
     allow_endpoint_change_confirmed: bool = False,
     confirm_scope_change: bool = False,
+    confirm_unchecked_structure: bool = False,
     override_reason: Optional[str] = None,
     note: Optional[str] = None,
     hold_all: bool = False,
@@ -543,6 +544,14 @@ def approve(
       component inventories all move, so approving on Monday's verdict and delivering
       on Friday is how a stale config reaches a fleet. A blocking change refuses with
       `re-validate: ...`; a policy violation needs a recorded approver override.
+
+    **A body no profile interprets needs an explicit human yes** (#119). For an agent
+    whose profile owns no structural rules, `verdict.structure_checked` is False: the
+    server checked the bytes and nothing else, so it cannot notice a config that
+    orphans the agent — the one failure with no remote way back. `confirm_unchecked_structure`
+    is that acknowledgement, and it is recorded on the revision's verdict and in the
+    audit row, because "we knew nobody could check this" is exactly the thing a
+    post-incident review needs to be able to answer.
 
     Everything is validated *before* the first mutation, so a refused approval leaves
     the store exactly as it was.
@@ -647,6 +656,27 @@ def approve(
         _require_approvable(verdict, override_reason=override_reason)
         verdicts[agent_id] = verdict
 
+    unchecked = sorted(
+        agent_id for agent_id, verdict in verdicts.items() if not verdict.structure_checked
+    )
+    if unchecked and not confirm_unchecked_structure:
+        raise ConfigControlError(
+            409,
+            {
+                "message": "no structural checks ran for at least one target: this "
+                "server does not interpret that agent's configuration",
+                "unchecked_agents": unchecked,
+                "profiles": sorted(
+                    {verdicts[agent_id].profile for agent_id in unchecked if verdicts[agent_id].profile}
+                ),
+                "hint": "a config that leaves such an agent unable to start cannot be "
+                "noticed by this server, so the approval needs an explicit "
+                "\"confirm_unchecked_structure\": true (recorded and audited); pin the "
+                "agent (PUT /agent/{id}/type) or add a structure engine for its profile "
+                "to get real checks",
+            },
+        )
+
     now = utcnow().isoformat()
     scope_json = json.dumps({**scope, "resolved_agents": target_ids}, sort_keys=True)
     revisions = {row["agent_id"]: row["revision_id"] for row in pending}
@@ -693,6 +723,10 @@ def approve(
         "dropped": dropped,
         "added": newcomers,
         "held": bool(hold_all),
+        # #119: what the approver was asked to accept. Empty means a profile judged
+        # every body, which is the case nobody needs to be warned about.
+        "unchecked_agents": unchecked,
+        "structure_checked": not unchecked,
         "verdict": next(iter(verdicts.values())).to_dict() if verdicts else {},
         "override_reason": (override_reason or "").strip() or None,
         # `delivery` is deliberately absent: the route attaches the result of actually

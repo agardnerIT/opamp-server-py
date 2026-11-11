@@ -48,6 +48,9 @@ def register_agent(agent_id, components=None, used=True):
             ).decode()}}}}
         )
     AGENT_REGISTRY.register(agent_id, state)
+    # #119: structural rules are the profile's, and the configs these tests push are
+    # collector configs.
+    state.agent_type = "otelcol"
     return agent_id
 
 
@@ -677,6 +680,9 @@ class TestConfigControlPlane:
 
     def test_a_broken_config_is_422_with_structured_details(self, oc, push_env):
         agent_id = register_agent("bc" * 16)
+        # #119: a broken *collector* config is refused for a collector. A profile with no
+        # rules accepts opaque bodies by design, which has its own test.
+        AGENT_REGISTRY.get(agent_id).agent_type = "otelcol"
         with pytest.raises(OpampApiError) as exc:
             oc.propose_config(
                 {"": {"body": "receivers: [unclosed", "content_type": "text/yaml"}},

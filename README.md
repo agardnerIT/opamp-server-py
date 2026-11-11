@@ -953,11 +953,19 @@ How delivery works:
   map. Spec §Calculating Hashes makes the hash server-defined ("the Agent never
   calculates hashes, it only stores and compares them"), which the supervisor
   confirms: it echoes back exactly the hash we sent.
-- Validation before storage is structural: shape, size (`CONFIG_MAX_BYTES`),
-  YAML/JSON parses, and no redaction marker. A `role` field is rejected because
-  this build's proto (v0.18-era) has no `AgentConfigObject.role` — that arrives
-  with the v0.20.0 proto sync (#66). Protected invariants and the OPA policy gate
-  are #100.
+- Validation before storage is two layers that answer different questions (#119).
+  The **format layer** is true of any body: shape, size (`CONFIG_MAX_BYTES`), a bounded
+  YAML/JSON parse, duplicate keys, no redaction marker. The **structure layer** is the
+  target profile's: for `otelcol` that is `server/profiles/otelcol.py` (pipelines,
+  component references, the `opamp` extension's protected invariants, the
+  `memory_limiter`/`batch` advice, the exporter allowlist), and a profile with no
+  structure engine is not judged at all — its config is opaque text to this server. That
+  is why a FluentBit body is accepted with "no structural checks ran" instead of being
+  refused as a broken collector, and why **approving** one needs
+  `confirm_unchecked_structure`: nobody, including the server, checked that the config
+  leaves the agent able to start. The acknowledgement is stored on the revision and in
+  the audit row. A `role` field is rejected because this build's proto (v0.18-era) has no
+  `AgentConfigObject.role` — that arrives with the v0.20.0 proto sync (#66).
 
 ### Propose → approve → roll back (#99)
 
@@ -1926,9 +1934,11 @@ YAML
 - **No code from data.** There is no `hooks` key: every behaviour is a field the schema
   understands, compiled by `engines.py`. An editable dictionary that could import a
   module would be remote code execution with a YAML front end.
-- **`validates_structure: true` requires `components`.** Until structural validation is
-  split from OpenTelemetry's pipeline rules (#119), a data-only profile claiming it would
-  apply collector rules to a non-collector, so it is a load error.
+- **`validates_structure: true` requires `components` *and* a `structure` engine.** A
+  profile may only claim to interpret bodies if it brings the rules: `structure: {engine:
+  otelcol}` names a closed set the loader knows (a file may name an engine, never import
+  one — #119), and an unknown engine is a load error. The reverse is refused too: an
+  engine no field points at is a typo, not a feature.
 - **Match order is data.** `priority`, high to low — never filename order, because a
   locale, a rename or a parallel checkout would change fleet behaviour silently. Two
   profiles sharing a priority, or two claiming the same *distinctive* content type, is a

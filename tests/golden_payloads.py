@@ -197,6 +197,11 @@ def capture() -> Dict[str, Any]:
     verdict_dict["checked_at"] = "<captured>"
     verdict_dict.pop("profile", None)
     verdict_dict.pop("profile_source", None)
+    # #119: a new field, like `profile` was for #118. It is popped rather than recorded
+    # because this capture is a *move* fence — the verdict's findings and normalised
+    # bodies must be byte-identical to the pre-#119 tree, and a field presence is not a
+    # finding. The value itself is asserted in `test_config_validation`.
+    verdict_dict.pop("structure_checked", None)
 
     fleet = {"agents": payloads, "count": len(payloads)}
     return {

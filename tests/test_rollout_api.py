@@ -28,7 +28,7 @@ from tests.conformance.harness import handle_message as reply
 from server.main import app
 from server.state import AGENT_REGISTRY, SQLiteCredentialStore, SQLiteRolloutStore
 from server.ws import REGISTRY as WS_REGISTRY
-from tests.support import ADMIN, admin_headers
+from tests.support import ADMIN, admin_headers, pin_collector
 
 AGENT_ID = "ab" * 16
 
@@ -101,7 +101,10 @@ def agent_message(
 
 
 def poll(**kwargs) -> opamp_pb2.ServerToAgent:
-    return reply(agent_message(**kwargs))
+    # #119: the rules these flows exercise are the collector's.
+    response = reply(agent_message(**kwargs))
+    pin_collector(kwargs.get("agent_id") or AGENT_ID)
+    return response
 
 
 def our_hash_b64(agent_id: str = AGENT_ID) -> str:

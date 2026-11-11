@@ -52,3 +52,29 @@ def spec_wire_hash(message) -> str:
     config_map = getattr(message, "remote_config", message)
     config_map = getattr(config_map, "config", config_map)
     return hashlib.sha256(config_map.SerializeToString(deterministic=True)).hexdigest()
+
+
+def pin_collector(agent_id: str) -> None:
+    """Pin a registered test agent to the `otelcol` profile (#119).
+
+    Structural validation is a *profile's* rules since #119: a `generic` agent's body is
+    opaque text and is accepted with a warning, and approving it needs an explicit
+    acknowledgement. The flows these helpers drive are all collector flows — a config
+    with `receivers`/`service.pipelines` and the `opamp` extension — so the agent has to
+    be the product those rules describe. Tests that want the opaque path say so
+    themselves (`pin_generic`, or by leaving the agent unpinned).
+    """
+    from server.state import AGENT_REGISTRY
+
+    state = AGENT_REGISTRY.get(agent_id)
+    if state is not None:
+        state.agent_type = "otelcol"
+
+
+def pin_generic(agent_id: str) -> None:
+    """Pin a registered test agent to `generic`: no structural rules at all (#119)."""
+    from server.state import AGENT_REGISTRY
+
+    state = AGENT_REGISTRY.get(agent_id)
+    if state is not None:
+        state.agent_type = "generic"

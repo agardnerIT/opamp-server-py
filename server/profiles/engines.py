@@ -285,6 +285,40 @@ def _used_from_health(agent: Any, spec: ComponentsSpec) -> Dict[str, Set[str]]:
     return dict(used)
 
 
+#: The engines a profile file may name in its `structure` block (#119). A closed set, by
+#: name: `schema.py` rule 1 forbids importing code from data, so "which rules judge this
+#: product" is a field the loader understands, not a module path a file can point at.
+STRUCTURE_ENGINES: Dict[str, Callable[..., bool]] = {}
+
+
+def register_structure_engine(name: str, validate: Callable[..., bool]) -> None:
+    """Add one engine to the registry (called by the engine modules themselves)."""
+    if name in STRUCTURE_ENGINES:
+        raise RuntimeError(f"structure engine {name!r} is registered twice")
+    validate.ENGINE = name  # type: ignore[attr-defined]
+    STRUCTURE_ENGINES[name] = validate
+
+
+def structure_from(name: Optional[str]) -> Optional[Callable[..., bool]]:
+    """The engine called `name`, or `None` when the profile does not name one.
+
+    Imports the engine modules lazily: they import `server.config_validation` for the
+    `Verdict`, and `config_validation` resolves profiles at call time, so a module-level
+    import here would close the cycle the other way.
+    """
+    if not name:
+        return None
+    from server.profiles import otelcol  # noqa: F401  (registers itself)
+
+    engine = STRUCTURE_ENGINES.get(name)
+    if engine is None:
+        raise KeyError(
+            f"unknown structure engine {name!r}; known engines: "
+            f"{', '.join(sorted(STRUCTURE_ENGINES)) or 'none'}"
+        )
+    return engine
+
+
 def components_from(spec: ComponentsSpec) -> Callable[[Any], Dict[str, list]]:
     """Compile a `components` block into `agent -> {type: [{id, version, used}]}`.
 

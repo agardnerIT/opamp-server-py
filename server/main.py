@@ -95,6 +95,9 @@ from server import (
     tracing,
     updates,
 )
+
+# #119: the collector's structural rules live in its profile engine.
+from server.profiles import otelcol  # noqa: E402
 from server.http_body import BodyTooLarge, UnsupportedEncoding, read_body
 from server.redaction import redact_document
 from server.auth import (  # noqa: F401  (privileged routes below)
@@ -3138,6 +3141,9 @@ class ApproveConfigRequest(BaseModel):
     # The selector is re-resolved at approve time; if it now covers agents the
     # approver never saw, the approval needs this explicit acknowledgement.
     confirm_scope_change: bool = False
+    # #119: at least one target's profile owns no structural rules, so nothing judged
+    # the body beyond its bytes. The approver has to say they know that.
+    confirm_unchecked_structure: bool = False
     override_reason: Optional[str] = None
 
 
@@ -3206,6 +3212,8 @@ class RolloutRequest(BaseModel):
     restart_after_apply: bool = False
     confirm_endpoint_change: bool = False
     confirm_scope_change: bool = False
+    # #119: creating a rollout *is* the approval, so the same acknowledgement applies.
+    confirm_unchecked_structure: bool = False
     override_reason: Optional[str] = None
 
 
@@ -4367,6 +4375,8 @@ def approve_config_revision(
         proposed_agent_count=len(info["agents"]),
         confirm_endpoint_change=body.confirm_endpoint_change,
         confirm_scope_change=body.confirm_scope_change,
+        # #119: the audit row records that the approver accepted an unchecked body.
+        confirm_unchecked_structure=body.confirm_unchecked_structure,
         override_reason=body.override_reason,
         note=body.note,
     )
@@ -4377,6 +4387,7 @@ def approve_config_revision(
             agents=AGENT_REGISTRY.list_all(),
             allow_endpoint_change_confirmed=body.confirm_endpoint_change,
             confirm_scope_change=body.confirm_scope_change,
+            confirm_unchecked_structure=body.confirm_unchecked_structure,
             override_reason=body.override_reason,
             note=body.note,
         )
@@ -4917,6 +4928,7 @@ def create_config_rollout(
         restart_after_apply=body.restart_after_apply,
         confirm_endpoint_change=body.confirm_endpoint_change,
         confirm_scope_change=body.confirm_scope_change,
+        confirm_unchecked_structure=body.confirm_unchecked_structure,
         override_reason=body.override_reason,
         note=body.note,
     )
@@ -4933,6 +4945,7 @@ def create_config_rollout(
             ttl_minutes_value=body.ttl_minutes,
             allow_endpoint_change_confirmed=body.confirm_endpoint_change,
             confirm_scope_change=body.confirm_scope_change,
+            confirm_unchecked_structure=body.confirm_unchecked_structure,
             override_reason=body.override_reason,
             restart_after_apply=body.restart_after_apply,
         )
@@ -5239,7 +5252,7 @@ def config_posture(request: Request):
                 "max_aliases": config_validation.max_aliases(),
                 "max_depth": config_validation.max_depth(),
                 "max_nodes": config_validation.max_nodes(),
-                "allowed_exporter_hosts": list(config_validation.allowed_exporter_hosts()),
+                "allowed_exporter_hosts": list(otelcol.allowed_exporter_hosts()),
             },
         },
     }

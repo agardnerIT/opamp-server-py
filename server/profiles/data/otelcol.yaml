@@ -39,10 +39,17 @@ config_formats:
     distinctive: false
 
 # The one field a dictionary file could use to make the server *less* safe, so the
-# loader requires a `components` block alongside it (#117h guardrail 4). Until #119
-# splits the format pipeline from OpenTelemetry's structural rules, this means "judge
-# it by collector pipeline rules", and only a collector may say that.
+# loader requires a `components` block *and* a `structure` engine alongside it (#117h
+# guardrail 4). Since #119 the rules themselves live in `server/profiles/otelcol.py`,
+# not in the shared validator: a file may name an engine, never import one.
 validates_structure: true
+structure:
+  # The collector's own rules — pipelines, component references, the `opamp` extension's
+  # protected invariants, the `memory_limiter`/`batch` advice and the exporter allowlist.
+  engine: otelcol
+  # Which keys name a thing rather than hold a value, for the merge-collision warning:
+  # two config sources defining the same component id is a conflict, not an override.
+  address_sections: [receivers, processors, exporters, extensions, connectors, pipelines]
 
 identity:
   match_any:

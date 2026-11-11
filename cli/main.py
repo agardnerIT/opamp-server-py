@@ -706,6 +706,11 @@ def config_approve(
         False, "--confirm-scope-change",
         help="Approve even though the selector now matches agents it did not at propose time",
     ),
+    confirm_unchecked_structure: bool = typer.Option(
+        False, "--confirm-unchecked-structure",
+        help="Acknowledge that no structural checks ran (the profile has no rules for "
+        "this product), so only the approver can notice a config that breaks it",
+    ),
 ) -> None:
     """Approve and activate a proposal (approver, live server only).
 
@@ -720,6 +725,7 @@ def config_approve(
             note=note,
             confirm_endpoint_change=confirm_endpoint_change,
             confirm_scope_change=confirm_scope_change,
+            confirm_unchecked_structure=confirm_unchecked_structure,
             override_reason=override_reason,
         )
     )
@@ -1022,6 +1028,10 @@ def config_rollout_create(
         False, "--confirm-scope-change",
         help="Acknowledge that the selector now covers more agents than when proposed",
     ),
+    confirm_unchecked_structure: bool = typer.Option(
+        False, "--confirm-unchecked-structure",
+        help="Acknowledge that no structural checks ran for at least one target",
+    ),
     override_reason: Optional[str] = typer.Option(
         None, "--override-reason", help="Override a policy violation (recorded, audited)"
     ),
@@ -1043,6 +1053,7 @@ def config_rollout_create(
             ttl_minutes=ttl_minutes,
             restart_after_apply=restart,
             confirm_scope_change=confirm_scope_change,
+            confirm_unchecked_structure=confirm_unchecked_structure,
             override_reason=override_reason,
         )
     )

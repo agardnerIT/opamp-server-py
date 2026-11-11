@@ -27,7 +27,7 @@ from server import (
 from tests.conformance.harness import handle_message as reply
 from server.state import AGENT_REGISTRY, SQLiteCredentialStore, SQLiteRolloutStore, utcnow
 from server.ws import REGISTRY as WS_REGISTRY
-from tests.support import ADMIN, admin_headers
+from tests.support import ADMIN, admin_headers, pin_collector
 
 
 CONFIG = {
@@ -123,8 +123,13 @@ def poll(
     error: str = "",
     health_status: str = "",
 ) -> bool:
-    """One agent poll; True when the reply carries a config."""
-    return reply(
+    """One agent poll; True when the reply carries a config.
+
+    Pins the agent to `otelcol` (#119) **after** the reply, because the first poll is
+    what registers it: every flow here pushes a collector config, and the structural
+    rules that judge one belong to the profile now.
+    """
+    carries_config = reply(
         agent_message(
             agent_id,
             status=status,
@@ -134,6 +139,8 @@ def poll(
             health_status=health_status,
         )
     ).HasField("remote_config")
+    pin_collector(agent_id)
+    return carries_config
 
 
 def our_hash_b64(agent_id: str) -> str:

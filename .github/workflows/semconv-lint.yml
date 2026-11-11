@@ -1,0 +1,78 @@
+name: Semconv lint
+
+# Weaver over the profile dictionary (#135).
+#
+# Weaver is a semantic-convention registry tool, so it can judge the parts of a profile
+# that *are* semantic conventions — `identity.match_any` and `telemetry` — and nothing
+# else. `scripts/semconv_project.py` projects exactly those into `docs/semconv/`, and this
+# job fails when the projection is stale or when weaver rejects it.
+#
+# What a green run means: "the identity and telemetry projection is well-formed". It does
+# **not** mean "the dictionary is valid" — `server/profiles/schema.py` under
+# `--strict-profiles` is what validates the rest, and `docs/agent-profiles-projection.md`
+# says so in the file this job also keeps up to date.
+#
+# The image is pinned by digest: a linter that changes under us is not a gate.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "server/profiles/**"
+      - "scripts/semconv_project.py"
+      - "docs/semconv/**"
+      - "docs/agent-profiles-projection.md"
+      - ".github/workflows/semconv-lint.yml"
+  pull_request:
+    paths:
+      - "server/profiles/**"
+      - "scripts/semconv_project.py"
+      - "docs/semconv/**"
+      - "docs/agent-profiles-projection.md"
+      - ".github/workflows/semconv-lint.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  projection:
+    name: The committed projection matches the dictionary
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install the server's own loader
+        # The generator imports `server.profiles`, so the projection and the dictionary
+        # cannot disagree about what a profile says.
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Regenerate and fail when stale
+        run: python scripts/semconv_project.py --check
+
+      - name: Loader schema (the part weaver does not cover)
+        env:
+          OPAMP_PROFILES_STRICT: "true"
+        run: python -c "from server import profiles; print(', '.join(profiles.names()))"
+
+  weaver:
+    name: weaver registry check (pinned 0.28.0)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the generated registry
+        run: |
+          docker run --rm \
+            -v "$PWD/docs/semconv:/registry:ro" \
+            otel/weaver@sha256:5857bb81d8cc7ed608cdcae37c4b459eb020f21dd4acade35f7933cd6762fbcc \
+            registry check -r /registry

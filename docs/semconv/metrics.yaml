@@ -1,0 +1,10 @@
+groups:
+- brief: A metric OpenTelemetry Collector reports through this server's OTLP sink (`otelcol_*`).
+  id: metric.opamp.agent.otelcol.otelcol
+  instrument: gauge
+  metric_name: opamp.agent.otelcol.otelcol
+  note: The name the agent sends is the source of truth (`telemetry` in otelcol.yaml); the unit is the
+    agent's and is not normalised here.
+  stability: development
+  type: metric
+  unit: '1'

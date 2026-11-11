@@ -1,0 +1,4 @@
+file_format: definition_manifest/2.0
+name: opamp-agent-profiles
+schema_url: https://opentelemetry.io/schemas/1.30.0
+semconv_version: 1.30.0

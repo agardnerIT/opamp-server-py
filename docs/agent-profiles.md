@@ -107,6 +107,26 @@ layer up:
   approving such a revision needs `confirm_unchecked_structure` — recorded on the revision
   and in the audit log.
 
+## What weaver checks, and what it does not (#135)
+
+`docs/semconv/` is a **projection** of this dictionary into a semantic-convention registry:
+one attribute group per profile for `identity.match_any`, one metric group per telemetry
+name. `python scripts/semconv_project.py` generates it together with
+[`agent-profiles-projection.md`](agent-profiles-projection.md), and CI runs a pinned
+`weaver registry check` over it plus a staleness check on the generated files.
+
+The limits are the important part:
+
+- **Proven by the weaver check:** the identity and telemetry projection is well-formed —
+  attribute ids are namespaced and snake_case, no two profiles claim the same id, metric
+  groups are valid.
+- **Not proven by it:** everything else in a profile. `config_formats`, `structure`,
+  `components`, `panels`, `snippet`, `reports` are document shapes and behaviour, and
+  `server/profiles/schema.py` (with `--strict-profiles`) is what validates them.
+
+A green weaver run read as "the dictionary is valid" is the overclaim #135 exists to
+prevent.
+
 ## References
 
 - `server/profiles/schema.py` — the file format, field by field.

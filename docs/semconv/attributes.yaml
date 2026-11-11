@@ -1,0 +1,41 @@
+groups:
+- attributes:
+  - brief: The `service.type` value that identifies a Fluent Bit agent (fluentbit's profile, prefix match).
+    examples:
+    - Fluent Bit
+    - FluentBit
+    - fluent-bit
+    id: opamp.agent.fluentbit.match.service_type
+    note: Projected from the profile dictionary by `scripts/semconv_project.py`; the dictionary is the
+      source of truth and this attribute is never emitted by an agent.
+    stability: development
+    type: string
+  - brief: The `service.name` value that identifies a Fluent Bit agent (fluentbit's profile, prefix match).
+    examples:
+    - fluent-bit
+    - fluentbit
+    id: opamp.agent.fluentbit.match.service_name
+    note: Projected from the profile dictionary by `scripts/semconv_project.py`; the dictionary is the
+      source of truth and this attribute is never emitted by an agent.
+    stability: development
+    type: string
+  brief: Evidence the server uses to recognise a Fluent Bit agent, declared in `server/profiles/data/fluentbit.yaml`.
+  display_name: Fluent Bit identity
+  id: registry.opamp.agent.fluentbit
+  type: attribute_group
+- attributes:
+  - brief: The `service.name` value that identifies a OpenTelemetry Collector agent (otelcol's profile,
+      prefix match).
+    examples:
+    - io.opentelemetry.collector
+    - opentelemetry-collector
+    - otelcol
+    id: opamp.agent.otelcol.match.service_name
+    note: Projected from the profile dictionary by `scripts/semconv_project.py`; the dictionary is the
+      source of truth and this attribute is never emitted by an agent.
+    stability: development
+    type: string
+  brief: Evidence the server uses to recognise a OpenTelemetry Collector agent, declared in `server/profiles/data/otelcol.yaml`.
+  display_name: OpenTelemetry Collector identity
+  id: registry.opamp.agent.otelcol
+  type: attribute_group

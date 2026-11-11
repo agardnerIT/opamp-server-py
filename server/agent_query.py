@@ -31,6 +31,8 @@ import re
 import sqlite3
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Sequence
 
+from server import profiles  # #134: the example query names a real profile
+
 if TYPE_CHECKING:  # pragma: no cover - typing only, no import cycle at runtime
     from server.state import AgentState
 
@@ -692,7 +694,14 @@ def schema(agents: Sequence["AgentState"]) -> Dict[str, Any]:
     if any(agent.healthy is not None for agent in agents):
         examples.append("SELECT * FROM agents WHERE healthy = 1")
     examples.append("SELECT * FROM agents WHERE remote_config_status = 'APPLIED'")
-    examples.append("SELECT * FROM agents WHERE type = 'otelcol'")
+    # #134: the example names a profile this build actually has, in match order,
+    # rather than a literal 'otelcol' that a deployment without the collector
+    # dictionary would not recognise.
+    for profile_name in profiles.names():
+        if profile_name == profiles.FALLBACK_PROFILE:
+            continue
+        examples.append(f"SELECT * FROM agents WHERE type = '{profile_name}'")
+        break
     examples.append("SELECT * FROM agents WHERE compliant = 'no'")
     examples.append("SELECT * FROM agents WHERE AcceptsRemoteConfig = 1")
     examples.append(

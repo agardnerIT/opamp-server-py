@@ -38,8 +38,8 @@ Pure definitions: no FastAPI, no SQLite, no imports from the rest of `server/`.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Sequence, Tuple
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 #: How a resolution was reached, weakest to strongest. `pinned` is the only one a
 #: human controls (it lives on the server, in the `agents.agent_type` column).
@@ -122,32 +122,161 @@ def flatten_description(description: Any) -> Dict[str, str]:
     return attrs
 
 
-def attr_prefix(key: str, prefixes: Iterable[str]) -> Callable[[Mapping[str, str]], bool]:
-    """Matcher: attribute `key` starts with any of `prefixes` (case-insensitive).
+# ------------------------------------------------------------- data shapes ----
+#
+# Everything below is a *declaration*, not behaviour: #134 moved the dictionary out
+# of Python callables so a new agent type is one YAML file and a restart. These
+# dataclasses are the compiled, frozen form the rest of the server reads, and they
+# are also what `GET /agent/types` serialises — so a field that is not here cannot
+# be promised in the API.
 
-    Prefix rather than equality because `service.name` carries the distro as well as
-    the product (`otelcol`, `otelcol-contrib`, `unknown_service:otelcol`), and a new
-    distro must not need a server release.
+
+@dataclass(frozen=True)
+class IdentityRule:
+    """One `AgentDescription` attribute test: `{attr, prefix: [...]}` or `{attr, equals: [...]}`.
+
+    Prefix rather than equality is the common case because `service.name` carries the
+    distro as well as the product (`otelcol`, `otelcol-contrib`,
+    `unknown_service:otelcol`), and a new distro must not need a server release.
+    Exactly one of the two may be set; the loader rejects a rule with both or neither.
     """
-    wanted = tuple(prefix.casefold() for prefix in prefixes)
 
-    def matcher(attrs: Mapping[str, str]) -> bool:
-        value = (attrs.get(key) or "").casefold()
-        return any(value.startswith(prefix) for prefix in wanted)
+    attr: str
+    prefix: Tuple[str, ...] = ()
+    equals: Tuple[str, ...] = ()
 
-    matcher.__name__ = f"attr_prefix({key!r}, {wanted!r})"
-    return matcher
+    def matches(self, attrs: Mapping[str, str]) -> bool:
+        value = (attrs.get(self.attr) or "").casefold()
+        if self.prefix:
+            return any(value.startswith(wanted) for wanted in self.prefix)
+        return value in self.equals
+
+    def to_dict(self) -> Dict[str, Any]:
+        rule: Dict[str, Any] = {"attr": self.attr}
+        if self.prefix:
+            rule["prefix"] = list(self.prefix)
+        if self.equals:
+            rule["equals"] = list(self.equals)
+        return rule
 
 
-def attr_equals(key: str, values: Iterable[str]) -> Callable[[Mapping[str, str]], bool]:
-    """Matcher: attribute `key` is exactly one of `values` (case-insensitive)."""
-    wanted = frozenset(value.casefold() for value in values)
+@dataclass(frozen=True)
+class SniffSpec:
+    """Evidence of identity from the payloads, when the agent does not say.
 
-    def matcher(attrs: Mapping[str, str]) -> bool:
-        return (attrs.get(key) or "").casefold() in wanted
+    Both halves are emptiness tests on data the agent already sent: the section names
+    it used in `AvailableComponents`, and the top-level sections of its config body.
+    """
 
-    matcher.__name__ = f"attr_equals({key!r}, {sorted(wanted)!r})"
-    return matcher
+    component_sections_any: Tuple[str, ...] = ()
+    config_sections_any: Tuple[str, ...] = ()
+
+    def to_dict(self) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        if self.component_sections_any:
+            payload["component_sections_any"] = list(self.component_sections_any)
+        if self.config_sections_any:
+            payload["config_sections_any"] = list(self.config_sections_any)
+        return payload
+
+
+@dataclass(frozen=True)
+class TelemetrySpec:
+    """Which internal metrics this profile's agents are expected to report (#122).
+
+    `metric_prefix` is the coarse declaration (`otelcol_*` -> `otelcol_`);
+    `metric_map` is the escape hatch for a profile whose metric names carry no common
+    prefix. A profile with no `telemetry` at all is saying "this agent reports nothing
+    to this server", which is a different sentence from "nothing arrived yet".
+    """
+
+    metric_prefix: str = ""
+    metric_map: Mapping[str, str] = field(default_factory=dict)
+
+    def owns(self, name: Any) -> bool:
+        """True when `name` is one of this profile's metrics."""
+        if not isinstance(name, str):
+            return False
+        if self.metric_map and name in self.metric_map:
+            return True
+        return bool(self.metric_prefix) and name.startswith(self.metric_prefix)
+
+    def to_dict(self) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        if self.metric_prefix:
+            payload["metric_prefix"] = self.metric_prefix
+        if self.metric_map:
+            payload["metric_map"] = dict(self.metric_map)
+        return payload
+
+
+@dataclass(frozen=True)
+class ComponentsSpec:
+    """How to read a component inventory out of `AvailableComponents` (#120 reuses this).
+
+    Every knob here is a convention *of the agent's payload*, not of this server, which
+    is why it is data: `sections` says which report keys exist and what they are called
+    (the keys are plural, the types singular), `known` names components that report no
+    section at all, and `version` says where a version hides in a component's metadata.
+    """
+
+    sections: Mapping[str, str] = field(default_factory=dict)
+    known: Mapping[str, str] = field(default_factory=dict)
+    version_metadata_key: str = "code.namespace"
+    version_separator: str = " v"
+    health_scope_prefix: str = "pipeline:"
+    health_extensions_scope: str = "extensions"
+    health_child_separator: str = ":"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "sections": dict(self.sections),
+            "version_metadata_key": self.version_metadata_key,
+            "health_scope_prefix": self.health_scope_prefix,
+            "health_extensions_scope": self.health_extensions_scope,
+        }
+
+
+@dataclass(frozen=True)
+class PanelMetric:
+    """One tile: a label, a metric name, and how to render its value."""
+
+    label: str
+    metric: str
+    format: str = "number"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"label": self.label, "metric": self.metric, "format": self.format}
+
+
+@dataclass(frozen=True)
+class Panel:
+    """One block of the agent-detail page, declared instead of hardcoded (#121 renders it).
+
+    `widget` is a member of `server.profiles.schema.WIDGETS`, which is closed on
+    purpose: a profile cannot invent a widget, because there would be no renderer.
+    """
+
+    id: str
+    widget: str
+    title: str = ""
+    caption: str = ""
+    metrics: Tuple[PanelMetric, ...] = ()
+    #: `alert` widget: the metric to watch, the condition and how to shout about it.
+    metric: str = ""
+    when: str = ""
+    severity: str = ""
+    message: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {"id": self.id, "widget": self.widget}
+        for name in ("title", "caption", "when", "severity", "message", "metric"):
+            value = getattr(self, name)
+            if value:
+                payload[name] = value
+        if self.metrics:
+            payload["metrics"] = [metric.to_dict() for metric in self.metrics]
+        return payload
 
 
 # -------------------------------------------------------------------- profile ---
@@ -165,22 +294,40 @@ class AgentProfile:
     name: str
     display_name: str
     summary: str = ""
+    #: Sidebar/badge glyph. Data, not a `if name == "otelcol"` branch (#121).
+    icon: str = "📦"
+    #: Match order, high to low. Explicit because filesystem order is not a policy:
+    #: a locale, a rename or a parallel checkout would each change fleet behaviour
+    #: silently. Two profiles sharing a priority is a load error, not a coin flip.
+    priority: int = 0
     #: Formats this profile accepts. Empty means "anything, as opaque bytes".
     config_formats: Tuple[ConfigFormat, ...] = ()
     #: May the server judge the *structure* of a body for this agent? (#119 reads it)
     validates_structure: bool = False
     #: Evidence of identity from `AgentDescription` attributes.
-    description_matchers: Tuple[Callable[[Mapping[str, str]], bool], ...] = ()
+    identity_match_any: Tuple[IdentityRule, ...] = ()
+    #: The same evidence in declared form, for the API and for `--strict-profiles`.
+    sniff_spec: Optional[SniffSpec] = None
     #: Evidence of identity from the payloads (`AvailableComponents`, config).
     sniff: Optional[Callable[[Any], bool]] = None
     #: Component inventory, or `None` for "this profile has no such concept".
     components: Optional[Callable[[Any], Dict[str, list]]] = None
+    #: The component-reading conventions behind `components`, for the API.
+    components_spec: Optional[ComponentsSpec] = None
     #: Which fleet report generators apply. Empty means none of them do.
     reports: Tuple[str, ...] = ()
     #: Metric-name mapping for the telemetry view, or `None` for "not expected".
-    telemetry: Any = None
+    telemetry: Optional[TelemetrySpec] = None
+    #: Agent-detail panels this profile declares. Empty means generic chrome (#121).
+    panels: Tuple[Panel, ...] = ()
+    #: Bootstrap snippet template, compiled into `snippet`. Data, for the API.
+    snippet_template: str = ""
     #: Bootstrap snippet builder: `(endpoint, token) -> str`.
     snippet: Optional[Callable[[str, str], str]] = None
+    #: Which profile's snippet to show when the agent is not known yet (token minting
+    #: precedes the first connection). At most one profile may say yes; the loader
+    #: enforces it, and `generic` is used when nobody does.
+    bootstrap_default: bool = False
 
     # -- formats ---------------------------------------------------------
 
@@ -203,7 +350,7 @@ class AgentProfile:
 
     def matches_description(self, attrs: Mapping[str, str]) -> bool:
         """True when the agent's own description says it is this profile."""
-        return any(matcher(attrs) for matcher in self.description_matchers)
+        return any(rule.matches(attrs) for rule in self.identity_match_any)
 
     def sniffed_by(self, agent: Any) -> bool:
         """True when the agent's payloads look like this profile.
@@ -234,11 +381,41 @@ class AgentProfile:
             return ""
         return self.snippet(endpoint, token)
 
+    def detect_component_type(self, component_id: str) -> str:
+        """Component type from its id (`receivers/otlp` -> `receiver`), or `unknown`.
+
+        Data-driven (#134): a profile without a `components` spec has no such concept,
+        so the honest answer is `unknown` rather than an empty collector.
+        """
+        spec = self.components_spec
+        if spec is None or not isinstance(component_id, str):
+            return "unknown"
+        for section, type_name in spec.sections.items():
+            if component_id.startswith(f"{section}/"):
+                return type_name
+        if component_id in spec.known:
+            return spec.known[component_id]
+        if "/" in component_id:
+            head = component_id.split("/")[0]
+            for section, type_name in spec.sections.items():
+                if head in (section, type_name):
+                    return type_name
+            if head in spec.known:
+                return spec.known[head]
+        return "unknown"
+
     def describe(self) -> Dict[str, Any]:
-        """The JSON shape `GET /agent/types` returns. No callables, no secrets."""
+        """The JSON shape `GET /agent/types` returns. No callables, no secrets.
+
+        #134 added `icon`, `priority`, `identity` and `panels`, so the four layers
+        (client, CLI, MCP, skill) have to carry them in the same change as the schema —
+        an API field only the server knows about is a field nobody can test.
+        """
         return {
             "name": self.name,
             "display_name": self.display_name,
+            "icon": self.icon,
+            "priority": self.priority,
             "summary": self.summary,
             "validates_structure": self.validates_structure,
             "content_types": sorted(
@@ -247,7 +424,15 @@ class AgentProfile:
             "default_filename": self.filename_for(),
             "reports": list(self.reports),
             "reports_telemetry": self.telemetry is not None,
-            "detectable": bool(self.description_matchers or self.sniff),
+            "telemetry": self.telemetry.to_dict() if self.telemetry else None,
+            "detectable": bool(self.identity_match_any or self.sniff),
+            "identity": {
+                "match_any": [rule.to_dict() for rule in self.identity_match_any],
+                "sniff": self.sniff_spec.to_dict() if self.sniff_spec else None,
+            },
+            "panels": [panel.to_dict() for panel in self.panels],
+            "components": self.components_spec.to_dict() if self.components_spec else None,
+            "bootstrap_default": self.bootstrap_default,
         }
 
 

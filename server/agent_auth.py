@@ -616,12 +616,17 @@ def collector_snippet(
     credential into this product" is exactly the kind of type-specific knowledge a
     profile owns — a generic agent gets plain text (endpoint + header) rather than an
     invented YAML document it cannot read. `agent_type` is the resolved profile name
-    when the agent is already known; a token is usually minted *before* the agent
-    first connects, so the default stays the collector block.
+    when the agent is already known.
+
+    *#134*: there is no `or "otelcol"` fallback in code any more. A token is usually
+    minted *before* the agent first connects, so there is nothing to resolve; the
+    dictionary answers which snippet to show then, with `bootstrap_default: true`
+    (`registry.bootstrap_default()`), and the fallback profile's plain text when no
+    file claims it.
     """
     from server import profiles
 
-    profile = profiles.get(agent_type or "otelcol") or profiles.get("otelcol")
+    profile = profiles.get(agent_type) or profiles.bootstrap_default()
     return profile.bootstrap_snippet(snippet_endpoint(transport), token)
 
 

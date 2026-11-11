@@ -1738,7 +1738,7 @@ The UI signs in the same way the CLI does — `POST /auth/session` — and then 
 | WS | `/v1/opamp` | 🔑 | Same endpoint over WebSocket (`OPAMP_WS_ENABLED`, on by default); credential checked before `accept()`, refusals close `1008`. Malformed messages (including an empty `instance_uid`) get a `BAD_REQUEST` error frame then close `1002`; oversized frames close `1009`; an overloaded server refuses the upgrade with `503` + `Retry-After` (#78) |
 | POST | `/v1/metrics` | | OTLP/HTTP metrics ingestion from collectors (JSON or protobuf) |
 | GET | `/agents` | | List agents. Filters: `healthy=true\|false\|unknown`, `status=` (remote config status, or alias `remote_config_status=`), or any description attribute, e.g. `?environment=prod`. Repeated params are OR. Each agent carries a `credential` block |
-| GET | `/agent/types` | | The agent types (profiles) this build recognises, in match order: `name`, `display_name`, `validates_structure`, `content_types`, `default_filename`, `reports`, `detectable`. `otelcol` is an OpenTelemetry Collector; `generic` is any other OpAMP agent, whose config is stored and relayed **without being interpreted** |
+| GET | `/agent/types` | | The agent types (profiles) this build recognises, in match order: `name`, `display_name`, `icon`, `priority`, `summary`, `validates_structure`, `content_types`, `default_filename`, `reports`, `reports_telemetry`, `telemetry`, `detectable`, `identity` (`match_any` rules + `sniff`), `panels`, `components`, `bootstrap_default`. `otelcol` is an OpenTelemetry Collector; `generic` is any other OpAMP agent, whose config is stored and relayed **without being interpreted**. The list comes from the profile dictionary — see [Agent profiles](#agent-profiles-the-dictionary) |
 | PUT | `/agent/{id}/type` | operator | **Pin** the agent's type (`{"agent_type": "otelcol"}`) or clear the pin (`null`). A pin outranks every signal the agent sends (`service.name`, `content_type`, payload shape), survives restarts and is audited (`agent.type.pinned` / `agent.type.auto`). 422 for an unknown name (never a silent `generic`), 404 for an unknown agent. Returns the four `agent_type*` fields with provenance |
 | GET | `/agent/{id}` | | Agent details incl. latest OTLP metrics, `credential` state (`enrolled`, `active`, `last_seen_at`, `revoked_at` — never a token) and `agent_type` / `agent_type_source` (`pinned`\|`declared`\|`sniffed`\|`fallback`) / `agent_type_pinned` / `agent_type_warning` |
 | GET | `/agent/{id}/metrics` | | Latest OTLP metric values for the agent (persisted across restarts) |
@@ -1803,6 +1803,109 @@ Example: filter agents by metadata and health
 curl "http://localhost:4320/agents?healthy=true&environment=prod"
 curl "http://localhost:4320/agents?status=UNSET"
 ```
+
+## Agent profiles (the dictionary)
+
+The server is type-blind by protocol, so "which product is this agent" is a local
+concept it derives, records and shows (#117, #118). Since #134 that concept is **data**:
+one YAML file per agent type in `server/profiles/data/`, compiled at startup.
+
+```text
+server/profiles/
+  data/otelcol.yaml   the dictionary — the only place collector knowledge lives
+  data/*.yaml         one file per agent type; drop one in and restart
+  schema.py           what a file may say (strict: an unknown key is a load error)
+  loader.py           read, validate, compile; priority/duplicate rules
+  engines.py          the snippets, sniffers and component readers built from a file
+  base.py             the compiled, frozen `AgentProfile` the rest of the server reads
+  generic.py          the fallback — built in, never a file
+  registry.py         match order, provenance, resolution cache, reload
+```
+
+`server/profiles/data/otelcol.yaml` is the worked example and is worth reading first. The
+shape in one screen:
+
+```yaml
+name: otelcol                  # stored in agents.agent_type; lower case, boring
+display_name: OpenTelemetry Collector
+icon: "🧩"                     # the badge glyph (#121 renders it)
+priority: 100                  # match order, high wins; a tie is a load error
+summary: >-                    # what GET /agent/types says about it
+  ...
+config_formats:
+  - content_types: ["", "text/yaml", ...]
+    default_filename: otelcol-config.yaml
+    distinctive: false         # only a distinctive MIME type may *identify* a profile
+validates_structure: true      # requires `components` — see the guardrails
+identity:
+  match_any:                   # evidence from AgentDescription
+    - {attr: service.name, prefix: [otelcol, io.opentelemetry.collector]}
+  sniff:                       # evidence from the payloads
+    component_sections_any: [receivers, exporters]
+    config_sections_any: [receivers, service]
+reports: [fleet, agent, heavy, outdated]
+telemetry: {metric_prefix: "otelcol_"}   # omit entirely = "reports no telemetry"
+components: {sections: {receivers: receiver, ...}}   # how to read the inventory
+snippet: |                     # {endpoint}, {token}, {scheme} are substituted
+  extensions:
+    opamp:
+      server:
+        {scheme}:
+          endpoint: {endpoint}
+panels:                        # the agent-detail blocks this profile declares
+  - id: data-flow-inputs
+    widget: metrics            # WIDGETS is closed: a widget with no renderer is a lie
+    metrics: [{label: Logs In, metric: otelcol_receiver_accepted_log_records}]
+bootstrap_default: false       # at most one profile; the snippet shown before an agent connects
+```
+
+**Adding an agent type** is one file and a restart. No Python, no release:
+
+```bash
+cat > server/profiles/data/fluentbit.yaml <<'YAML'
+name: fluentbit
+display_name: Fluent Bit
+icon: "🪵"
+priority: 50
+identity:
+  match_any: [{attr: service.name, prefix: [fluent-bit, fluentbit]}]
+config_formats: [{content_types: [text/yaml], default_filename: fluent-bit.conf}]
+YAML
+```
+
+`GET /agent/types` lists it immediately after the restart, and an agent whose
+`service.name` starts with `fluent-bit` resolves to it (`GET /agents` →
+`agent_type` + `agent_type_source: declared`).
+
+### Guardrails (enforced by the loader, not by review)
+
+- **A profile may only subtract.** A file can never grant a capability, a validation
+  exemption or a trust level — it decides what the server is willing to *show*, not what
+  it may *do* (`server/profiles/base.py`, rule 1).
+- **No code from data.** There is no `hooks` key: every behaviour is a field the schema
+  understands, compiled by `engines.py`. An editable dictionary that could import a
+  module would be remote code execution with a YAML front end.
+- **`validates_structure: true` requires `components`.** Until structural validation is
+  split from OpenTelemetry's pipeline rules (#119), a data-only profile claiming it would
+  apply collector rules to a non-collector, so it is a load error.
+- **Match order is data.** `priority`, high to low — never filename order, because a
+  locale, a rename or a parallel checkout would change fleet behaviour silently. Two
+  profiles sharing a priority, or two claiming the same *distinctive* content type, is a
+  load error.
+- **A bad file must not take the server down.** An invalid document is logged, that
+  profile is absent, the fleet is still served. `--strict-profiles`
+  (`OPAMP_PROFILES_STRICT=true`) makes the same validation fatal — that is the form CI
+  and the test suite use, because log-and-carry-on is exactly how a typo ships.
+- **Ambiguity is visible.** When more than one profile's evidence matches, `priority`
+  still picks a winner, but `agent_type_ambiguous` on the agent dict names the others.
+  A tie is a decision nobody can audit, so it is reported rather than hidden.
+- **A reload invalidates cached resolutions.** `registry.reload()` bumps a generation
+  counter that is part of every resolution fingerprint, so nothing keeps serving a
+  decision made against the old dictionary.
+
+`generic` is not in the dictionary. It is the answer for "nothing matched", so it cannot
+be the thing that failed to load; it declares no formats, no matchers and no sniffer, so
+it can never win a match either.
 
 ## CLI (`opampctl`)
 

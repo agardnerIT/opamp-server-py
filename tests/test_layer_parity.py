@@ -20,6 +20,7 @@ because their ergonomics are tested behaviourally in `tests/test_cli.py` and
 from __future__ import annotations
 
 import inspect
+import json
 
 import pytest
 from fastapi.routing import APIRoute
@@ -28,6 +29,7 @@ from cli.main import app as cli_app
 from client.opamp_client import OpampClient
 from mcp_server import server as mcp_server
 from server.main import app
+from tests.asgi_transport import InProcessASGITransport
 
 # (method, path) -> the OpampClient method that speaks it.
 #
@@ -310,3 +312,85 @@ def test_mcp_reads_rollouts_and_never_writes_them():
         "create_group is write-gated (OPAMP_MCP_ALLOW_WRITES); exposing it by default "
         "would let an agent change the blast radius of every future push"
     )
+
+
+# ------------------------------------------------ #134: the profile dictionary
+#
+# An API field only the server knows about is a field nobody can test, so the four
+# layers have to carry #134's additions *in the same change* as the schema (AGENTS.md,
+# and #134 deliverable 6). These are field-level assertions, not route-existence ones:
+# the shape is what a client actually consumes, and each layer proxies it as JSON, so
+# the failure this catches is a layer that reformats, renames or drops a key.
+
+#: What `GET /agent/types` promises per profile since #134.
+PROFILE_FIELDS = {
+    "name",
+    "display_name",
+    "icon",
+    "priority",
+    "summary",
+    "validates_structure",
+    "content_types",
+    "default_filename",
+    "reports",
+    "reports_telemetry",
+    "telemetry",
+    "detectable",
+    "identity",
+    "panels",
+    "components",
+    "bootstrap_default",
+}
+
+
+def _profile_types(payload) -> dict:
+    """`{name: entry}` from whatever wrapper a layer used."""
+    entries = payload["types"] if isinstance(payload, dict) and "types" in payload else payload
+    return {entry["name"]: entry for entry in entries}
+
+
+def test_the_profile_shape_reaches_the_client():
+    from client.opamp_client import OpampClient
+
+    api = OpampClient(
+        base_url="http://opamp.test", transport=InProcessASGITransport(app)
+    )
+    types = _profile_types(api.agent_types())
+    assert set(types["otelcol"]) >= PROFILE_FIELDS
+    assert types["otelcol"]["icon"] == "🧩"
+    assert types["otelcol"]["panels"]
+    json.dumps(types)  # the client must never hand back a non-JSON value
+
+
+def test_the_profile_shape_reaches_the_cli(monkeypatch):
+    import cli.main as cli_main
+    from cli.main import app as cli_app
+    from client.opamp_client import OpampClient
+    from typer.testing import CliRunner
+
+    transport = InProcessASGITransport(app)
+    monkeypatch.setattr(
+        cli_main,
+        "_client",
+        lambda: OpampClient(base_url="http://opamp.test", transport=transport),
+    )
+    result = CliRunner().invoke(cli_app, ["agents", "types"])
+    assert result.exit_code == 0, result.output
+    types = _profile_types(json.loads(result.output))
+    assert set(types["otelcol"]) >= PROFILE_FIELDS
+
+
+def test_the_profile_shape_reaches_mcp(monkeypatch):
+    from client.opamp_client import OpampClient
+
+    transport = InProcessASGITransport(app)
+    monkeypatch.setattr(
+        mcp_server,
+        "_client",
+        lambda: OpampClient(base_url="http://opamp.test", transport=transport),
+    )
+    types = _profile_types(json.loads(mcp_server.list_agent_types()))
+    assert set(types["otelcol"]) >= PROFILE_FIELDS
+    assert types["otelcol"]["priority"] == 100
+    # A read tool must not leak the telemetry *values*, only the declaration.
+    assert types["otelcol"]["telemetry"] == {"metric_prefix": "otelcol_"}

@@ -1610,6 +1610,13 @@ def agents_types() -> None:
     `validates_structure` is the one that matters before a push: `false` means the
     server stores the agent's config without interpreting it, so a collector-specific
     finding (or a pass) does not describe it.
+
+    Since #134 the list is a *dictionary* (YAML files in `server/profiles/data/`), and
+    each entry also carries `icon`, `priority` (match order, high wins), `identity`
+    (the attribute rules and sniffer the server matches on), `telemetry` (`null` when
+    this profile reports no telemetry at all) and `panels` (the agent-detail blocks it
+    declares). A profile absent from this list is not a 404 on a pin — it is a 422,
+    because the name is checked against this listing.
     """
     _run(lambda oc: oc.agent_types())
 

@@ -162,12 +162,15 @@ def capture() -> Dict[str, Any]:
     payloads = []
     for agent in built:
         payload = agent.to_dict()
-        # Added by #118 and #135; absent on the pre-refactor side of the comparison.
+        # Added by #118, #134 and #135; absent on the pre-refactor side of the
+        # comparison. A key is added here only when it is a *new field*, never when
+        # an existing field changed value — that is what makes this a fence.
         for key in (
             "agent_type",
             "agent_type_source",
             "agent_type_pinned",
             "agent_type_warning",
+            "agent_type_ambiguous",
             "health_status",
             "health_error",
         ):

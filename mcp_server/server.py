@@ -285,7 +285,14 @@ def list_agent_types() -> str:
     a validation verdict for an agent: for `generic`, both are collector-specific and
     do not describe the agent. Every agent's `agent_type`, `agent_type_source`
     (pinned/declared/sniffed/fallback) and `agent_type_warning` come back in
-    list_agents and get_agent.
+    list_agents and get_agent. `agent_type_ambiguous` names the other profiles whose
+    evidence also matches, when more than one does (#134) — a tie is a decision
+    nobody can audit, so it is reported rather than hidden.
+
+    Each entry also carries `icon`, `priority`, `identity` (the attribute rules and
+    sniffer), `telemetry` (`null` = this profile reports none) and `panels` (the
+    agent-detail blocks it declares), so a client can render an agent generically
+    instead of hardcoding the collector (#134).
     """
     return _tool(lambda oc: oc.agent_types())
 

@@ -1,0 +1,185 @@
+# OpenTelemetry Collector — the profile this server was born as. #117h
+#
+# This file is the worked example for the dictionary format: see
+# `server/profiles/schema.py` for the shape and README §"Agent profiles" for the
+# prose. It used to be `server/profiles/otelcol.py`; every block below was moved out
+# of that module, not invented here, and `tests/test_profiles.py::
+# test_the_move_changed_no_output` byte-compares the observable output against the
+# pre-#117h capture in `tests/fixtures/agent_type_golden.json`.
+#
+# Nothing in this file may grant a capability (#118 base rule 1). It decides what the
+# server is willing to *show* and *claim* about an agent that looks like a collector.
+
+name: otelcol
+display_name: OpenTelemetry Collector
+icon: "🧩"
+
+# Match order, high to low. Explicit on purpose: filesystem order would let a rename
+# or a locale change fleet behaviour. Two files sharing a priority is a load error.
+priority: 100
+
+summary: >-
+  Collector YAML: components are read from AvailableComponents, structural
+  validation applies, and the heavy/outdated reports and otelcol_* telemetry views
+  are meaningful.
+
+config_formats:
+  # `distinctive: false` is the honest answer and the important one: a collector
+  # config is `text/yaml`, which FluentBit also sends. Claiming a format is not
+  # claiming an identity — only a `distinctive` MIME type may do that, and no
+  # registered `application/x-otelcol-config` exists in the wild.
+  - content_types:
+      - ""
+      - application/x-yaml
+      - application/yaml
+      - text/plain
+      - text/x-yaml
+      - text/yaml
+    default_filename: otelcol-config.yaml
+    distinctive: false
+
+# The one field a dictionary file could use to make the server *less* safe, so the
+# loader requires a `components` block alongside it (#117h guardrail 4). Until #119
+# splits the format pipeline from OpenTelemetry's structural rules, this means "judge
+# it by collector pipeline rules", and only a collector may say that.
+validates_structure: true
+
+identity:
+  match_any:
+    # The spec's own convention: service.name SHOULD be "a reverse FQDN that uniquely
+    # identifies the Agent type, e.g. io.opentelemetry.collector". Prefix rather than
+    # equality covers the distros (otelcol-contrib) and the `unknown_service:` form.
+    - attr: service.name
+      prefix:
+        - otelcol
+        - io.opentelemetry.collector
+        - opentelemetry-collector
+  sniff:
+    # No description, no problem: these are the agent's own labels. The five section
+    # names are the collector's vocabulary, which is what makes them evidence.
+    component_sections_any:
+      - receivers
+      - processors
+      - exporters
+      - extensions
+      - connectors
+    # The same five as top-level sections of the reported config, for an agent that
+    # reports a config and no component list. `service` is what makes it runnable.
+    config_sections_any:
+      - receivers
+      - processors
+      - exporters
+      - extensions
+      - connectors
+
+reports:
+  - fleet
+  - agent
+  - heavy
+  - outdated
+
+telemetry:
+  # What this profile's agents are expected to report to POST /v1/metrics. A profile
+  # with no telemetry block is saying "this agent reports nothing to this server",
+  # which #121 shows as a product fact rather than an empty panel (#122).
+  metric_prefix: "otelcol_"
+
+components:
+  # AvailableComponents.components keys (plural, as the agent labels them) and the
+  # component type each one holds (singular, as the UI and reports say it).
+  sections:
+    receivers: receiver
+    processors: processor
+    exporters: exporter
+    extensions: extension
+    connectors: connector
+  # Components that report no section at all, and name themselves bare. Moved here
+  # verbatim from the module this file replaced.
+  known:
+    otlp: receiver
+    jaeger: receiver
+    prometheus: receiver
+    zipkin: receiver
+    statsd: receiver
+    host_metrics: receiver
+    batch: processor
+    memory_limiter: processor
+    filter: processor
+    transform: processor
+    resourcedetection: processor
+    debug: exporter
+    logging: exporter
+    prometheusremotewrite: exporter
+    otlphttp: exporter
+    opamp: extension
+    zpages: extension
+    health_check: extension
+    pprof: extension
+  # Where a version hides: `metadata: [{key: code.namespace, value: {stringValue:
+  # "go.opentelemetry.io/collector v0.149.0"}}]`. A different product overrides these
+  # three fields in its own file instead of needing a hook.
+  version_metadata_key: code.namespace
+  version_separator: " v"
+  # And where "in use" hides when no config was reported: the health map's pipeline
+  # and extensions scopes, with `type:id` children.
+  health_scope_prefix: "pipeline:"
+  health_extensions_scope: extensions
+  health_child_separator: ":"
+
+# A paste-ready `extensions.opamp` block carrying the token. This is the v1
+# bootstrap: the token goes into the agent's config, because the collector extension
+# cannot receive one in-band (see server/agent_auth.py). `{scheme}` is computed from
+# the endpoint — `ws` for a websocket URL, `http` otherwise — and is the only
+# substitution with a rule behind it.
+snippet: |
+  extensions:
+    opamp:
+      server:
+        {scheme}:
+          endpoint: {endpoint}
+          headers:
+            Authorization: "Bearer {token}"
+
+# The agent-detail page, declared instead of hardcoded (#121 renders these; #117h
+# only defines the shape). Widgets are a closed set — a widget with no renderer is a
+# promise the UI cannot keep — and metric formats are how a value is rendered, not
+# what it means.
+panels:
+  - id: data-flow-inputs
+    widget: metrics
+    title: Data Flow (Inputs)
+    caption: Data being received by the collector. Sudden drops may indicate connectivity issues.
+    metrics:
+      - {label: Logs In, metric: otelcol_receiver_accepted_log_records, format: number}
+      - {label: Traces In, metric: otelcol_receiver_accepted_spans, format: number}
+      - {label: Metrics In, metric: otelcol_receiver_accepted_metric_points, format: number}
+      - {label: Refused, metric: otelcol_receiver_refused_log_records, format: number}
+  - id: data-flow-inputs-failed
+    widget: alert
+    metric: otelcol_receiver_failed_log_records
+    when: above_zero
+    severity: error
+    message: "⚠️ Failed: {value}"
+  - id: data-flow-outputs
+    widget: metrics
+    title: Data Flow (Outputs)
+    caption: Data being sent to downstream systems. If this drops but inputs are normal, check exporter connectivity.
+    metrics:
+      - {label: Logs Out, metric: otelcol_exporter_sent_log_records, format: number}
+      - {label: Traces Out, metric: otelcol_exporter_sent_spans, format: number}
+      - {label: Metrics Out, metric: otelcol_exporter_sent_metric_points, format: number}
+  - id: collector-health
+    widget: metrics
+    title: Collector Health
+    caption: Resource usage of the collector process itself.
+    metrics:
+      - {label: CPU (sec), metric: otelcol_process_cpu_seconds, format: decimal}
+      - {label: Memory (MB), metric: otelcol_process_memory_rss, format: mebibytes}
+      - {label: Heap (MB), metric: otelcol_process_runtime_heap_alloc_bytes, format: mebibytes}
+      - {label: Uptime (sec), metric: otelcol_process_uptime, format: number}
+
+# A token is usually minted before the agent first connects, so there is no
+# resolution to ask: this profile's snippet is what the Help page and the empty fleet
+# view show by default. At most one file may set it (the loader enforces that), and
+# the fallback profile's plain text is used when nobody does.
+bootstrap_default: true

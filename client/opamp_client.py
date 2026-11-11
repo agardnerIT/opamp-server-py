@@ -457,6 +457,23 @@ class OpampClient:
         server judge a config body's structure for this agent?), the ``content_types``
         it accepts, which ``reports`` apply and whether it is ``detectable`` at all.
         Read this before pinning: a name not in this list is a 422.
+
+        #134 added the dictionary's own fields, so a client can render an agent
+        without hardcoding the collector:
+
+        * ``icon`` — the glyph to show in a badge, and ``priority`` — match order
+          (high wins; a tie is a load error server-side, never a coin flip);
+        * ``identity`` — ``{match_any: [{attr, prefix|equals}], sniff: {...}}``, the
+          evidence the server used, which is what a "why does it think that?" tooltip
+          needs;
+        * ``telemetry`` — ``{metric_prefix}`` / ``{metric_map}``, or ``null`` when the
+          profile does not report telemetry at all (that is a product fact, not an
+          empty graph);
+        * ``panels`` — the agent-detail blocks this profile declares, each
+          ``{id, widget, title?, metrics?}`` over a closed widget set;
+        * ``components`` — the component-reading conventions, or ``null``;
+        * ``bootstrap_default`` — the one profile whose snippet to show before an
+          agent has connected (at most one profile may set it).
         """
         return self._get("/agent/types")
 

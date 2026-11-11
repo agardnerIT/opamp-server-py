@@ -84,7 +84,7 @@ opampctl agents compliance <agent-id>
 | Columns + values to write SQL against | `agents query-schema` | `agent_query_schema` | `GET /agents/query/schema` |
 | Agent details | `agents get <id>` | `get_agent` | `GET /agent/{id}` |
 | Agent metrics | `agents metrics <id>` | `get_agent_metrics` | `GET /agent/{id}/metrics` |
-| Agent types this build recognises | `agents types` | `list_agent_types` | `GET /agent/types` |
+| Agent types this build recognises (dictionary: `icon`, `priority`, `identity`, `telemetry`, `panels`) | `agents types` | `list_agent_types` | `GET /agent/types` |
 | Pin an agent's type (operator) | `agents set-type <id> <type>` / `--auto` | `set_agent_type` (write-gated) | `PUT /agent/{id}/type` |
 | OCB manifest | `agents manifest <id> [--raw]` | `generate_manifest` | `POST /agent/{id}/manifest` |
 | Compliance (read) | `agents compliance <id>` | `get_compliance` | `GET /agent/{id}/compliance` |
@@ -203,6 +203,18 @@ opampctl agents types                                     # what this build reco
 opampctl agents set-type <id> otelcol                     # pin (operator; audited)
 opampctl agents set-type <id> --auto                      # back to auto-detection
 ```
+
+The list is a **dictionary**, not code (#134): one YAML file per type in
+`server/profiles/data/`, compiled at startup. So `agents types` is also the answer to
+"can I get a generic UI for this product?" — an entry carries `icon`, `priority`
+(match order, high wins), `identity` (the attribute rules and sniffer the server
+matches on), `telemetry` (`null` means the profile reports no telemetry at all, which
+is a product fact rather than an empty graph) and `panels` (the detail-page blocks it
+declares). Adding a type needs no Python and no server release.
+
+When an agent's evidence matches more than one profile, `agent_type_ambiguous` on the
+agent dict names the others: `priority` still picks the winner, but the tie is reported
+rather than hidden. Check it before trusting a badge.
 
 Pin when detection is wrong or the agent's claim cannot be trusted: every automatic
 signal is the agent's own claim (`service.name`, `content_type`, payload shape) and

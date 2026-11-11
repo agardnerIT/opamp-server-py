@@ -252,6 +252,16 @@ async def lifespan(app: FastAPI):
     # Agents are unauthenticated by default (#94) — say so once, loudly, rather
     # than letting an operator discover it from an incident.
     agent_auth.warn_if_unenforced()
+    # #134: the profile dictionary is loaded on import (a bad file is logged and that
+    # profile is absent, so a fleet is never down because of a YAML edit). With
+    # `--strict-profiles` / `OPAMP_PROFILES_STRICT=true` the same validation is fatal,
+    # which is what CI and the tests use: log-and-carry-on is exactly how a typo ships.
+    if profiles.loader.strict_default():
+        try:
+            profiles.reload(strict=True)
+        except profiles.ProfileLoadError as exc:
+            logger.error(f"profile dictionary is invalid: {exc}")
+            raise
     # Refuses to start (non-zero exit) when config push is enabled on an insecure
     # posture (#96). Read-only deployments are unaffected.
     posture.assert_startup_posture()
@@ -5236,9 +5246,25 @@ def config_posture(request: Request):
 
 
 if __name__ == "__main__":
+    import argparse
+    import os
     import sys
 
     import uvicorn
+
+    # #134: `--strict-profiles` is the CI spelling of `OPAMP_PROFILES_STRICT=true`.
+    # The server's own default is to log an invalid profile file and carry on, because
+    # a fleet must not go down over a YAML edit — but that is exactly how a typo ships,
+    # so the strict form has to exist somewhere a build can call it.
+    parser = argparse.ArgumentParser(description="OpAMP server")
+    parser.add_argument(
+        "--strict-profiles",
+        action="store_true",
+        help="refuse to start if any agent-profile dictionary file is invalid",
+    )
+    arguments = parser.parse_args()
+    if arguments.strict_profiles:
+        os.environ["OPAMP_PROFILES_STRICT"] = "true"
 
     admin_auth.ensure()
     agent_auth.warn_if_unenforced()

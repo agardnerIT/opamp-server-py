@@ -24,6 +24,7 @@ from ui.session import (  # re-exported so pages import one module
 from server.manifest import generate_manifest, generate_ocb_command
 from server.posture import posture_warning
 from server import protocol  # #75: the duplicate-uid reason vocabulary
+from server import profiles  # #134: profile icons and defaults come from the dictionary
 from server.reports import (  # re-exported: report logic lives in server/reports.py
     generate_agent_report,
     generate_heavy_collectors_report,
@@ -905,15 +906,23 @@ def agent_type_badge(agent):
     fact, a declaration is the agent's claim, and a sniff is inference. The badge is
     the whole point of keeping `agent_type_source` — a wrong guess has to be visible
     before it becomes a config push.
+
+    #134: the glyph is the profile's `icon`, not a `if name == "otelcol"` branch —
+    that branch was the reason a new agent type needed a UI release. `📦` stays as the
+    fallback for a name this build does not have (a downgrade, a hand-edited row).
     """
     if not agent:
         return "⚪ unknown"
     name = agent.get("agent_type") or "unknown"
     source = agent.get("agent_type_source") or ""
-    icon = "🧩" if name == "otelcol" else "📦"
+    profile = profiles.get(name)
+    icon = (profile.icon if profile is not None else "") or "📦"
     label = f"{icon} {name}"
     if source and source != "fallback":
         label += f" ({source})"
+    # `agent_type_ambiguous` is on the payload (#134) but the badge does not render it
+    # yet: how a tie is shown is a copy decision, and it belongs to #121 with the rest
+    # of the wording pass.
     return label
 
 

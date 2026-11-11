@@ -22,7 +22,6 @@ from pathlib import Path
 import pytest
 
 from server import config_validation, profiles
-from server.profiles import otelcol
 from server.state import AgentState
 
 FIXTURE = Path(__file__).parent / "fixtures" / "agent_type_golden.json"
@@ -81,25 +80,39 @@ def test_the_move_changed_no_output():
 
 
 class TestComponentTypeDetection:
-    """Moved verbatim from `tests/test_state.py` — `detect_type` now lives in otelcol."""
+    """Moved from `tests/test_state.py`, then from otelcol.py to the dictionary (#134).
+
+    The table itself is data now (`components.sections` / `components.known` in
+    `server/profiles/data/otelcol.yaml`); this pins that the compiled lookup still
+    answers the same way.
+    """
+
+    detector = staticmethod(lambda comp_id: profiles.get("otelcol").detect_component_type(comp_id))
 
     def test_receiver(self):
-        assert otelcol.detect_type("receivers/otlp") == "receiver"
+        assert self.detector("receivers/otlp") == "receiver"
 
     def test_processor(self):
-        assert otelcol.detect_type("processors/batch") == "processor"
+        assert self.detector("processors/batch") == "processor"
 
     def test_exporter(self):
-        assert otelcol.detect_type("exporters/otlp") == "exporter"
+        assert self.detector("exporters/otlp") == "exporter"
 
     def test_extension(self):
-        assert otelcol.detect_type("extensions/zpages") == "extension"
+        assert self.detector("extensions/zpages") == "extension"
 
     def test_connector(self):
-        assert otelcol.detect_type("connectors/forward") == "connector"
+        assert self.detector("connectors/forward") == "connector"
+
+    def test_a_bare_known_component(self):
+        assert self.detector("batch") == "processor"
 
     def test_unknown(self):
-        assert otelcol.detect_type("some/random") == "unknown"
+        assert self.detector("some/random") == "unknown"
+
+    def test_a_generic_agent_has_no_component_vocabulary(self):
+        """#134: a profile with no `components` block answers `unknown`, not "collector"."""
+        assert profiles.get("generic").detect_component_type("receivers/otlp") == "unknown"
 
 
 class TestResolutionPrecedence:
@@ -125,11 +138,12 @@ class TestResolutionPrecedence:
                 ConfigFormat(content_types=("application/x-testable",), distinctive=True),
             ),
         )
-        monkeypatch.setattr(profiles.registry, "PROFILES", (otelcol.PROFILE, own_mime))
+        otelcol = profiles.get("otelcol")
+        monkeypatch.setattr(profiles.registry, "PROFILES", (otelcol, own_mime))
         monkeypatch.setattr(
             profiles.registry,
             "_BY_FOLD",
-            {"otelcol": otelcol.PROFILE, "testable": own_mime},
+            {"otelcol": otelcol, "testable": own_mime},
         )
 
         agent = _agent(
@@ -237,7 +251,7 @@ class TestResolutionCache:
         sniffed = []
         # A frozen dataclass field: `replace` is how a test swaps a hook.
         noisy = dataclasses.replace(
-            otelcol.PROFILE, sniff=lambda agent: sniffed.append(agent) or True
+            profiles.get("otelcol"), sniff=lambda agent: sniffed.append(agent) or True
         )
         monkeypatch.setattr(profiles.registry, "PROFILES", (noisy, profiles.FALLBACK))
         agent = _agent()
@@ -441,7 +455,7 @@ class TestRegistrySurface:
     def test_generic_cannot_be_inferred(self):
         """Only a pin or the fallback may select it — no matcher, no sniffer."""
         generic = profiles.get("generic")
-        assert generic.description_matchers == ()
+        assert generic.identity_match_any == ()
         assert generic.sniff is None
         assert generic.config_formats == ()
 

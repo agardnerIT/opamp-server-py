@@ -65,7 +65,16 @@ Homepage = "https://github.com/agardnerIT/opamp-server-py"
 Issues = "https://github.com/agardnerIT/opamp-server-py/issues"
 
 [tool.setuptools]
-packages = ["client", "cli", "server", "proto", "mcp_server"]
+# Discovered, not listed: `server.profiles` (#118/#117h) is a subpackage carrying a
+# dictionary of YAML files, and a hand-maintained `packages = [...]` list quietly
+# omitted it from a non-editable install. `pip install -e .` hid that; a wheel would
+# have shipped a server that cannot import its own profiles.
+packages = { find = { include = ["client*", "cli*", "server*", "proto*", "mcp_server*"] } }
+
+[tool.setuptools.package-data]
+# The profile dictionary is the source of truth for agent types (#117h): a wheel that
+# drops these files serves every agent as `generic`.
+"server.profiles" = ["data/*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

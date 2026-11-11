@@ -3095,14 +3095,14 @@ class AgentState:
         ]
 
     def _detect_type(self, comp_id: str) -> str:
-        """Deprecated alias for `server.profiles.otelcol.detect_type` (#118).
+        """Deprecated alias for `AgentProfile.detect_component_type` (#118, #134).
 
         Kept because it was semi-public and the move is meant to be invisible; the
-        collector knowledge itself lives in the profile.
+        collector knowledge itself now lives in this agent's profile, so a generic
+        agent (which declares no component concept) answers `unknown` instead of
+        borrowing the collector's vocabulary.
         """
-        from server.profiles import otelcol
-
-        return otelcol.detect_type(comp_id)
+        return self.profile_resolution().profile.detect_component_type(comp_id)
 
     # -- #118: which profile is this agent? -------------------------------
 
@@ -3126,10 +3126,20 @@ class AgentState:
         """
         resolution = self.profile_resolution()
         profile = resolution.profile
+        # #134: a tie is a decision nobody can audit. First-match-wins is still how a
+        # resolution is *made*, but it is no longer silent — and after #134 a wrong
+        # profile is a file someone dropped in, so "it could have been either" is a
+        # fact an operator needs before pinning or pushing.
+        ambiguous = None
+        if resolution.source != "pinned":
+            matches = profiles.candidates_cached(self)
+            if len(matches) > 1:
+                ambiguous = list(matches)
         return {
             "agent_type": profile.name,
             "agent_type_source": resolution.source,
             "agent_type_pinned": self.agent_type,
+            "agent_type_ambiguous": ambiguous,
             "agent_type_warning": (
                 None
                 if profile.validates_structure

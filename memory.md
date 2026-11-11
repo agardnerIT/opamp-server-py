@@ -776,3 +776,32 @@ host *was* fixed: `osquery.config_plugin=opamp`, exactly one `battery_stats` in
   prompt.
 - **Kept:** the Table / By Property view radio. Removing it was floated and rejected by
   the user — grouping by property is a separate question from SQL search.
+
+## #131 — the agent config box proposes, it does not push (closed, d52835a)
+
+- **Where:** the "Configuration" panel in `ui/pages/1_Agents.py`. The gate is
+  `ui/config_view.edit_blocker()`: `/health`'s `config_push.enabled` **and** the agent's
+  `capabilities & 0x2` (`AcceptsRemoteConfig`). `/health`, not `/config/posture`: the
+  latter needs `viewer`, and this screen renders for an unsigned viewer — and an unknown
+  posture must read as "push off", or the editor's submit is a 404.
+- **The box holds `editable_config()` (decoded, verbatim), never `display_config_yaml()`.**
+  The display view adds a telemetry pipeline the agent never ran; proposing that would
+  hand the agent a document it does not have. Verbatim because re-formatting YAML
+  rewrites what gets pushed.
+- **`ui.config_view.config_map()` is the only `config_map` shape** (the Remote Config page
+  delegates to it now): key = the object name the agent reported, plus its content type
+  and role. Propose is `POST /config/revisions` with `scope {"agents": [id]}`;
+  approve/rollout stay on the Remote Config page, so there is no second approve button.
+- **Redaction is `server.redaction.contains_redaction()` in both pages.** The Remote
+  Config page's local `"<redacted>" in body` test missed the #98 document marker and
+  base64-of-either — which is exactly the shape a copy out of a raw report has.
+- **Two fixtures lied, both fixed:** `FakeServer._agent_detail` built a fresh
+  `fake_agent()` (capabilities 0x2 whatever the listing row said), and the fake `/health`
+  published `config_push` without `enabled` — so the editor never appeared and the
+  "capabilities" tests passed for the wrong reason.
+- **Golden fence:** both closed-panel captures stayed byte-identical; `generic_editable`
+  is a new third case (`capture(..., show_config=True)`).
+- Left alone for #121: the *second* config block, inside the "No telemetry received yet"
+  branch, is still read-only code (it only renders for a profile that declares telemetry
+  and reports none).
+- Suite after: **1636 passed**.

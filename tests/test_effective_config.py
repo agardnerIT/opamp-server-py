@@ -614,3 +614,68 @@ class TestTheRedactionGuardIsTheServersOwn:
         assert not is_redacted("receivers:\n  otlp: {}\n")
         assert not is_redacted("")
         assert not is_redacted(None)
+
+
+class TestTheEditorSaysWhoseFormatItIsEditing:
+    """#121 deliverable 4: the page must not promise checks it cannot run.
+
+    The server stores, relays and displays a body it does not interpret, and the UI half
+    of that fact is this paragraph. It is `None` for a profile the server *does* interpret
+    — an otelcol fleet must gain no prose, or the golden capture moves for no reason.
+    """
+
+    def _profiles(self):
+        from server import profiles
+
+        return profiles
+
+    def test_an_interpreted_profile_gets_no_note(self):
+        from ui.config_view import editor_note, target_profiles
+
+        rows = [{"agent_type": "otelcol", "id": "a"}, {"agent_type": "otelcol", "id": "b"}]
+
+        assert [profile.name for profile in target_profiles(rows)] == ["otelcol"]
+        assert editor_note(target_profiles(rows)) is None
+
+    def test_a_profile_the_server_does_not_interpret_says_so(self):
+        from ui.config_view import editor_note, target_profiles
+
+        note = editor_note(target_profiles([{"agent_type": "generic"}]))
+
+        assert "`generic`" in note
+        assert "opaque" in note
+        # The distinction the whole deliverable exists for: well-formed is not valid.
+        assert "not that it is valid for this agent" in note
+
+    def test_a_mixed_selection_names_both_sides(self):
+        from ui.config_view import editor_note, target_profiles
+
+        note = editor_note(
+            target_profiles([{"agent_type": "otelcol"}, {"agent_type": "generic"}])
+        )
+
+        assert "mixes profiles" in note
+        assert "`otelcol`" in note and "`generic`" in note
+        assert "may be noise" in note
+
+    def test_no_selection_and_unknown_names_add_nothing(self):
+        from ui.config_view import editor_note, target_profiles
+
+        assert target_profiles([]) == []
+        assert target_profiles([{"agent_type": "no-such-profile"}]) == []
+        assert target_profiles([{}]) == []
+        assert editor_note([]) is None
+        assert editor_note(None) is None
+
+    def test_the_declaration_is_the_profiles_own(self):
+        """A label the profile declares, never a MIME type the page invented."""
+        from ui.config_view import declared_content_types, editor_note, target_profiles
+
+        otelcol = self._profiles().get("otelcol")
+        # `""` is "undeclared" in a report and useless as a selectbox label.
+        assert "" not in declared_content_types(otelcol)
+        assert "text/yaml" in declared_content_types(otelcol)
+
+        generic = self._profiles().get("generic")
+        assert declared_content_types(generic) == ()
+        assert "declares no content type" in editor_note([generic])

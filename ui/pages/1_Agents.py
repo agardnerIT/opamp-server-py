@@ -7,7 +7,13 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from ui.sql_search import sql_search
-from ui.config_view import config_map, edit_blocker, editable_config, is_redacted
+from ui.config_view import (
+    config_map,
+    edit_blocker,
+    editable_config,
+    editor_note,
+    is_redacted,
+)
 from ui.shared import (
     AGENT_TOKEN_ENV,
     EXPIRY_CHOICES,
@@ -143,7 +149,7 @@ def _config_language(profile):
 _PROPOSAL_PREFIX = "agent_proposal_"
 
 
-def _propose_config(agent_id, editable):
+def _propose_config(agent_id, editable, profile=None):
     """#131: the config box is an **editor** when a change here is a proposal, not a push.
 
     Two conditions decide it, both in `ui.config_view.edit_blocker`: the server can push
@@ -164,6 +170,12 @@ def _propose_config(agent_id, editable):
         "**Proposing changes nothing on the agent**: the server stores a revision and an "
         "approver decides, exactly as on the Remote Config page."
     )
+    # #121: the editor says whose format it is editing, and for a profile the server does
+    # not interpret it says so — the same paragraph the Remote Config page shows, from one
+    # implementation. `None` for a collector, whose structured rules do apply.
+    format_note = editor_note([profile]) if profile is not None else None
+    if format_note:
+        st.info(format_note)
     body = st.text_area(
         "Config body",
         value=editable.body,
@@ -877,7 +889,7 @@ if agent_id_param:
         editable = editable_config(effective_config)
         blocker = edit_blocker(config_push_state(health_data), detailed_agent)
         if editable is not None and blocker is None:
-            _propose_config(selected_id, editable)
+            _propose_config(selected_id, editable, profile)
         else:
             if cleaned_yaml:
                 st.code(cleaned_yaml, language=_config_language(profile), height=400)

@@ -132,6 +132,9 @@
           "label": "Download Config"
         }
       ],
+      "info": [
+        "The server does **not** interpret the configuration of `generic`: it stores, relays and shows this body as **opaque text**. Validation still runs the format pipeline, so a pass means the body is well-formed \u2014 not that it is valid for this agent. Its profile declares no content type, so the body is opaque whatever it is."
+      ],
       "input": [
         {
           "kind": "text_input",

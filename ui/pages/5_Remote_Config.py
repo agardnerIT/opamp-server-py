@@ -50,7 +50,9 @@ from ui.config_view import (  # noqa: E402
     EDITOR_CONTENT_TYPES,
     config_map,
     editable_config,
+    editor_note,
     is_redacted,
+    target_profiles,
 )
 
 render_sidebar()
@@ -447,6 +449,14 @@ if prefill_id:
         args=(prefill_id,),
     )
 
+# #121 (deliverable 4): the editor says whose format it is editing. For a profile the
+# server does not interpret (anything but a collector today) the body is stored and
+# relayed as opaque text, and a validation pass means well-formed — not valid for *that*
+# agent. `None` for an all-interpreted selection, so an otelcol fleet sees no new prose.
+format_note = editor_note(target_profiles(agents))
+if format_note:
+    st.info(format_note)
+
 prefill_message = st.session_state.pop(PREFILL_KEY, None)
 if prefill_message:
     level, text = prefill_message
@@ -492,6 +502,16 @@ if st.button("Validate", type="secondary"):
 
 verdict = st.session_state.get("rc_verdict") or {}
 if verdict:
+    # #121: the verdict ships the profile it was produced under (`profile`,
+    # `profile_source`), and nothing printed them — so an operator could read "Valid"
+    # without knowing the judgement was a collector's. `mixed` is its own answer.
+    judged_profile = verdict.get("profile") or ""
+    if judged_profile:
+        st.caption(
+            f"Judged under the `{judged_profile}` profile "
+            f"(`{verdict.get('profile_source') or 'unknown'}`) — the server's resolution "
+            "of the target agent, not a guess this page made."
+        )
     if verdict.get("valid"):
         st.success(
             f"Valid — {verdict.get('objects', 1)} object(s), "

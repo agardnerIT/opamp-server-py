@@ -106,6 +106,11 @@ class FakeServer:
         # #131: what `POST /config/revisions` answers with. `None` is the happy path; a
         # dict is the 422 `detail` the server sends for a config that fails validation.
         self.propose_refusal = None
+        # #121: the verdict's own attribution — the profile it was judged under, and the
+        # warnings the server added (a `generic` target gets "structure not checked").
+        self.validate_profile = ""
+        self.validate_profile_source = "sniffed"
+        self.validate_warnings = []
 
     # -- assertions helpers -----------------------------------------------
     def methods_for(self, fragment):
@@ -328,7 +333,9 @@ class FakeServer:
                     "config_hash": "a" * 64,
                     "details": [{"path": "service.pipelines", "message": "no exporter",
                                  "severity": "error"}] if self.validation_fails else [],
-                    "warnings": [],
+                    "profile": self.validate_profile,
+                    "profile_source": self.validate_profile_source,
+                    "warnings": list(self.validate_warnings),
                     "policy": {"status": "skipped"},
                 },
             )
@@ -2000,3 +2007,136 @@ def test_proposing_unsigned_asks_for_a_password_only_after_the_click(server):
     assert "Admin sign-in required" in texts(app)
     # Nothing was proposed before the password existed.
     assert server.methods_for("/config/revisions") == []
+
+
+# ------------------------------- the editor says whose format it is editing (#121)
+
+
+def test_the_remote_config_editor_says_the_format_is_opaque_for_a_generic_fleet(server):
+    """#121 deliverable 4: no promise of collector checks the server cannot run.
+
+    The profile comes from the *server's* resolution on each `/agents` row; the page only
+    reads it. For a selection the server does not interpret, the editor says the body is
+    stored and relayed as opaque text, and that a pass is not "valid for this agent".
+    """
+    server.agents = [{**fake_agent(), "agent_type": "generic"}]
+
+    app = signed_in(REMOTE_CONFIG_PAGE).run()
+    assert not app.exception, app.exception
+
+    rendered = texts(app)
+    assert "opaque" in rendered
+    assert "`generic`" in rendered
+    assert "declares no content type" in rendered
+
+
+def test_an_otelcol_fleet_gets_no_format_note(server):
+    """The interpreted case must gain no prose — the operator already knows it applies."""
+    server.agents = [{**fake_agent(), "agent_type": "otelcol"}]
+
+    app = signed_in(REMOTE_CONFIG_PAGE).run()
+    assert not app.exception, app.exception
+    assert "opaque" not in texts(app)
+
+
+def test_the_verdict_names_the_profile_it_was_judged_under(server):
+    """`profile`/`profile_source` ship on every verdict and nothing printed them."""
+    server.agents = [{**fake_agent(), "agent_type": "otelcol"}]
+    server.validate_profile = "otelcol"
+    app = signed_in(REMOTE_CONFIG_PAGE, rc_body="receivers: {}\n").run()
+    [button for button in app.button if button.label == "Validate"][0].click().run()
+    assert not app.exception, app.exception
+
+    assert "Judged under the `otelcol` profile" in texts(app)
+    assert "sniffed" in texts(app)
+
+
+def test_the_structure_not_checked_warning_reaches_the_operator(server):
+    """The server's own sentence, rendered — the UI half of #117d's deliverable 4.
+
+    `config_validation._annotate_profile()` puts "the target profile is 'generic': the
+    server does not interpret this agent's configuration…" on the verdict. Nothing tested
+    that the page shows it, so it could have stopped being rendered in silence.
+    """
+    server.agents = [{**fake_agent(), "agent_type": "generic"}]
+    server.validate_profile = "generic"
+    server.validate_warnings = [
+        "the target profile is 'generic': the server does not interpret this agent's "
+        "configuration, so collector-specific findings below may not apply",
+        "if this agent is an OpenTelemetry Collector, pin it with PUT /agent/{id}/type",
+    ]
+    app = signed_in(REMOTE_CONFIG_PAGE, rc_body="opaque: true\n").run()
+    [button for button in app.button if button.label == "Validate"][0].click().run()
+    assert not app.exception, app.exception
+
+    rendered = texts(app)
+    assert "does not interpret this agent's configuration" in rendered
+    assert "Judged under the `generic` profile" in rendered
+
+
+def test_the_agent_detail_editor_says_the_same_thing_for_a_generic_agent(server):
+    """One paragraph, two boxes: the detail editor uses the same implementation."""
+    agent = fake_agent(capabilities=0x2 | 0x4)
+    server.agents = [{**agent, "agent_type": "generic"}]
+    server.effective_config = json.dumps(
+        {"configMap": {"configMap": {"": {"body": "opaque: true\n", "contentType": "text/yaml"}}}}
+    )
+
+    app = open_agent_detail(server, server.agents[0])
+
+    assert config_box(app), [widget.label for widget in app.text_area]
+    rendered = texts(app)
+    assert "opaque" in rendered and "`generic`" in rendered
+
+
+# ------------------------------------------- the copy rule, mechanically (#121)
+
+
+def _contains_collector(app):
+    """Every rendered string, for the "a generic fleet sees no 'collector'" rule."""
+    rendered = []
+    for kind in ("markdown", "caption", "info", "success", "warning", "error",
+                 "header", "subheader", "title"):
+        rendered.extend(str(getattr(element, "value", "")) for element in getattr(app, kind))
+    rendered.extend(str(element.label) for element in app.button)
+    rendered.extend(str(element.label) for element in app.toggle)
+    rendered.extend(str(widget.label) for widget in app.text_input)
+    rendered.extend(str(widget.label) for widget in app.text_area)
+    rendered.extend(str(widget.label) for widget in app.selectbox)
+    rendered.extend(str(element.value) for element in app.code)
+    return "\n".join(rendered)
+
+
+def test_a_generic_fleet_is_never_shown_collector_wording(server):
+    """The copy rule from #121, as a test rather than a promise.
+
+    It is deliberately a grep: the failure mode is one product's vocabulary leaking into
+    chrome that every agent type shares, and that shows up as a word, not a behaviour.
+    """
+    agent = {**fake_agent(), "agent_type": "generic"}
+    server.agents = [agent]
+    server.effective_config = json.dumps(
+        {"configMap": {"configMap": {"": {"body": "opaque: true\n", "contentType": "text/yaml"}}}}
+    )
+
+    detail = open_agent_detail(server, agent)
+    assert "collector" not in _contains_collector(detail).lower()
+
+    listing = run(AGENTS_PAGE, server)
+    assert "collector" not in _contains_collector(listing).lower()
+
+
+def test_a_generic_fleet_is_not_offered_a_collector_config_to_push(server):
+    """The Remote Config page's help is chrome too: it must not describe a collector.
+
+    Its own guidance is the profile's (#121), so a generic-only fleet gets the generic
+    paragraph — which talks about opaque bodies, not about `service.extensions`.
+    """
+    server.agents = [{**fake_agent(), "agent_type": "generic"}]
+
+    app = signed_in(REMOTE_CONFIG_PAGE).run()
+    assert not app.exception, app.exception
+
+    rendered = _contains_collector(app)
+    assert "service.extensions" not in rendered
+    assert "opaque" in rendered

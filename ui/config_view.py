@@ -72,6 +72,11 @@ def _clean_config(value: Any) -> Any:
 
 #: What the push editor can declare. The protocol allows any content-type string;
 #: these are the two the form offers, so a prefill has to land inside them.
+#:
+#: They are the editor's **storage labels**, not a claim about a profile: `text/yaml`
+#: and `application/json` are legal for any profile, and the profile's own declaration
+#: (`config_formats`) is shown beside the box by `editor_note()` below. Turning the
+#: selectbox into the profile's six YAML aliases would be noise, not fidelity (#121).
 EDITOR_CONTENT_TYPES = ("text/yaml", "application/json")
 
 #: `Capabilities.AcceptsRemoteConfig`: the agent takes a config *from the server*.
@@ -143,6 +148,89 @@ def _parsed_report(effective_config: Any) -> Optional[dict]:
         except (TypeError, ValueError):
             return None
     return effective_config if isinstance(effective_config, dict) else None
+
+
+def declared_content_types(profile) -> Tuple[str, ...]:
+    """The content types a profile's own `config_formats` names (#121).
+
+    `()` when the profile declares none, which is the honest answer for a profile that
+    accepts anything as opaque bytes (`generic`) — not an empty declaration, and not a
+    YAML default invented on its behalf.
+    """
+    formats = getattr(profile, "config_formats", ()) or ()
+    found: list = []
+    for fmt in formats:
+        for content_type in getattr(fmt, "content_types", ()) or ():
+            # `""` means "undeclared", which is legal in a report and useless as a label.
+            if content_type and content_type not in found:
+                found.append(content_type)
+    return tuple(found)
+
+
+def target_profiles(rows: Any) -> list:
+    """The distinct profiles a selection of agent rows resolves to (#121).
+
+    `rows` are `GET /agents` entries, each carrying `agent_type` — the *server's*
+    resolution, which this module reads rather than repeats. A selection the server could
+    not attribute (or one with no agents in it) answers `()`: "the page does not know" is
+    a fact to render, never a guess to make.
+    """
+    from server import profiles as registry
+
+    found: dict = {}
+    for row in rows or []:
+        name = (row or {}).get("agent_type")
+        profile = registry.get(name) if isinstance(name, str) else None
+        if profile is not None:
+            found[profile.name] = profile
+    return [found[name] for name in sorted(found)]
+
+
+def editor_note(profiles: Any) -> Optional[str]:
+    """What the push editor says about the format it is editing (#121, deliverable 4).
+
+    `None` when every selected profile is one the server fully interprets — an `otelcol`
+    fleet, where the editor's collector-shaped wording is already the truth and adding a
+    paragraph would be noise (and would move the golden capture for no gain).
+
+    For anything else the note is the difference between "valid" and "valid for *this*
+    agent": the server stores, relays and displays a body it does not interpret, so a
+    validation pass means the text is well-formed, not that the agent can use it. That is
+    the UI half of #117d; the server-side half is `config_validation._annotate_profile`,
+    which puts the same fact on the verdict as a warning.
+    """
+    profiles = [p for p in (profiles or ()) if p is not None]
+    opaque = [p for p in profiles if not getattr(p, "validates_structure", False)]
+    if not opaque:
+        return None
+
+    names = ", ".join(f"`{profile.name}`" for profile in opaque)
+    if len(opaque) == len(profiles):
+        sentence = (
+            f"The server does **not** interpret the configuration of {names}: it stores, "
+            "relays and shows this body as **opaque text**. Validation still runs the "
+            "format pipeline, so a pass means the body is well-formed — not that it is "
+            "valid for this agent."
+        )
+    else:
+        interpreted = ", ".join(
+            f"`{profile.name}`"
+            for profile in profiles
+            if getattr(profile, "validates_structure", False)
+        )
+        sentence = (
+            f"This selection mixes profiles: {interpreted} is judged as its own product, "
+            f"but the configuration of {names} is not interpreted at all — the body is "
+            "stored and relayed as **opaque text**, so a finding below may be noise for it."
+        )
+
+    declared = sorted({ct for profile in opaque for ct in declared_content_types(profile)})
+    declaration = (
+        "Its profile declares " + ", ".join(f"`{ct}`" for ct in declared) + "."
+        if declared
+        else "Its profile declares no content type, so the body is opaque whatever it is."
+    )
+    return f"{sentence} {declaration}"
 
 
 def config_map(body: str, content_type: str = "text/yaml", role: str = "", name: str = "") -> dict:

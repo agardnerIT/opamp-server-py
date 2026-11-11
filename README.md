@@ -794,6 +794,12 @@ through it, and `ui/config_view.py` renders it):
   keyed by the object name the agent reported — and an approver creates the gated
   rollout on the Remote Config page. A redacted report never reaches the editor, and a
   body carrying a redaction artefact is refused by the server as well as the UI.
+- **A body the server does not interpret says so (#121).** `ui/config_view.editor_note()`
+  prints one paragraph beside both editors: whose profile's format this is, what content
+  types that profile declares, and — when `validates_structure` is false — that the body is
+  stored and relayed as **opaque text**, so a validation pass means well-formed, not valid
+  for that agent. It returns `None` for an all-`otelcol` selection, so the interpreted case
+  gains no prose.
 
 A role is carried end-to-end by the push path too: validated (and bounded to 128
 characters), included in the canonical hash **only when set** — so revisions stored

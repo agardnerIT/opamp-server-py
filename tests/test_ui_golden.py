@@ -75,6 +75,9 @@ def test_the_open_config_panel_renders_exactly_what_was_recorded(golden):
     )
     assert ("text_input", "Note (recorded in the audit log)") in inputs
     assert any(button["label"] == "Propose this change" for button in elements["button"])
+    # #121 deliverable 4: the editor says the body is opaque for a profile the server
+    # does not interpret, and that a pass is not "valid for this agent".
+    assert any("opaque text" in line for line in elements["info"])
     # One account of the config on screen, not a code block beside the editor.
     assert [entry["value"] for entry in elements.get("code", [])] == [ui_golden.AGENT_ID]
 

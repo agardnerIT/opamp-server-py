@@ -1,0 +1,317 @@
+{
+  "generic": {
+    "case": "generic",
+    "elements": {
+      "button": [
+        {
+          "disabled": false,
+          "label": "\u21bb Refresh"
+        },
+        {
+          "disabled": false,
+          "label": "\ud83d\udd0d Check Compliance"
+        },
+        {
+          "disabled": false,
+          "label": "\u2190 Back to Agents"
+        }
+      ],
+      "caption": [
+        "N/A",
+        "\ud83d\udce6 generic (sniffed)",
+        "No capabilities",
+        "None advertised",
+        "None",
+        "No telemetry data received.",
+        "\ud83d\udd12 Checking compliance is audited and needs the `operator` role \u2014 you will be asked to sign in.",
+        "Compliance not yet evaluated. Click 'Check Compliance' to evaluate.",
+        "Toggle to show configuration",
+        "Not signed in \u2014 sign in on the Admin page.",
+        "\ud83d\udfe2 Online",
+        "\ud83d\udfe2 Available",
+        "0"
+      ],
+      "code": [
+        {
+          "language": "python",
+          "value": "abababababababababababababababab"
+        },
+        {
+          "language": "yaml",
+          "value": "receivers:\n  otlp:\n    protocols: {}\nexporters: {}\nservice:\n  extensions:\n  - opamp\n  pipelines:\n    traces:\n      receivers:\n      - otlp\n      exporters:\n      - debug\n  telemetry:\n    metrics:\n      level: basic\n      readers:\n      - periodic:\n          exporter:\n            otlp:\n              protocol: http/protobuf\n              endpoint: http://localhost:4320/v1/metrics\nprocessors:\n  batch: {}"
+        }
+      ],
+      "download_button": [
+        {
+          "file_name": "collector-config.yaml",
+          "label": "Download Config"
+        }
+      ],
+      "expander": [
+        "Show config"
+      ],
+      "markdown": [
+        "### Agent Details",
+        "**Agent ID**",
+        "**Last Heartbeat**",
+        "**Type**",
+        "**Attributes**",
+        "**service.name:** fluent-bit",
+        "**deployment.environment:** production",
+        "**Capabilities**",
+        "**Custom capabilities**",
+        "**Violations**",
+        "**Components**",
+        "No components reported",
+        "**Compliance**",
+        "**Configuration**",
+        "**Admin Session**",
+        "**Server Status**",
+        "**Open Policy Agent Status**",
+        "**Agents Connected**",
+        "**Version**"
+      ],
+      "metric": [
+        {
+          "delta": "",
+          "label": "Status",
+          "value": "Healthy"
+        },
+        {
+          "delta": "",
+          "label": "Components",
+          "value": "0/0 in use"
+        },
+        {
+          "delta": "",
+          "label": "Capabilities",
+          "value": "0"
+        },
+        {
+          "delta": "",
+          "label": "Compliance",
+          "value": "Unknown"
+        }
+      ],
+      "toggle": [
+        {
+          "label": "Show",
+          "value": false
+        },
+        {
+          "label": "Create Slim Distro",
+          "value": false
+        }
+      ]
+    }
+  },
+  "otelcol": {
+    "case": "otelcol",
+    "elements": {
+      "button": [
+        {
+          "disabled": false,
+          "label": "\u21bb Refresh"
+        },
+        {
+          "disabled": false,
+          "label": "\ud83d\udd0d Check Compliance"
+        },
+        {
+          "disabled": false,
+          "label": "\u2190 Back to Agents"
+        }
+      ],
+      "caption": [
+        "N/A",
+        "\ud83e\udde9 otelcol (sniffed)",
+        "No capabilities",
+        "None advertised",
+        "None",
+        "Real-time metrics from the collector's internal telemetry. These show how data flows through the collector.",
+        "Data being received by the collector. Sudden drops may indicate connectivity issues.",
+        "Data being sent to downstream systems. If this drops but inputs are normal, check exporter connectivity.",
+        "Resource usage of the collector process itself.",
+        "All available internal metrics from the collector:",
+        "**otelcol_exporter_sent_log_records:** 1199",
+        "**otelcol_exporter_sent_metric_points:** 56",
+        "**otelcol_exporter_sent_spans:** 340",
+        "**otelcol_process_cpu_seconds:** 12.5",
+        "**otelcol_process_memory_rss:** 314572800",
+        "**otelcol_process_runtime_heap_alloc_bytes:** 209715200",
+        "**otelcol_process_uptime:** 3600",
+        "**otelcol_receiver_accepted_log_records:** 1200",
+        "**otelcol_receiver_accepted_metric_points:** 56",
+        "**otelcol_receiver_accepted_spans:** 340",
+        "**otelcol_receiver_failed_log_records:** 0",
+        "**otelcol_receiver_refused_log_records:** 0",
+        "Last updated: 2026-01-01T00:00:00+00:00",
+        "\ud83d\udd12 Checking compliance is audited and needs the `operator` role \u2014 you will be asked to sign in.",
+        "Compliance not yet evaluated. Click 'Check Compliance' to evaluate.",
+        "No effective config reported by this agent",
+        "Not signed in \u2014 sign in on the Admin page.",
+        "\ud83d\udfe2 Online",
+        "\ud83d\udfe2 Available",
+        "0"
+      ],
+      "code": [
+        {
+          "language": "python",
+          "value": "abababababababababababababababab"
+        }
+      ],
+      "dataframe": [
+        [
+          [
+            "Type",
+            "Name",
+            "Version",
+            "In Use"
+          ],
+          [
+            "Receiver",
+            "otlp",
+            "v0.1",
+            "\u2705"
+          ],
+          [
+            "Processor",
+            "batch",
+            "v0.1",
+            "\u2705"
+          ],
+          [
+            "Exporter",
+            "debug",
+            "v0.1",
+            "\u2705"
+          ],
+          [
+            "Exporter",
+            "otlphttp",
+            "v0.1",
+            "\u274c"
+          ]
+        ]
+      ],
+      "expander": [
+        "Show all raw metrics"
+      ],
+      "markdown": [
+        "### Agent Details",
+        "**Agent ID**",
+        "**Last Heartbeat**",
+        "**Type**",
+        "**Attributes**",
+        "**service.name:** otelcol",
+        "**deployment.environment:** production",
+        "**Capabilities**",
+        "**Custom capabilities**",
+        "**Violations**",
+        "**Collector Telemetry**",
+        "### Data Flow (Inputs)",
+        "### Data Flow (Outputs)",
+        "### Collector Health",
+        "**Components**",
+        "**Compliance**",
+        "**Configuration**",
+        "**Admin Session**",
+        "**Server Status**",
+        "**Open Policy Agent Status**",
+        "**Agents Connected**",
+        "**Version**"
+      ],
+      "metric": [
+        {
+          "delta": "",
+          "label": "Status",
+          "value": "Healthy"
+        },
+        {
+          "delta": "",
+          "label": "Components",
+          "value": "3/4 in use"
+        },
+        {
+          "delta": "",
+          "label": "Capabilities",
+          "value": "0"
+        },
+        {
+          "delta": "",
+          "label": "Compliance",
+          "value": "Unknown"
+        },
+        {
+          "delta": "",
+          "label": "Logs In",
+          "value": "1,200"
+        },
+        {
+          "delta": "",
+          "label": "Traces In",
+          "value": "340"
+        },
+        {
+          "delta": "",
+          "label": "Metrics In",
+          "value": "56"
+        },
+        {
+          "delta": "",
+          "label": "Refused",
+          "value": "0"
+        },
+        {
+          "delta": "",
+          "label": "Logs Out",
+          "value": "1,199"
+        },
+        {
+          "delta": "",
+          "label": "Traces Out",
+          "value": "340"
+        },
+        {
+          "delta": "",
+          "label": "Metrics Out",
+          "value": "56"
+        },
+        {
+          "delta": "",
+          "label": "CPU (sec)",
+          "value": "12.5"
+        },
+        {
+          "delta": "",
+          "label": "Memory (MB)",
+          "value": "300"
+        },
+        {
+          "delta": "",
+          "label": "Heap (MB)",
+          "value": "200"
+        },
+        {
+          "delta": "",
+          "label": "Uptime (sec)",
+          "value": "3,600"
+        }
+      ],
+      "toggle": [
+        {
+          "label": "Show in-use components only",
+          "value": false
+        },
+        {
+          "label": "Show",
+          "value": false
+        },
+        {
+          "label": "Create Slim Distro",
+          "value": false
+        }
+      ]
+    }
+  }
+}

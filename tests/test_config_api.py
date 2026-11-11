@@ -23,7 +23,7 @@ from server import admin_auth, agent_auth, audit, crypto, remote_config
 from tests.conformance.harness import handle_message as reply
 from server.state import AGENT_REGISTRY, SQLiteCredentialStore
 from server.ws import REGISTRY as WS_REGISTRY
-from tests.support import ADMIN, admin_headers
+from tests.support import ADMIN, admin_headers, spec_wire_hash
 
 UID = bytes.fromhex("ab" * 16)
 AGENT_ID = "ab" * 16
@@ -117,7 +117,7 @@ def test_push_then_deliver_then_stop(client, registered):
     # The agent has not seen it: the reply carries the config and our hash.
     first = reply(agent_message())
     assert first.HasField("remote_config")
-    assert first.remote_config.config_hash == bytes.fromhex(body["config_hash"])
+    assert bytes(first.remote_config.config_hash).hex() == spec_wire_hash(first)
     assert first.remote_config.config.config_map[""].body.decode().startswith("receivers:")
 
     # The agent applies it and echoes our hash: no second push.

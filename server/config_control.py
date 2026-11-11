@@ -1073,7 +1073,12 @@ def drift_for(
         return {"drift": False, "reason": "config withdrawn", "missing": []}
 
     ours = record.get("config_hash")
-    if state.last_remote_config_hash == ours:
+    # #136: "the agent reports the desired hash" is a membership test, not equality.
+    # A spec-following agent reports the wire hash (which is now the spec algorithm),
+    # and an agent still echoing a pre-#136 push reports our canonical one.
+    if remote_config.reported_matches(
+        state.last_remote_config_hash, record.get("config_map"), ours
+    ):
         return {"drift": False, "reason": "agent reports the desired hash", "missing": []}
 
     # Cache key: everything the answer depends on. `hash()` of the raw effective

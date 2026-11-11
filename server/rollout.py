@@ -298,6 +298,10 @@ class AgentGate:
 
     agent_id: str
     expected_hash: Optional[str] = None
+    # #136: the hashes that mean "the agent has our config" — the wire (spec) hash we
+    # send plus the canonical one, for an agent echoing a pre-#136 push. `expected_hash`
+    # stays the canonical storage identity that the API and audit rows report.
+    expected_hashes: Tuple[str, ...] = field(default_factory=tuple)
     present: bool = True
     assigned: bool = True  # the rollout's revision is still this agent's assignment
     delivered: bool = False
@@ -321,8 +325,7 @@ class AgentGate:
         return (
             self.reported_status == remote_config.STATUS_APPLIED
             and bool(self.reported_hash)
-            and bool(self.expected_hash)
-            and self.reported_hash == self.expected_hash
+            and self.reported_hash in self._accepted
         )
 
     @property
@@ -331,10 +334,18 @@ class AgentGate:
         return (
             self.poisoned
             and bool(self.reported_hash)
-            and bool(self.expected_hash)
-            and self.reported_hash != self.expected_hash
+            and bool(self._accepted)
+            and self.reported_hash not in self._accepted
             and self.reported_status != remote_config.STATUS_FAILED
         )
+
+    @property
+    def _accepted(self) -> Tuple[str, ...]:
+        """`expected_hashes`, falling back to `expected_hash` for callers that only set
+        that one (tests, and any gate built from a row without a live body)."""
+        if self.expected_hashes:
+            return self.expected_hashes
+        return (self.expected_hash,) if self.expected_hash else ()
 
 
 @dataclass(frozen=True)
@@ -563,6 +574,9 @@ def facts_for(
     return AgentGate(
         agent_id=agent_id,
         expected_hash=expected,
+        expected_hashes=remote_config.accepted_hashes(
+            (record or {}).get("config_map") if ours else None, expected
+        ),
         present=state is not None,
         assigned=ours,
         delivered=bool(ours and record.get("delivered_hash")),
@@ -596,7 +610,7 @@ def agent_state_for(gate: AgentGate, *, delivered: bool) -> str:
     if (
         gate.reported_status == "APPLYING"
         and gate.reported_hash
-        and gate.reported_hash == gate.expected_hash
+        and gate.reported_hash in gate._accepted
     ):
         return "applying"
     if delivered or gate.delivered:

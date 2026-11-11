@@ -16,6 +16,7 @@ Fixtures (`client`, `ws_on`) are in `conftest.py` instead, so they need no impor
 from __future__ import annotations
 
 import base64
+import hashlib
 
 # The shared password every suite uses when it wants "a configured admin". Kept in
 # one place so `admin_headers()` cannot drift from the value a fixture monkeypatched
@@ -37,3 +38,17 @@ def admin_headers(password: str = ADMIN) -> dict:
 
 def bearer(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
+
+
+def spec_wire_hash(message) -> str:
+    """The spec's config hash (hex) for a message that is already on the wire (#136).
+
+    `sha256(AgentConfigMap.SerializeToString(deterministic=True))` — the exact
+    computation a verifying agent performs before it writes the file. Tests assert
+    the wire hash this way rather than against `remote_config.compute_hash`, because
+    the storage hash is a *different* function and conflating them is the defect
+    #136 exists to prevent.
+    """
+    config_map = getattr(message, "remote_config", message)
+    config_map = getattr(config_map, "config", config_map)
+    return hashlib.sha256(config_map.SerializeToString(deterministic=True)).hexdigest()

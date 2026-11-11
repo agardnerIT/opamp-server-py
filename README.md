@@ -893,7 +893,14 @@ How delivery works:
 - The server compares the hash the agent reports (`RemoteConfigStatus.
   last_remote_config_hash`) with its own. Equal → nothing is sent. Different →
   the reply carries `remote_config`. That is the spec's reconciliation rule and
-  what stops a re-push loop.
+  what stops a re-push loop. Two hashes count as "its own" (#136): the one on the
+  wire, `sha256` of the deterministic protobuf serialisation of the config map
+  (this is what the spec means, and what a verifying agent re-derives), and the
+  server's canonical storage hash, which an agent holding a pre-#136 push still
+  echoes back.
+- The hash in API responses and audit rows is the **storage** hash. It is
+  length-prefixed and key-sorted so a stored revision keeps one identity across
+  re-serialisation and the #68 role field; it is deliberately not the wire hash.
 - **Desired state, not a command** (#102, epic #93 D5). The revision is stored
   once and delivered when the agent's hash differs. A live WebSocket connection
   only removes the wait for the next report: the server hands the frame to that

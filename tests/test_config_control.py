@@ -19,6 +19,7 @@ criteria are the only reason the lifecycle exists:
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 
 import pytest
@@ -186,7 +187,9 @@ def test_propose_delivers_nothing_and_approve_delivers_once(client, registered):
 
     first = reply(agent_message())
     assert first.HasField("remote_config")
-    assert first.remote_config.config_hash == bytes.fromhex(body["config_hash"])
+    # #136: the wire carries the spec's hash over the map, not our storage hash.
+    assert bytes(first.remote_config.config_hash).hex() == remote_config.spec_hash(CONFIG)
+    assert body["config_hash"] == remote_config.compute_hash(CONFIG)
 
     # The agent applies it and echoes our hash: no second frame, ever.
     assert poll(AGENT_ID, "APPLIED", remote_config.hash_b64(body["config_hash"])) is False
@@ -242,7 +245,7 @@ def test_rollback_reaches_applied_and_records_the_chain(client, registered):
 
     frame = reply(agent_message())
     assert frame.HasField("remote_config")
-    assert bytes(frame.remote_config.config_hash).hex() == rolled["config_hash"]
+    assert bytes(frame.remote_config.config_hash).hex() == remote_config.spec_hash(CONFIG)
 
     # Acknowledging the rollback ends delivery and the agent reports APPLIED.
     assert poll(AGENT_ID, "APPLIED", remote_config.hash_b64(rolled["config_hash"])) is False
@@ -882,3 +885,102 @@ def test_a_role_on_a_config_object_reaches_the_agent(client, registered):
 
     view = client.get(f"/agent/{AGENT_ID}/config", headers=admin_headers()).json()
     assert view["desired"]["config_map"]["raw"]["role"] == "raw"
+
+
+# --------------------------------------------------------------- the wire hash (#136)
+
+
+def test_the_wire_hash_is_the_spec_definition_not_our_storage_hash(client, registered):
+    """#136: `AgentRemoteConfig.config_hash` is sha256 over the deterministic protobuf
+    serialisation of the `AgentConfigMap`.
+
+    This is the one hash an agent re-derives, and a spec-following agent refuses the
+    push when it disagrees (`RemoteAgentConfigHashMismatchError`). The assertion is
+    made against the message that actually went on the wire, not against a helper.
+    """
+    pending = propose(client).json()
+    approve(client, pending["proposal_id"])
+
+    frame = reply(agent_message())
+    wire = bytes(frame.remote_config.config_hash).hex()
+
+    # Derived here from the message that actually went out, not from a helper: this is
+    # the exact computation `opamp-core` performs before it writes the file.
+    expected = hashlib.sha256(
+        frame.remote_config.config.SerializeToString(deterministic=True)
+    ).hexdigest()
+    assert wire == expected
+    # Genuinely a different function from the storage identity: if the two ever
+    # coincided, the assertion above would pass for the wrong reason.
+    assert wire != pending["config_hash"]
+
+
+def test_the_spec_hash_matches_a_hand_built_config_map():
+    """Pins the algorithm itself, independent of the server's rendering path."""
+    config_map = {
+        "config.yaml": {"body": "receivers: [otlp]\n", "content_type": "text/yaml"},
+        "raw.yaml": {"body": "receivers: [otlp]\n", "content_type": "text/yaml", "role": "raw"},
+    }
+    message = opamp_pb2.AgentConfigMap()
+    for key, entry in config_map.items():
+        message.config_map[key].body = entry["body"].encode()
+        message.config_map[key].content_type = entry["content_type"]
+        message.config_map[key].role = entry.get("role") or ""
+
+    expected = hashlib.sha256(
+        message.SerializeToString(deterministic=True)
+    ).hexdigest()
+    assert remote_config.spec_hash(config_map) == expected
+
+
+def test_an_agent_reporting_the_spec_hash_stops_the_repush(client, registered):
+    """The point of #136: a verifier that applied the config is not re-offered it."""
+    pending = propose(client).json()
+    approve(client, pending["proposal_id"])
+    frame = reply(agent_message())
+    spec = bytes(frame.remote_config.config_hash).hex()
+
+    assert poll(AGENT_ID, "APPLIED", remote_config.hash_b64(spec)) is False
+
+
+def test_an_agent_echoing_a_pre_136_canonical_hash_is_not_repushed_either(client, registered):
+    """An agent holding a config pushed before the fix echoes the canonical bytes it
+    was given. Both mean "the agent has our config" — neither may loop."""
+    pending = propose(client).json()
+    approve(client, pending["proposal_id"])
+    reply(agent_message())
+
+    assert poll(AGENT_ID, "APPLIED", remote_config.hash_b64(pending["config_hash"])) is False
+
+
+def test_drift_takes_the_fast_path_on_the_spec_hash(client, registered):
+    """#136's other half: the fast path was dead for every real agent."""
+    pending = propose(client).json()
+    approve(client, pending["proposal_id"])
+    frame = reply(agent_message())
+
+    state = AGENT_REGISTRY.get(AGENT_ID)
+    state.last_remote_config_hash = bytes(frame.remote_config.config_hash).hex()
+
+    result = config_control.drift_for(remote_config.REGISTRY.get(AGENT_ID), state)
+    assert result["drift"] is False
+    assert result["reason"] == "agent reports the desired hash"
+
+
+def test_a_revision_still_has_one_storage_identity(client, registered):
+    """The storage hash keeps its #68 property: role is covered, and a body without a
+    role hashes the same as before the wire hash changed."""
+    without_role = {
+        "config.yaml": {"body": "exporters: [debug]\n", "content_type": "text/yaml"}
+    }
+    with_role = {
+        **without_role,
+        "raw.yaml": {
+            "body": "exporters: [debug]\n",
+            "content_type": "text/yaml",
+            "role": "raw",
+        },
+    }
+    assert remote_config.compute_hash(without_role) != remote_config.compute_hash(with_role)
+    # ... and the wire hash covers the role too, because the serialised map does.
+    assert remote_config.spec_hash(without_role) != remote_config.spec_hash(with_role)

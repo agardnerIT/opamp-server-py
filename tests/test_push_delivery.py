@@ -36,7 +36,7 @@ from server import admin_auth, agent_auth, crypto, remote_config, ws
 from server.framing import decode_message, encode_message
 from server.state import AGENT_REGISTRY, SQLiteCredentialStore
 from server.ws import REGISTRY, ProcessedMessage
-from tests.support import ADMIN, admin_headers, bearer
+from tests.support import ADMIN, admin_headers, bearer, spec_wire_hash
 
 UID = bytes.fromhex("ab" * 16)
 AGENT_ID = "ab" * 16
@@ -194,7 +194,7 @@ class TestUnsolicitedSend:
             pushed = recv(socket)
             assert pushed.instance_uid == UID
             assert pushed.HasField("remote_config")
-            assert bytes(pushed.remote_config.config_hash).hex() == response.json()["config_hash"]
+            assert bytes(pushed.remote_config.config_hash).hex() == spec_wire_hash(pushed)
 
         assignment = remote_config.REGISTRY.delivery_record(AGENT_ID)
         assert assignment["channel"] == "push"
@@ -581,7 +581,7 @@ class TestWriterAndQueue:
             {},
         )
         assert offer is not None
-        assert bytes(offer.config_hash).hex() == record["config_hash"]
+        assert bytes(offer.config_hash).hex() == spec_wire_hash(offer)
         assignment = remote_config.REGISTRY.delivery_record(AGENT_ID)
         assert assignment["attempts"] == 1
         assert assignment["channel"] == "reply"

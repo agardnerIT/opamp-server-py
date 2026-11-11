@@ -54,7 +54,7 @@ from server.main import app
 from server.state import AGENT_REGISTRY, SQLiteCredentialStore
 from server.ws import CLOSE_POLICY_VIOLATION, REGISTRY as WS_REGISTRY
 from tests.fake_agent import FakeAgent
-from tests.support import ADMIN, admin_headers, basic
+from tests.support import ADMIN, admin_headers, basic, spec_wire_hash
 
 FIXTURES = Path(__file__).parent / "fixtures" / "configs"
 SECRET = "s3cr3t-config-value"
@@ -448,7 +448,7 @@ class TestLifecycle:
 
         assert approve(client, proposal["proposal_id"]).status_code == 200
         delivered = agent.poll_http(client, headers=agent.headers)
-        assert delivered.remote_config.config_hash == bytes.fromhex(proposal["config_hash"])
+        assert bytes(delivered.remote_config.config_hash).hex() == spec_wire_hash(delivered)
 
         # The agent acknowledges; nothing is re-sent.
         assert not agent.poll_http(client, headers=agent.headers).HasField("remote_config")
@@ -495,7 +495,7 @@ class TestLifecycle:
             headers=admin_headers(),
         ).json()
         frame = agent.poll_http(client, headers=agent.headers)
-        assert bytes(frame.remote_config.config_hash).hex() == rolled["config_hash"]
+        assert bytes(frame.remote_config.config_hash).hex() == spec_wire_hash(frame)
         assert not agent.poll_http(client, headers=agent.headers).HasField("remote_config")
 
         detail = client.get(f"/agent/{agent.agent_id}/config", headers=admin_headers()).json()
@@ -918,7 +918,7 @@ class TestEndToEnd:
         assert rolled.json()["config_hash"] == proposal["config_hash"]
 
         frame = agent.poll_http(client, headers=agent.headers)
-        assert bytes(frame.remote_config.config_hash).hex() == rolled.json()["config_hash"]
+        assert bytes(frame.remote_config.config_hash).hex() == spec_wire_hash(frame)
         assert not agent.poll_http(client, headers=agent.headers).HasField("remote_config")
 
         final = client.get(f"/agent/{agent.agent_id}/config", headers=admin_headers()).json()

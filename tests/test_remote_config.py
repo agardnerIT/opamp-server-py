@@ -20,6 +20,7 @@ from server import crypto, remote_config
 from datetime import timedelta
 
 from server.state import SQLiteDesiredConfigStore, utcnow
+from tests.support import spec_wire_hash
 
 AGENT = "ab" * 16
 YAML = "receivers:\n  otlp:\n    protocols:\n      grpc:\n"
@@ -345,7 +346,8 @@ def test_offer_carries_the_config_and_our_hash():
     record = remote_config.REGISTRY.push(AGENT, _map(), "alice")
     offer = remote_config.offer_for(AGENT, _caps())
     assert offer is not None
-    assert offer.config_hash == bytes.fromhex(record["config_hash"])
+    # #136: the wire carries the spec hash, not our storage identity.
+    assert bytes(offer.config_hash).hex() == spec_wire_hash(offer)
     assert offer.config.config_map[""].body == YAML.encode()
     assert offer.config.config_map[""].content_type == "text/yaml"
 
@@ -361,7 +363,8 @@ def test_a_different_reported_hash_gets_an_offer():
     status = {"lastRemoteConfigHash": remote_config.hash_b64("00" * 32)}
     offer = remote_config.offer_for(AGENT, _caps(), status)
     assert offer is not None
-    assert offer.config_hash == bytes.fromhex(record["config_hash"])
+    # #136: the wire carries the spec hash, not our storage identity.
+    assert bytes(offer.config_hash).hex() == spec_wire_hash(offer)
 
 
 def test_withdrawal_is_delivered_once_as_an_empty_map():

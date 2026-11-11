@@ -97,7 +97,8 @@ agent interoperate?" is answerable without reading source (#79).
 | Clause | Status | Pinned by | Notes |
 |---|---|---|---|
 | `OffersRemoteConfig` only while the posture allows push | ✅ | `tests/test_capabilities.py`, `tests/test_posture.py` | Without admin auth, agent auth, TLS upstream, audit and config-at-rest, the bit is absent and `/config/*` answers 403 (#96) |
-| Offer only when the agent's reported hash differs | ✅ | `tests/test_push_delivery.py`, `tests/test_remote_config.py` | The reconciliation MUST is a hash comparison, so the hash is stored (hex) (#81) |
+| Offer only when the agent's reported hash differs | ✅ | `tests/test_push_delivery.py`, `tests/test_remote_config.py` | The reconciliation MUST is a hash comparison; the hash is stored hex (#81) and a report matching either the wire or the storage hash settles it (#136) |
+| `config_hash` is the hash the spec defines | ✅ | `test_the_wire_hash_is_the_spec_definition_not_our_storage_hash`, `test_the_spec_hash_matches_a_hand_built_config_map` | `sha256(AgentConfigMap.SerializeToString(deterministic=True))`, base64 on the wire. A verifying agent re-derives it and refuses the push on a mismatch, so our canonical storage hash is not sent (#136) |
 | `RemoteConfigStatus{APPLIED, APPLYING, FAILED, UNSET}` | ✅ | `test_a_remote_config_status_is_recorded_with_its_hash` | Exposed as the wire enum name on `GET /agent/{id}` |
 | No `AcceptsRemoteConfig` → no offer | ✅ | `tests/test_push_delivery.py` | A supervisor that would ignore the config is not sent one |
 | Two-phase propose → approve → apply before anything is delivered | ⚠️ extension | `tests/test_config_control.py`, `tests/test_rollout.py` | The spec has no approval concept; this server refuses to be a fleet-takeover tool (#99, #103) |

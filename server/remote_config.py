@@ -4,16 +4,28 @@ The protocol half of remote configuration, kept out of `server.main` so it can b
 tested without an ASGI app and so the API, the CLI and the MCP server all describe
 a config the same way.
 
-**Hashing.** Spec §Calculating Hashes says the *server* chooses the method ("The
-Server MUST choose a strong hash calculation method… The hashes are opaque to the
-Agent, the Agent never calculates hashes, it only stores and compares them"). The
-OpAMP Supervisor verifies this: it persists the `AgentRemoteConfig` it received and
-echoes `remoteConfig.GetConfigHash()` back in `RemoteConfigStatus.LastRemoteConfigHash`
-— it never re-derives it. So the only requirements are determinism and collision
-resistance, not a byte-for-byte match with another implementation. This module
-hashes a **length-prefixed, key-sorted** encoding of the config map (SHA-256), which
-is unambiguous: two different maps cannot serialise to the same bytes, and field
-order in the request body cannot change the hash.
+**Hashing.** Two hashes, and the difference is the point of #136.
+
+*Storage* hash (`compute_hash`): the server's own length-prefixed, key-sorted encoding
+of the config map (SHA-256, hex). Length prefixes make it unambiguous — two different
+maps cannot serialise to the same bytes — and the role component is appended only when
+set, so a revision stored before #68 keeps its identity. It keys revisions, audit rows,
+drift caching and the "is this the same config" question inside the server.
+
+*Wire* hash (`spec_hash`): `sha256(AgentConfigMap.SerializeToString(deterministic=True))`,
+which is what `opamp.proto` means by `AgentRemoteConfig.config_hash`, base64 on the wire.
+It is **not** free choice: spec-following agents re-derive it, and a mismatch is a
+failed delivery (`opamp-core` raises `RemoteAgentConfigHashMismatchError` before writing
+the file). Our canonical encoding is not the protobuf serialisation, so sending it made
+every verifying agent refuse the push while the server still showed its own hash — a
+stalled rollout that looked delivered (#136). The old argument that the spec lets the
+server pick any method is wrong for verifying agents; the hash is opaque only to those
+that echo it back unexamined.
+
+An agent may therefore report either hash: a spec-following one reports the wire hash,
+and one still running against a pre-#136 push echoes the canonical bytes it was given.
+Every comparison goes through `reported_matches()`, so both mean "the agent has our
+config" and neither causes a re-push loop.
 
 **Validation** is the pipeline in `server.config_validation` (#100): shape and size,
 bounded parse, structural rules, protected invariants, inventory warnings and the
@@ -78,6 +90,14 @@ from server.framing import MessageTooBig, encode_message, message_limit
 from server.state import AGENT_REGISTRY, SQLiteDesiredConfigStore, utcnow
 
 HASH_ALGORITHM = "sha256"
+
+# canonical hash -> spec hash, for `wire_hash()`. A map's canonical hash identifies it
+# uniquely, so an entry cannot go stale; the size cap is only so a long-lived process
+# with many revisions does not grow without bound.
+_WIRE_HASH_CACHE: Dict[str, str] = {}
+
+# revision_id -> spec hash, for `prior_accepted_hashes()` (T9 auto-revert detection).
+_PRIOR_WIRE_HASHES: Dict[str, Optional[str]] = {}
 HASH_DOMAIN = b"opamp-config-map-v1\x00"
 
 # 1 MiB by default. A collector config is kilobytes; the cap exists so a typo
@@ -230,6 +250,96 @@ def compute_hash(config_map: Dict[str, Dict[str, Any]]) -> str:
             digest.update(struct.pack(">I", len(part)))
             digest.update(part)
     return digest.hexdigest()
+
+
+def spec_hash(config_map: Dict[str, Dict[str, Any]]) -> str:
+    """The spec's hash of this config map: SHA-256 over its deterministic protobuf
+    serialisation, hex (#136).
+
+    This is what goes on the wire. Deterministic serialisation pins field order and
+    map ordering, so the same map always serialises to the same bytes — which is the
+    only canonicalisation the spec relies on, and the one agents re-derive.
+    """
+    message = build_config_map(config_map)
+    return hashlib.sha256(message.SerializeToString(deterministic=True)).hexdigest()
+
+
+def wire_hash(config_map: Dict[str, Dict[str, Any]]) -> Optional[str]:
+    """`spec_hash`, memoised on the canonical hash (which identifies a map uniquely).
+
+    Called from the message path — the delivery gate asks it on every inbound
+    message — and a collector config is kilobytes, so this keeps a hash of a body
+    that has not changed from costing a SHA-256 per heartbeat.
+    """
+    key = compute_hash(config_map)
+    cached = _WIRE_HASH_CACHE.get(key)
+    if cached is not None:
+        return cached
+    value = spec_hash(config_map)
+    if len(_WIRE_HASH_CACHE) >= 512:
+        _WIRE_HASH_CACHE.clear()
+    _WIRE_HASH_CACHE[key] = value
+    return value
+
+
+def accepted_hashes(
+    config_map: Optional[Dict[str, Dict[str, Any]]], stored_hash: Optional[str]
+) -> Tuple[str, ...]:
+    """Every reported hash (our hex form) that means "the agent has this config".
+
+    The wire hash, plus the canonical one for an agent still echoing a pre-#136 push,
+    plus the stored hash when the body is not in hand (a rollout row without a live
+    assignment). Empty when neither is known.
+    """
+    values: List[str] = []
+    if stored_hash:
+        values.append(str(stored_hash).lower())
+    # `is not None`, not truthiness: a withdrawn revision is an *empty* config map and
+    # its spec hash is a real hash the agent reports back (#136).
+    if config_map is not None:
+        try:
+            values.append(wire_hash(config_map) or "")
+        except Exception:  # a body we cannot serialise is not a hash we can accept
+            pass
+    return tuple(dict.fromkeys(value for value in values if value))
+
+
+def reported_matches(
+    reported: Optional[str],
+    config_map: Optional[Dict[str, Dict[str, Any]]],
+    stored_hash: Optional[str],
+) -> bool:
+    """Does this reported hash mean the agent is running the config we want?"""
+    if not reported:
+        return False
+    return str(reported).lower() in accepted_hashes(config_map, stored_hash)
+
+
+def prior_accepted_hashes(agent_id: str, limit: int = 20) -> set:
+    """Every hash that means "one of our configs" for this agent (T9 detection).
+
+    Canonical hashes are one query. The spec hashes of *previous* revisions need their
+    bodies, so each is decoded once and memoised on `revision_id` — the revision's
+    hash is a pure function of it, so the entry cannot go stale. Called only in
+    `note_status`'s suspicious branch: a status report that matches settles earlier.
+    """
+    accepted = set(REGISTRY.store.hashes_for_agent(agent_id))
+    for row in REGISTRY.store.history(agent_id, limit=limit):
+        revision_id = row.get("revision_id")
+        if not revision_id:
+            continue
+        if revision_id in _PRIOR_WIRE_HASHES:
+            cached = _PRIOR_WIRE_HASHES[revision_id]
+        else:
+            try:
+                config_map = REGISTRY.decode_revision(revision_id)
+            except Exception:  # unreadable body: canonical membership still applies
+                config_map = None
+            cached = wire_hash(config_map) if config_map is not None else None
+            _PRIOR_WIRE_HASHES[revision_id] = cached
+        if cached:
+            accepted.add(cached)
+    return accepted
 
 
 def hash_bytes(config_hash: str) -> bytes:
@@ -824,7 +934,9 @@ def decision_for(
     3. the assignment is deliverable (see :func:`deliverable`);
     4. the revision has a body — delivering an empty map would wipe the agent;
     5. the agent's reported hash differs from ours — the spec's MUST, and what stops
-       a server from re-pushing a config the agent already has;
+       a server from re-pushing a config the agent already has. "Ours" is a set of
+       two (#136): the wire hash a verifying agent re-derives, and the canonical one
+       an agent holding a pre-#136 push echoes back;
     6. the delivery budget is not exhausted — an agent that never reports back is
        surfaced as `unconfirmed` instead of being re-pushed forever.
 
@@ -863,7 +975,7 @@ def decision_for(
                              reason="revision_has_no_body")
 
     reported = hash_from_wire((status or {}).get("lastRemoteConfigHash"))
-    if reported == config_hash:
+    if reported_matches(reported, record.get("config_map"), config_hash):
         return OfferDecision(False, revision_id=revision_id, config_hash=config_hash,
                              reason="reported_hash_matches")
 
@@ -908,7 +1020,12 @@ def offer_for(
 
     offer = AgentRemoteConfig()
     offer.config.CopyFrom(build_config_map(dict(decision.config_map)))
-    offer.config_hash = hash_bytes(decision.config_hash or "")
+    # #136: the spec's hash, not ours. A verifying agent re-derives this from the map
+    # above and refuses the push when it disagrees; the canonical hash stays the
+    # storage/audit identity and is still accepted if an agent echoes it (pre-#136).
+    offer.config_hash = hash_bytes(
+        wire_hash(dict(decision.config_map)) or decision.config_hash or ""
+    )
     REGISTRY.record_delivery(agent_id, decision.revision_id or "", channel=ws.CHANNEL_REPLY)
     return offer
 
@@ -944,7 +1061,9 @@ def push_frame(
     response.instance_uid = bytes.fromhex(agent_id)
     response.capabilities = server_capabilities()
     response.remote_config.config.CopyFrom(build_config_map(dict(decision.config_map)))
-    response.remote_config.config_hash = hash_bytes(decision.config_hash or "")
+    response.remote_config.config_hash = hash_bytes(
+        wire_hash(dict(decision.config_map)) or decision.config_hash or ""
+    )
     # Last line of defence (#96/#102): nothing may put remote_config on the wire
     # while the posture says config push is not allowed.
     if posture.scrub_remote_config(response) or not response.HasField("remote_config"):
@@ -1304,28 +1423,29 @@ def note_status(
         return None
     ours = record["config_hash"]
     reported = hash_from_wire(reported_hash_b64)
+    # #136: the agent may report the wire (spec) hash or, if it is still echoing a
+    # pre-#136 push, our canonical one. Both mean "this is our config".
+    matches_ours = reported_matches(reported, record.get("config_map"), ours)
 
     # #102: delivered → APPLIED, measured once per revision on the transition. A
     # heartbeat repeating APPLIED must not keep observing the same latency.
     if (
         status_name == STATUS_APPLIED
-        and reported == ours
+        and matches_ours
         and record.get("last_status") != STATUS_APPLIED
     ):
         _observe_delivery_latency(record)
 
-    if status_name == STATUS_FAILED and reported == ours:
+    if status_name == STATUS_FAILED and matches_ours:
         detail = error_message or "agent reported FAILED without an error message"
         return _poison(agent_id, record, "failed", detail)
 
     delivered = bool(record.get("delivered_hash")) and record.get("delivered_hash") == ours
-    mismatched = bool(reported) and reported != ours
+    mismatched = bool(reported) and not matches_ours
 
     # The history lookup is inside the suspicious branch on purpose: it is a SQLite
     # read, and `note_status` runs on every status report (#109).
-    if mismatched and delivered and reported in set(
-        REGISTRY.store.hashes_for_agent(agent_id)
-    ):
+    if mismatched and delivered and reported in prior_accepted_hashes(agent_id):
         # The agent is back on a config of ours that is not the current one.
         delivered_at = _delivered_at(record)
         waited = (
@@ -1344,7 +1464,7 @@ def note_status(
     # #135: the agent has our config, so "never acknowledged" is no longer true.
     # Clear the spent budget (and the error message describing it) here rather than
     # waiting for a new revision: the recovery path must not be "propose again".
-    if status_name == STATUS_APPLIED and reported == ours:
+    if status_name == STATUS_APPLIED and matches_ours:
         if record.get("unconfirmed") or int(record.get("attempts") or 0):
             REGISTRY.reset_delivery_budget(agent_id)
 

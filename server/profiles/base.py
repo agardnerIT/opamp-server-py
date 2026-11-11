@@ -182,16 +182,24 @@ class SniffSpec:
 
 @dataclass(frozen=True)
 class TelemetrySpec:
-    """Which internal metrics this profile's agents are expected to report (#122).
+    """Which internal metrics this profile's agents report, and what to call them (#122).
 
     `metric_prefix` is the coarse declaration (`otelcol_*` -> `otelcol_`);
     `metric_map` is the escape hatch for a profile whose metric names carry no common
     prefix. A profile with no `telemetry` at all is saying "this agent reports nothing
     to this server", which is a different sentence from "nothing arrived yet".
+
+    `title` / `caption` / `raw_caption` are the words the agent-detail page uses
+    (#121). They are data for the same reason `panels` are: "Collector Telemetry" is
+    correct for a collector and wrong for every other agent, and the UI may not keep a
+    product's vocabulary in Python.
     """
 
     metric_prefix: str = ""
     metric_map: Mapping[str, str] = field(default_factory=dict)
+    title: str = "Telemetry"
+    caption: str = ""
+    raw_caption: str = ""
 
     def owns(self, name: Any) -> bool:
         """True when `name` is one of this profile's metrics."""
@@ -202,7 +210,11 @@ class TelemetrySpec:
         return bool(self.metric_prefix) and name.startswith(self.metric_prefix)
 
     def to_dict(self) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {}
+        payload: Dict[str, Any] = {
+            "title": self.title,
+            "caption": self.caption,
+            "raw_caption": self.raw_caption,
+        }
         if self.metric_prefix:
             payload["metric_prefix"] = self.metric_prefix
         if self.metric_map:
@@ -323,7 +335,13 @@ class AgentProfile:
     #: Bootstrap snippet template, compiled into `snippet`. Data, for the API.
     snippet_template: str = ""
     #: Bootstrap snippet builder: `(endpoint, token) -> str`.
-    snippet: Optional[Callable[[str, str], str]] = None
+    snippet: Optional[Callable[..., str]] = None
+    #: The profile's *whole config* for a new agent, compiled (#121). Empty when the
+    #: profile has no such artefact, in which case `bootstrap_snippet` is the answer.
+    onboarding_template: str = ""
+    onboarding: Optional[Callable[..., str]] = None
+    #: Per-profile prose for the Help page. The product's own caveats, not the UI's.
+    guidance: str = ""
     #: Which profile's snippet to show when the agent is not known yet (token minting
     #: precedes the first connection). At most one profile may say yes; the loader
     #: enforces it, and `generic` is used when nobody does.
@@ -381,6 +399,36 @@ class AgentProfile:
             return ""
         return self.snippet(endpoint, token)
 
+    def onboarding_snippet(
+        self,
+        endpoint: str,
+        token: str,
+        *,
+        auth: bool = True,
+        agent_name: str = "",
+    ) -> str:
+        """The profile's whole config for a new agent, or `""` when it has none.
+
+        `auth` is the server's mode (#124): with it the credential block is rendered,
+        without it the config is exactly what an `off` server always showed. An empty
+        return is not a failure — it means "this product's configuration is not
+        something this server can write", and the caller shows the bootstrap block
+        instead of inventing one (#121).
+        """
+        if self.onboarding is None:
+            return ""
+        return self.onboarding(endpoint, token, auth=auth, agent_name=agent_name)
+
+    @property
+    def has_components(self) -> bool:
+        """True when a component inventory is a concept this profile has at all.
+
+        The UI asks this before drawing an empty table: "no components reported" is
+        information for a collector, and meaningless for an agent whose product has
+        no components to report (#121).
+        """
+        return self.components_spec is not None
+
     def detect_component_type(self, component_id: str) -> str:
         """Component type from its id (`receivers/otlp` -> `receiver`), or `unknown`.
 
@@ -417,6 +465,7 @@ class AgentProfile:
             "icon": self.icon,
             "priority": self.priority,
             "summary": self.summary,
+            "guidance": self.guidance,
             "validates_structure": self.validates_structure,
             "content_types": sorted(
                 {ct for fmt in self.config_formats for ct in fmt.content_types}
@@ -426,6 +475,8 @@ class AgentProfile:
             "reports_telemetry": self.telemetry is not None,
             "telemetry": self.telemetry.to_dict() if self.telemetry else None,
             "detectable": bool(self.identity_match_any or self.sniff),
+            "has_components": self.has_components,
+            "has_onboarding_snippet": self.onboarding is not None,
             "identity": {
                 "match_any": [rule.to_dict() for rule in self.identity_match_any],
                 "sniff": self.sniff_spec.to_dict() if self.sniff_spec else None,

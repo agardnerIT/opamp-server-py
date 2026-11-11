@@ -14,14 +14,14 @@ order, grouped by kind: text, metrics, tables, buttons, code — for two agents:
     otelcol   a collector: internal telemetry arrives, components are reported, and
               the twelve hardcoded `otelcol_*` reads light up.
     generic   a non-collector: no telemetry, no components, one effective config.
-              This is the case #121 has to fix, so the capture is the *before*
-              picture: it records today's wrong behaviour (a `collector-config.yaml`
-              download and OTel wording for an agent that is not a collector) so
-              Phase 3's change shows up as a deliberate diff, not a silent one.
+              This is the case #121 fixed, so the capture changed once, on purpose:
+              before Phase 3 it recorded a `collector-config.yaml` download and OTel
+              wording on an agent that is not a collector; what it records now is the
+              *absence* of both, plus the profile's own sentence about telemetry.
 
-`otelcol` is the fence. If that half of `tests/fixtures/agent_detail_golden.json`
-changes, the move was not a move. The `generic` half is expected to change once, in
-Phase 3, and the diff is the review.
+`otelcol` is the fence: its half of `tests/fixtures/agent_detail_golden.json` stayed
+byte-identical across the move, which is "otelcol renders unchanged" made checkable.
+The `generic` half changed once, in Phase 3, and the diff was the review.
 
 What it is not
 --------------
@@ -313,15 +313,18 @@ def elements(app) -> dict:
     return captured
 
 
-def capture(case: str, page: Path | None = None) -> dict:
+def capture(case: str, page: Path | None = None, server=None) -> dict:
     """Render one agent-detail view and return what it said.
 
     `page` exists so the fence can be proved: `tests/test_ui_golden.py` runs the same
-    capture against a copy of the page with one metric label renamed, and requires the
-    result to differ. A capture that ignores text would pass that mutation, and would
-    be a snapshot of nothing.
+    capture with one metric label renamed and requires the result to differ. A capture
+    that ignores text would pass that mutation, and would be a snapshot of nothing.
+
+    `server` lets a test point the same capture at an agent of a *different* profile
+    (one loaded from a tmp dictionary), which is how "a new agent type needs no UI
+    release" is checked rather than asserted in a docstring.
     """
-    server = _server(case)
+    server = server or _server(case)
     with _transport(server):
         app = AppTest.from_file(str(page or AGENTS_PAGE), default_timeout=60)
         app.query_params["agent_id"] = AGENT_ID
@@ -336,8 +339,14 @@ def capture_all() -> dict:
 
 
 def texts(captured: dict) -> str:
-    """Every string in a capture, flattened — for "this wording is gone" assertions."""
-    return json.dumps(captured, indent=2, sort_keys=True)
+    """Every string in a capture, flattened — for "this wording is gone" assertions.
+
+    `ensure_ascii=False` on purpose: a JSON-escaped surrogate pair is not the text
+    an operator reads, and a test asserting on the escape would pass while the glyph
+    on screen was wrong (the badge's icon comes from the profile, so it is worth
+    asserting).
+    """
+    return json.dumps(captured, indent=2, sort_keys=True, ensure_ascii=False)
 
 
 def main() -> None:

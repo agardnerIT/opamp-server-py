@@ -19,10 +19,11 @@
       "caption": [
         "N/A",
         "\ud83d\udce6 generic (sniffed)",
+        "The server could not tell what this agent is, so it is showing the generic view. If you know, pin it: `opampctl agents set-type abababababababababababababababab <profile>` (`opampctl agents types` lists them).",
         "No capabilities",
         "None advertised",
         "None",
-        "No telemetry data received.",
+        "This profile does not report telemetry to the server.",
         "\ud83d\udd12 Checking compliance is audited and needs the `operator` role \u2014 you will be asked to sign in.",
         "Compliance not yet evaluated. Click 'Check Compliance' to evaluate.",
         "Toggle to show configuration",
@@ -35,20 +36,7 @@
         {
           "language": "python",
           "value": "abababababababababababababababab"
-        },
-        {
-          "language": "yaml",
-          "value": "receivers:\n  otlp:\n    protocols: {}\nexporters: {}\nservice:\n  extensions:\n  - opamp\n  pipelines:\n    traces:\n      receivers:\n      - otlp\n      exporters:\n      - debug\n  telemetry:\n    metrics:\n      level: basic\n      readers:\n      - periodic:\n          exporter:\n            otlp:\n              protocol: http/protobuf\n              endpoint: http://localhost:4320/v1/metrics\nprocessors:\n  batch: {}"
         }
-      ],
-      "download_button": [
-        {
-          "file_name": "collector-config.yaml",
-          "label": "Download Config"
-        }
-      ],
-      "expander": [
-        "Show config"
       ],
       "markdown": [
         "### Agent Details",
@@ -61,8 +49,6 @@
         "**Capabilities**",
         "**Custom capabilities**",
         "**Violations**",
-        "**Components**",
-        "No components reported",
         "**Compliance**",
         "**Configuration**",
         "**Admin Session**",
@@ -79,11 +65,6 @@
         },
         {
           "delta": "",
-          "label": "Components",
-          "value": "0/0 in use"
-        },
-        {
-          "delta": "",
           "label": "Capabilities",
           "value": "0"
         },
@@ -96,10 +77,6 @@
       "toggle": [
         {
           "label": "Show",
-          "value": false
-        },
-        {
-          "label": "Create Slim Distro",
           "value": false
         }
       ]

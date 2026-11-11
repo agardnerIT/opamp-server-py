@@ -329,6 +329,7 @@ PROFILE_FIELDS = {
     "icon",
     "priority",
     "summary",
+    "guidance",
     "validates_structure",
     "content_types",
     "default_filename",
@@ -339,6 +340,8 @@ PROFILE_FIELDS = {
     "identity",
     "panels",
     "components",
+    "has_components",
+    "has_onboarding_snippet",
     "bootstrap_default",
 }
 
@@ -392,5 +395,8 @@ def test_the_profile_shape_reaches_mcp(monkeypatch):
     types = _profile_types(json.loads(mcp_server.list_agent_types()))
     assert set(types["otelcol"]) >= PROFILE_FIELDS
     assert types["otelcol"]["priority"] == 100
-    # A read tool must not leak the telemetry *values*, only the declaration.
-    assert types["otelcol"]["telemetry"] == {"metric_prefix": "otelcol_"}
+    # A read tool must not leak the telemetry *values*, only the declaration — and,
+    # since #121, the words the UI renders, so a client can show the same headings
+    # instead of inventing its own.
+    assert types["otelcol"]["telemetry"]["metric_prefix"] == "otelcol_"
+    assert types["otelcol"]["telemetry"]["title"] == "Collector Telemetry"

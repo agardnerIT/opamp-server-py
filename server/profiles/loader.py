@@ -130,6 +130,9 @@ def compile_document(document: ProfileDocument) -> AgentProfile:
         telemetry = TelemetrySpec(
             metric_prefix=document.telemetry.metric_prefix,
             metric_map=dict(document.telemetry.metric_map),
+            title=document.telemetry.title,
+            caption=document.telemetry.caption,
+            raw_caption=document.telemetry.raw_caption,
         )
 
     panels = tuple(
@@ -154,6 +157,7 @@ def compile_document(document: ProfileDocument) -> AgentProfile:
         name=document.name,
         display_name=document.display_name,
         summary=document.summary,
+        guidance=document.guidance,
         icon=document.icon,
         priority=document.priority,
         config_formats=formats,
@@ -168,6 +172,16 @@ def compile_document(document: ProfileDocument) -> AgentProfile:
         panels=panels,
         snippet_template=document.snippet,
         snippet=engines.snippet_from(document.snippet) if document.snippet else None,
+        # #121: the whole config for a *new* agent is a separate artefact from the
+        # fragment an existing one gains, so it is a separate field — and it may be
+        # absent, which is the honest state for a product whose config this server
+        # cannot write.
+        onboarding_template=document.onboarding_snippet,
+        onboarding=(
+            engines.snippet_from(document.onboarding_snippet)
+            if document.onboarding_snippet
+            else None
+        ),
         bootstrap_default=document.bootstrap_default,
     )
 

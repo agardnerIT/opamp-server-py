@@ -83,6 +83,13 @@ telemetry:
   # with no telemetry block is saying "this agent reports nothing to this server",
   # which #121 shows as a product fact rather than an empty panel (#122).
   metric_prefix: "otelcol_"
+  # The words the agent-detail page uses above those metrics. Data, because "Collector
+  # Telemetry" is accurate here and a lie about any other agent (#121).
+  title: Collector Telemetry
+  caption: >-
+    Real-time metrics from the collector's internal telemetry. These show how data
+    flows through the collector.
+  raw_caption: "All available internal metrics from the collector:"
 
 components:
   # AvailableComponents.components keys (plural, as the agent labels them) and the
@@ -139,6 +146,66 @@ snippet: |
           endpoint: {endpoint}
           headers:
             Authorization: "Bearer {token}"
+
+# The empty-fleet snippet: a complete file, not a fragment (#121). Moved verbatim
+# out of `ui/shared.py:collector_config_snippet`, which hardcoded it for every agent
+# type. `{auth}` is the credential block the server's mode requires (or nothing) and
+# `{agent_name}` is the operator's label for this agent — both are engine-supplied
+# placeholders, so this is data, not a template with code hidden in it.
+onboarding_snippet: |
+  extensions:
+    opamp:
+      server:
+        {scheme}:
+          endpoint: {endpoint}
+          polling_interval: 5s
+  {auth}    agent_description:
+        non_identifying_attributes:
+          "agent.name": "{agent_name}"      # your label; the Agents page shows it
+          "deployment.environment": "development"
+      capabilities:
+        reports_health: true
+        reports_effective_config: true      # needed for config push and drift
+        reports_available_components: true  # needed for the component inventory
+
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 127.0.0.1:4317
+        http:
+          endpoint: 127.0.0.1:4318
+
+  processors:
+    batch:
+
+  exporters:
+    debug:
+      verbosity: normal
+
+  service:
+    extensions: [opamp]        # without this the extension never starts
+    pipelines:
+      traces:
+        receivers: [otlp]
+        processors: [batch]
+        exporters: [debug]
+
+# Shown on the Help page under this profile, and nowhere else (#121). Every claim
+# below is true of a collector and of nothing else, which is why it is not general
+# truth in `ui/pages/4_Help.py` any more.
+guidance: |
+  **Remote config** is applied by the OpAMP Supervisor (`cmd/opampsupervisor`), not
+  by `extension/opampextension`: a bare collector never advertises
+  `AcceptsRemoteConfig`.
+
+  An invalid config leaves the collector **down until it is manually restarted**
+  (the extension is no longer running), which is why rollout staging and the health
+  gate are not optional.
+
+  To let the server restart it after a config lands, enable
+  `accepts_restart_command: true` in this collector's `opamp` extension — otherwise
+  the server refuses the restart with a 409 rather than pretending to have sent one.
 
 # The agent-detail page, declared instead of hardcoded (#121 renders these; #117h
 # only defines the shape). Widgets are a closed set — a widget with no renderer is a

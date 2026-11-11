@@ -1304,16 +1304,35 @@ def empty_agents_page(server):
     return app
 
 
-def test_an_empty_fleet_offers_a_copy_paste_collector_config(server):
-    """#116: the first screen a new user sees must contain the next step."""
+def test_an_empty_fleet_offers_a_copy_paste_config_for_the_bootstrap_profile(server):
+    """#116: the first screen a new user sees must contain the next step.
+
+    #121: the snippet and the filename are the *profile's*, so this asserts the page
+    agrees with the dictionary it is rendering from — not with a string a previous
+    release happened to ship. An empty fleet has no agent to resolve, so the answer
+    comes from `bootstrap_default`.
+    """
+    from server import profiles
+    from ui.shared import get_server_url
+
+    profile = profiles.bootstrap_default()
     app = empty_agents_page(server)
     snippet = "\n".join(element.value for element in app.code)
     assert "extensions:" in snippet and "opamp:" in snippet
     assert "/v1/opamp" in snippet
     assert "service:" in snippet and "extensions: [opamp]" in snippet
     assert "No agents connected yet" in texts(app)
-    # A download button means the file never has to be retyped from a screenshot.
-    assert any(button.label == "Download config.yaml" for button in app.download_button)
+    # Rebuilt from the profile, so the text is provably the dictionary's.
+    assert profile.onboarding_snippet(
+        f"{get_server_url()}/v1/opamp", "${env:OPAMP_AGENT_TOKEN}", auth=False,
+        agent_name="my-agent",
+    # Streamlit hands the rendered block back without the template's trailing newline.
+    ).rstrip() == "".join(element.value for element in app.code).rstrip()
+    # A download button means the file never has to be retyped from a screenshot, and
+    # the name is the profile's format, not a collector's filename.
+    assert any(
+        button.label == f"Download {profile.filename_for()}" for button in app.download_button
+    ), [button.label for button in app.download_button]
 
 
 def test_the_docker_toggle_rewrites_the_endpoint_for_a_containerised_collector(server):
@@ -1429,8 +1448,11 @@ def test_an_unreachable_health_check_does_not_claim_the_endpoint_is_open(server,
     app = signed_in(HELP_PAGE)
     app.run()
     assert not app.exception, app.exception
-    snippet = "\n".join(element.value for element in app.code)
-    assert "Authorization" not in snippet
+    # The *bootstrap profile's* snippet is the one that has to keep quiet about a
+    # credential the server may or may not want. #121 added a per-profile section under
+    # it, and `generic`'s note is prose about where a credential goes — not a claim
+    # about this server's mode.
+    assert "Authorization" not in app.code[0].value
     assert "Could not read this server's agent-auth mode" in texts(app)
 
 

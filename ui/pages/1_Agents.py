@@ -17,7 +17,7 @@ from ui.shared import (
     agent_auth_mode,
     agent_auth_note,
     agent_type_badge,
-    collector_config_snippet,
+    connect_snippet,
     format_local_time,
     get_agents,
     get_agent,
@@ -37,9 +37,102 @@ from ui.shared import (
     requests,
     pd,
 )
+from server import profiles
 
 
 render_sidebar()
+
+
+# ---------------------------------------------------------- profile-driven chrome
+#
+# #121: nothing below this line may name a product. The agent's type is resolved by the
+# server (`GET /agent/{id}.agent_type`), and everything the page then says about *what
+# that agent can do* — panels, metric labels, telemetry wording, the config download
+# filename — comes from the profile dictionary (`server/profiles/data/*.yaml`). Adding
+# an agent type is a file drop and a restart, not a UI release.
+
+
+def _metric_value(value, fmt):
+    """One metric tile's value, in the format the profile asked for.
+
+    `mebibytes` exists because the collector reports bytes and operators read MB; it is
+    a *format*, declared per metric, not a product name in this page (#134).
+    """
+    if value is None:
+        return "-"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if fmt == "mebibytes":
+        return f"{number / 1024 / 1024:,.0f}"
+    if fmt == "decimal":
+        return f"{number:,.1f}"
+    return f"{number:,.0f}"
+
+
+#: `alert` panel severities are a closed set in `server/profiles/schema.py`
+#: (`ALERT_SEVERITIES`), so this map is exhaustive by construction, not defensive.
+_ALERT_RENDERERS = {"info": st.info, "warning": st.warning, "error": st.error}
+
+
+def _telemetry_panels(profile, metrics):
+    """Render `profile.panels` against the metrics the agent reported (#121).
+
+    Widgets are a closed set on purpose (`schema.WIDGETS`): a profile cannot ask for a
+    block this page has no renderer for, because the loader refuses the file. So a
+    panel here is either `metrics` or `alert`, and "no widget" is a load error rather
+    than an empty section an operator has to interpret.
+    """
+    telemetry = profile.telemetry
+    st.markdown(f"**{telemetry.title}**")
+    if telemetry.caption:
+        st.caption(telemetry.caption)
+    for panel in profile.panels:
+        if panel.widget == "metrics":
+            st.markdown(f"### {panel.title}")
+            if panel.caption:
+                st.caption(panel.caption)
+            columns = st.columns(len(panel.metrics))
+            for column, metric in zip(columns, panel.metrics):
+                with column:
+                    st.metric(
+                        metric.label,
+                        _metric_value(metrics.get(metric.metric), metric.format),
+                    )
+        elif panel.widget == "alert":
+            value = metrics.get(panel.metric)
+            # `above_zero` is the only condition the schema allows: "failures > 0 is an
+            # error" is the check an operator wants, and anything richer would be a
+            # comparison language nobody asked for.
+            if value is not None and panel.when == "above_zero" and value > 0:
+                _ALERT_RENDERERS[panel.severity](
+                    panel.message.format(value=_metric_value(value, "number"))
+                )
+
+
+def _config_filename(profile):
+    """The download name for this agent's config, from its profile (#121).
+
+    `collector-config.yaml` used to be hardcoded on this page, so a FluentBit user's
+    config was downloaded under a collector's name. `filename_for()` answers from the
+    profile's `config_formats`, and a profile with no declared format gets the honest
+    `config` rather than an invented extension.
+    """
+    return profile.filename_for()
+
+
+def _config_mime(profile):
+    return (
+        "text/yaml"
+        if _config_filename(profile).endswith((".yaml", ".yml"))
+        else "text/plain"
+    )
+
+
+def _config_language(profile):
+    """The syntax highlighter for the config body, or `None` for opaque content."""
+    return "yaml" if _config_filename(profile).endswith((".yaml", ".yml")) else None
 
 
 def _mint_token_and_snippet(in_container):
@@ -66,15 +159,37 @@ def _mint_token_and_snippet(in_container):
     )
 
 
+def _why_no_agents(profile):
+    """The "still nothing?" line, in the profile's vocabulary (#121).
+
+    `service.extensions: [opamp]` is the collector's mistake to make. Telling a
+    FluentBit user to check it would be the same bug as handing them a collector
+    config: the words are true of one product and meaningless about another.
+    """
+    where = f"`{get_server_url()}`"
+    common = (
+        f"that the agent can reach {where} — the server sees every request it "
+        "receives, so a missing agent is almost always a config or network question, "
+        "not a server one."
+    )
+    if profile.has_components:
+        return f"Still nothing after a minute? Check that `service.extensions` lists `opamp` and {common}"
+    return f"Still nothing after a minute? Check the agent's own OpAMP settings and {common}"
+
+
 def _empty_fleet():
     """#116: an empty fleet is a setup question, so answer it here.
 
     "No agents connected" was a dead end for anyone who had never configured OpAMP:
-    the next step is always the same ~30 lines of YAML, and the two lines people
-    actually get wrong are `service.extensions: [opamp]` (without it the extension
-    never starts) and the endpoint host (a containerised collector cannot reach the
-    host's `localhost`). Both are called out next to the snippet instead of in docs a
-    new user has to find.
+    the next step is always the same paste-ready config, and the two lines people
+    actually get wrong are the ones the profile calls out (for a collector: the
+    `service.extensions: [opamp]` line without which the extension never starts) and
+    the endpoint host (a containerised agent cannot reach the host's `localhost`).
+    Both are called out next to the snippet instead of in docs a new user has to find.
+
+    #121: the snippet and its filename are the *profile's*, not this page's. A token is
+    usually minted before the first agent connects, so there is nothing to resolve yet
+    and the dictionary answers which profile to show (`bootstrap_default`).
 
     The refresh button is not decoration: this state is entered before the agent
     exists, so by the time it connects the operator is looking at a page that has no
@@ -101,12 +216,15 @@ def _empty_fleet():
         st.error("The server is unreachable, so the agent list cannot be loaded.")
         st.caption(f"`GET {get_server_url()}/agents` failed: {data['error']}")
         return
+    profile = profiles.bootstrap_default()
+    filename = profile.filename_for()
+    language = "yaml" if filename.endswith((".yaml", ".yml")) else "text"
     st.markdown(
-        "Copy this into `config.yaml`, run `otelcol-contrib --config config.yaml`, "
+        f"Copy this into `{filename}`, start a **{profile.display_name}**, "
         "and this page fills in within a poll interval:"
     )
     in_container = st.toggle(
-        "My collector runs in Docker",
+        "My agent runs in Docker",
         key="empty_fleet_in_container",
         help="Rewrites the endpoint to host.docker.internal, the host as seen from a container.",
     )
@@ -121,23 +239,21 @@ def _empty_fleet():
     # install, where nothing has registered yet and the token is minted *first*.
     if auth_mode == "token":
         _mint_token_and_snippet(in_container)
-        st.caption(
-            "Still nothing after a minute? Check that `service.extensions` lists `opamp` "
-            f"and that the collector can reach `{get_server_url()}` — the server sees "
-            "every request it receives, so a missing agent is almost always a config or "
-            "network question, not a server one."
-        )
+        st.caption(_why_no_agents(profile))
         return
 
-    snippet = collector_config_snippet(
-        get_server_url(), in_container=in_container, agent_auth=auth_mode
+    snippet = connect_snippet(
+        get_server_url(),
+        profile=profile,
+        in_container=in_container,
+        agent_auth=auth_mode,
     )
-    st.code(snippet, language="yaml")
+    st.code(snippet, language=language)
     st.download_button(
-        "Download config.yaml",
+        f"Download {filename}",
         snippet,
-        file_name="config.yaml",
-        mime="text/yaml",
+        file_name=filename,
+        mime="text/yaml" if language == "yaml" else "text/plain",
         key="empty_fleet_download",
     )
     if in_container:
@@ -150,12 +266,7 @@ def _empty_fleet():
     note = agent_auth_note(auth_mode)
     if note:
         (st.warning if auth_mode == "token" else st.caption)(note)
-    st.caption(
-        "Still nothing after a minute? Check that `service.extensions` lists `opamp` "
-        f"and that the collector can reach `{get_server_url()}` — the server sees "
-        "every request it receives, so a missing agent is almost always a config or "
-        "network question, not a server one."
-    )
+    st.caption(_why_no_agents(profile))
 
 
 # ---------------------------------------------------------- SQL agent search (#132)
@@ -322,6 +433,13 @@ if agent_id_param:
     
     fleet_agent = next((a for a in agents if a.get("id") == selected_id), None)
     detailed_agent = get_agent(selected_id)
+
+    # #121: which profile's chrome this page draws. `agent_type` is the resolution the
+    # server made, with its provenance alongside; a payload from before #118 has no
+    # such field, and the fallback profile is then the same answer the server itself
+    # gives for "nothing matched" — not a guess dressed up as a detection.
+    type_payload = detailed_agent if "error" not in detailed_agent else fleet_agent
+    profile = profiles.get((type_payload or {}).get("agent_type")) or profiles.FALLBACK
     
     if "error" not in detailed_agent:
         health = detailed_agent.get("healthy") or (fleet_agent.get("healthy") if fleet_agent else detailed_agent.get("healthy"))
@@ -370,13 +488,15 @@ if agent_id_param:
     
     with col2:
         comps = comps or {}
-        total = sum(len(c) for c in comps.values()) if comps else 0
-        used = sum(1 for cl in comps.values() for c in cl if c.get("used")) if comps else 0
-        st.metric("Components", f"{used}/{total} in use")
+        # A component inventory is a *profile* concept (#121): an agent whose product has
+        # no components has nothing to count, and "0/0 in use" made a healthy generic
+        # agent look like a broken collector.
+        if profile.has_components:
+            total = sum(len(c) for c in comps.values()) if comps else 0
+            used = sum(1 for cl in comps.values() for c in cl if c.get("used")) if comps else 0
+            st.metric("Components", f"{used}/{total} in use")
         # #118: what the server thinks this agent is, and how it decided — a wrong
-        # guess has to be visible *before* it becomes a config push. A `generic`
-        # agent gets no component inventory at all, so "0/0 in use" needs its reason
-        # next to it rather than looking like a collector with nothing installed.
+        # guess has to be visible *before* it becomes a config push.
         st.markdown("**Type**")
         st.caption(agent_type_badge(detailed_agent if "error" not in detailed_agent else fleet_agent))
         type_warning = (detailed_agent or {}).get("agent_type_warning") or (
@@ -384,6 +504,27 @@ if agent_id_param:
         ).get("agent_type_warning")
         if type_warning:
             st.warning(type_warning)
+        # #134: several profiles matched and priority picked one. The tie is worth a
+        # sentence, because after #134 a wrong profile is a file someone dropped in.
+        ambiguous = (detailed_agent or {}).get("agent_type_ambiguous") or (
+            fleet_agent or {}
+        ).get("agent_type_ambiguous")
+        if ambiguous:
+            st.caption(
+                "This agent also matches: "
+                + ", ".join(f"`{name}`" for name in ambiguous)
+                + ". Match priority chose this one; pin the type to settle it."
+            )
+        # #121: `generic` reached by falling back is the operator's cue, not the agent's
+        # fault — they almost certainly know what the agent is, so point at the pin.
+        if profile.name == profiles.FALLBACK_PROFILE and not (detailed_agent or fleet_agent).get(
+            "agent_type_pinned"
+        ):
+            st.caption(
+                "The server could not tell what this agent is, so it is showing the "
+                "generic view. If you know, pin it: `opampctl agents set-type "
+                f"{selected_id} <profile>` (`opampctl agents types` lists them)."
+            )
         st.divider()
         st.markdown("**Attributes**")
         desc = description or {}
@@ -457,75 +598,36 @@ if agent_id_param:
             st.rerun()
     
     metrics_data = detailed_agent.get("metrics", {})
-    if metrics_data and metrics_data.get("metrics"):
-        m = metrics_data.get("metrics", {})
-        
-        st.markdown("**Collector Telemetry**")
-        st.caption("Real-time metrics from the collector's internal telemetry. These show how data flows through the collector.")
-        
-        st.markdown("### Data Flow (Inputs)")
-        st.caption("Data being received by the collector. Sudden drops may indicate connectivity issues.")
-        
-        cols = st.columns(4)
-        with cols[0]:
-            recv_logs = m.get("otelcol_receiver_accepted_log_records")
-            st.metric("Logs In", f"{recv_logs:,.0f}" if recv_logs is not None else "-")
-        with cols[1]:
-            recv_spans = m.get("otelcol_receiver_accepted_spans")
-            st.metric("Traces In", f"{recv_spans:,.0f}" if recv_spans is not None else "-")
-        with cols[2]:
-            recv_metrics = m.get("otelcol_receiver_accepted_metric_points")
-            st.metric("Metrics In", f"{recv_metrics:,.0f}" if recv_metrics is not None else "-")
-        with cols[3]:
-            refused_logs = m.get("otelcol_receiver_refused_log_records")
-            st.metric("Refused", f"{refused_logs:,.0f}" if refused_logs is not None else "-")
-        
-        failed_logs = m.get("otelcol_receiver_failed_log_records", 0) or 0
-        if failed_logs > 0:
-            st.error(f"⚠️ Failed: {failed_logs}")
-        
-        st.markdown("### Data Flow (Outputs)")
-        st.caption("Data being sent to downstream systems. If this drops but inputs are normal, check exporter connectivity.")
-        
-        cols = st.columns(3)
-        with cols[0]:
-            sent_logs = m.get("otelcol_exporter_sent_log_records")
-            st.metric("Logs Out", f"{sent_logs:,.0f}" if sent_logs is not None else "-")
-        with cols[1]:
-            sent_spans = m.get("otelcol_exporter_sent_spans")
-            st.metric("Traces Out", f"{sent_spans:,.0f}" if sent_spans is not None else "-")
-        with cols[2]:
-            sent_metrics = m.get("otelcol_exporter_sent_metric_points")
-            st.metric("Metrics Out", f"{sent_metrics:,.0f}" if sent_metrics is not None else "-")
-        
-        st.markdown("### Collector Health")
-        st.caption("Resource usage of the collector process itself.")
-        
-        cols = st.columns(4)
-        with cols[0]:
-            cpu = m.get("otelcol_process_cpu_seconds")
-            st.metric("CPU (sec)", f"{cpu:,.1f}" if cpu is not None else "-")
-        with cols[1]:
-            mem = m.get("otelcol_process_memory_rss")
-            st.metric("Memory (MB)", f"{mem / 1024 / 1024:,.0f}" if mem is not None else "-")
-        with cols[2]:
-            heap = m.get("otelcol_process_runtime_heap_alloc_bytes")
-            st.metric("Heap (MB)", f"{heap / 1024 / 1024:,.0f}" if heap is not None else "-")
-        with cols[3]:
-            uptime = m.get("otelcol_process_uptime")
-            st.metric("Uptime (sec)", f"{uptime:,.0f}" if uptime is not None else "-")
-        
+    raw_metrics = (metrics_data or {}).get("metrics") or {}
+    telemetry = profile.telemetry
+
+    if raw_metrics:
+        # #121: the panels are the profile's (`server/profiles/data/*.yaml`), not this
+        # page's. Before this, twelve literal `otelcol_*` reads meant a FluentBit agent
+        # was shown a grid of empty collector tiles, and adding an agent type needed a
+        # UI release — which is the whole complaint #117 is about.
+        if telemetry is not None:
+            _telemetry_panels(profile, raw_metrics)
         with st.expander("Show all raw metrics"):
-            st.caption("All available internal metrics from the collector:")
-            for k, v in sorted(m.items()):
-                st.caption(f"**{k}:** {v}")
-        
+            # An agent whose profile declares no telemetry still reports it, and the raw
+            # dump is the honest way to show a mapping this build does not interpret.
+            caption = telemetry.raw_caption if telemetry else "All metrics this agent reported:"
+            if caption:
+                st.caption(caption)
+            for key, value in sorted(raw_metrics.items()):
+                st.caption(f"**{key}:** {value}")
         st.caption(f"Last updated: {metrics_data.get('updated_at', '')}")
+    elif telemetry is None:
+        # A product fact, not a problem: this profile's agents do not report metrics to
+        # this server at all. The two sentences used to be one ("No telemetry data
+        # received."), which read as a fault in a healthy non-collector agent (#122).
+        st.caption("This profile does not report telemetry to the server.")
     else:
-        st.caption("No telemetry data received.")
-        
+        # Expected but absent: that *is* worth reporting as a gap.
+        st.caption("No telemetry received yet.")
+
         if effective_config:
-            new_yaml = display_config_yaml(effective_config)
+            new_yaml = display_config_yaml(effective_config, profile=profile)
             if new_yaml:
                 col_btn, col_exp = st.columns([1, 2])
 
@@ -533,58 +635,59 @@ if agent_id_param:
                     st.download_button(
                         "Download Config",
                         new_yaml,
-                        file_name="collector-config.yaml",
-                        mime="text/yaml",
+                        file_name=_config_filename(profile),
+                        mime=_config_mime(profile),
                         key="download_telemetry_config",
                     )
                 with col_exp:
                     with st.expander("Show config"):
-                        st.code(new_yaml, language="yaml")
+                        st.code(new_yaml, language=_config_language(profile))
             else:
                 st.caption("No config object in this agent's report is readable as YAML or JSON")
     
-    st.divider()
-    
-    col1, col2 = st.columns([4, 1])
-    with col1:
-        st.markdown("**Components**")
-    with col2:
-        show_slim_distro_builder_inline = st.checkbox("Create Slim Distro", key="slim_distro_toggle")
-    
-    if show_slim_distro_builder_inline:
-        show_slim_distro_builder_page(comps)
-    
-    COMPONENT_ORDER = ["receiver", "processor", "exporter", "extension", "connector"]
-    
-    all_components = []
-    for comp_type in COMPONENT_ORDER:
-        if comp_type in comps:
-            for comp in comps[comp_type]:
-                all_components.append({
-                    "Type": comp_type.title(),
-                    "Name": comp["id"],
-                    "Version": comp.get("version", ""),
-                    "In Use": "✅" if comp["used"] else "❌"
-                })
-    
-    if all_components:
-        show_in_use_only = st.toggle(
-            "Show in-use components only",
-            value=False,
-            key=f"in_use_toggle_{selected_id[:8] if selected_id else 'none'}"
-        )
-        
-        if show_in_use_only:
-            df_comps = pd.DataFrame([c for c in all_components if c["In Use"] == "✅"])
+    if profile.has_components:
+        st.divider()
+
+        col1, col2 = st.columns([4, 1])
+        with col1:
+            st.markdown("**Components**")
+        with col2:
+            show_slim_distro_builder_inline = st.checkbox("Create Slim Distro", key="slim_distro_toggle")
+
+        if show_slim_distro_builder_inline:
+            show_slim_distro_builder_page(comps)
+
+        COMPONENT_ORDER = ["receiver", "processor", "exporter", "extension", "connector"]
+
+        all_components = []
+        for comp_type in COMPONENT_ORDER:
+            if comp_type in comps:
+                for comp in comps[comp_type]:
+                    all_components.append({
+                        "Type": comp_type.title(),
+                        "Name": comp["id"],
+                        "Version": comp.get("version", ""),
+                        "In Use": "✅" if comp["used"] else "❌"
+                    })
+
+        if all_components:
+            show_in_use_only = st.toggle(
+                "Show in-use components only",
+                value=False,
+                key=f"in_use_toggle_{selected_id[:8] if selected_id else 'none'}"
+            )
+
+            if show_in_use_only:
+                df_comps = pd.DataFrame([c for c in all_components if c["In Use"] == "✅"])
+            else:
+                df_comps = pd.DataFrame(all_components)
+
+            if not df_comps.empty:
+                st.dataframe(df_comps, width='stretch', hide_index=True)
+            else:
+                st.write("No in-use components")
         else:
-            df_comps = pd.DataFrame(all_components)
-        
-        if not df_comps.empty:
-            st.dataframe(df_comps, width='stretch', hide_index=True)
-        else:
-            st.write("No in-use components")
-    else:
-        st.write("No components reported")
+            st.write("No components reported")
     
     st.divider()
     
@@ -667,16 +770,16 @@ if agent_id_param:
         show_config = st.toggle("Show", value=False, key=f"show_config_{selected_id[:8] if selected_id else 'none'}")
     
     if show_config and effective_config:
-        cleaned_yaml = display_config_yaml(effective_config)
+        cleaned_yaml = display_config_yaml(effective_config, profile=profile)
         if cleaned_yaml:
             st.download_button(
                 "Download Config",
                 cleaned_yaml,
-                file_name="collector-config.yaml",
-                mime="text/yaml",
+                file_name=_config_filename(profile),
+                mime=_config_mime(profile),
                 key=f"download_config_{selected_id[:8] if selected_id else 'none'}",
             )
-            st.code(cleaned_yaml, language="yaml", height=400)
+            st.code(cleaned_yaml, language=_config_language(profile), height=400)
         else:
             st.caption("No config object in this agent's report is readable as YAML or JSON")
     elif effective_config:

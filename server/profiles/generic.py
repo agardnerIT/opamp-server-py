@@ -46,6 +46,19 @@ PROFILE = AgentProfile(
         "config is stored, relayed and shown as opaque content, and the collector-"
         "specific reports and validation do not describe it."
     ),
+    # #121: the Help page shows this under this profile only. It is the honest
+    # answer for an agent type the dictionary has never heard of, and it is not a
+    # claim about any particular product.
+    guidance=(
+        "This server cannot validate, interpret or report on this agent's "
+        "configuration: it stores the body, relays it and shows it as opaque text. "
+        "Whether the agent applies a pushed config, and what it does with a bad one, "
+        "is defined by the agent — check its own documentation before using it in a "
+        "rollout.\n\n"
+        "If you know what this agent is, pin it: `opampctl agents set-type <agent-id> "
+        "<profile>`. A pin is server-side and audited, and it is the only signal here "
+        "that does not come from the agent."
+    ),
     config_formats=NO_FORMATS,
     validates_structure=False,
     snippet=bootstrap_snippet,

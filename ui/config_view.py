@@ -6,9 +6,10 @@ in `server.effective_config` — this module only decides what the "Configuratio
 panel shows and adds the telemetry pipeline the dashboard would configure for a
 downloadable collector config.
 
-Two kinds of agent report through this server: collectors (YAML) and everything else
-— osquery reports `application/json` with a `schedule` and its `SELECT` statements.
-Both are displayed, but only a collector config gets the collector treatment below.
+Two kinds of agent report through this server: an agent whose config this server can
+interpret (a collector's YAML, say) and everything else — osquery reports
+`application/json` with a `schedule` and its `SELECT` statements. Both are displayed,
+but only a body the agent's *profile* recognises gets the augmentation below.
 """
 
 from __future__ import annotations
@@ -33,22 +34,21 @@ DEFAULT_SERVER_URL = "{scheme}://{address}:{port}".format(
     port=os.environ.get("SERVER_PORT", "4320"),
 )
 
-#: Top-level sections only a collector config has. Their presence is what makes the
-#: augmentation below correct; their absence — osquery's `{"schedule": {...}}`, say —
-#: is what makes it wrong, because the panel would then show and offer for download a
-#: config the agent is not running.
-_COLLECTOR_SECTIONS = (
-    "service",
-    "receivers",
-    "processors",
-    "exporters",
-    "extensions",
-    "connectors",
-)
+#: Which top-level sections make a config *this* profile's was hardcoded here as a
+#: collector's five (#121). It is now the profile's own `components.sections`, so a new
+#: agent type gets the same treatment with no change to this module.
 
 
-def _is_collector_document(config: dict) -> bool:
-    return any(section in config for section in _COLLECTOR_SECTIONS)
+def _profile_sections(profile) -> Tuple[str, ...]:
+    spec = getattr(profile, "components_spec", None)
+    return tuple(spec.sections) if spec is not None else ()
+
+
+def _is_profile_document(config: dict, profile) -> bool:
+    """True when the body uses sections this profile names — so the panel is showing
+    the config the agent is actually running, and augmenting it is not a fabrication."""
+    sections = _profile_sections(profile)
+    return bool(sections) and any(section in config for section in sections)
 
 
 def _clean_config(value: Any) -> Any:
@@ -148,6 +148,8 @@ def editable_config(effective_config: Any) -> Optional[EditableConfig]:
 def display_config_yaml(
     effective_config: Optional[str],
     server_url: Optional[str] = None,
+    *,
+    profile=None,
 ) -> Optional[str]:
     """The config YAML for one agent, or `None` (#68).
 
@@ -159,10 +161,19 @@ def display_config_yaml(
 
     JSON is accepted (`accept_json=True`) because an osquery agent reports its config
     as `application/json`, and refusing it made the panel claim there was no config at
-    all. A document that is not collector-shaped is returned as-is: the telemetry
-    pipeline below is something this dashboard would add *to a collector*, not a
-    rewrite every agent's config should survive.
+    all. A document that is not shaped like one of this profile's configs is returned
+    as-is: the telemetry pipeline below is something this dashboard would add *to a
+    profile that has those sections*, not a rewrite every agent's config should survive.
+
+    `profile` is the agent's own (`GET /agent/{id}.agent_type`, #121): the page passes
+    it, so a FluentBit agent's body is never given a collector's pipeline. With no
+    profile the bootstrap default is used, which is what the tests and any standalone
+    caller get.
     """
+    from server import profiles
+
+    if profile is None:
+        profile = profiles.bootstrap_default()
     document = _parsed_report(effective_config)
     if not document:
         return None
@@ -173,7 +184,7 @@ def display_config_yaml(
 
     config = _clean_config(config)
 
-    if not _is_collector_document(config):
+    if not _is_profile_document(config, profile):
         return yaml.dump(config, default_flow_style=False, sort_keys=False)
 
     if "extensions" in config and "opamp" in config["extensions"]:

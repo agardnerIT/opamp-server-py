@@ -100,89 +100,56 @@ def agent_auth_mode(health_data=_UNSET):
     return mode if mode in AGENT_AUTH_MODES else AGENT_AUTH_UNKNOWN
 
 
-def collector_config_snippet(
+def connect_snippet(
     server_url=None,
     *,
-    agent_name="my-collector",
-    poll_interval="5s",
+    profile=None,
+    agent_name="my-agent",
     in_container=False,
     agent_auth="off",
     token_literal=None,
 ):
-    """#116: the copy-paste collector config, in one place.
+    """#116/#121: the copy-paste config for a *new* agent, in the profile's own shape.
 
     The empty fleet is the first thing a new user sees, and "No agents connected. Start
     an OpenTelemetry Collector with OpAMP extension" tells them nothing they can act on.
-    This is the smallest config that actually reports: the extension block, the
-    `service.extensions: [opamp]` line people forget, and one debug pipeline so the
-    file runs unchanged. Shared with the Help page so the two can never drift.
+    The smallest config that actually reports used to be a 40-line f-string in this
+    module, which meant every agent type got collector YAML (#121): a FluentBit user was
+    handed a file their product does not read.
 
-    The endpoint host is the one thing that genuinely changes between deployments: a
-    collector on the same machine can use `localhost`, a containerised one cannot (it
+    The text is now the profile's `onboarding_snippet` (`server/profiles/data/*.yaml`),
+    and this function only supplies the two things it cannot know: the endpoint this
+    server is reachable at, and which credential block the server's mode needs. A
+    profile with no onboarding snippet returns `""`, and its `bootstrap_snippet` — the
+    fragment its product documents — is shown instead. Neither is invented here.
+
+    The endpoint host is the one thing that genuinely changes between deployments: an
+    agent on the same machine can use `localhost`, a containerised one cannot (it
     resolves inside its own network namespace), so `in_container` swaps in the host
     alias Docker Desktop provides and Linux can be told about.
 
     `agent_auth` is the server's mode (#124). With `token` the snippet carries the
-    `headers:` block the endpoint now demands; without it the copy-paste path ended in a
-    401 the page never mentioned. `off` prints exactly the bytes it printed before.
-
-    `token_literal` (#126) is the token that was *just minted on this page*: the operator
-    is pasting it into a file they own, and a snippet they cannot run without editing is
-    not a snippet. The `${env:…}` form stays the documented practice, and is what the
-    snippet shows whenever no token is passed.
+    credential block the endpoint demands; without it the config is exactly what an
+    `off` server always showed. `token_literal` (#126) is a token that was *just minted
+    on this page*: the operator is pasting it into a file they own, and a snippet they
+    cannot run without editing is not a snippet. The `${env:…}` form stays the
+    documented practice, and is what the snippet shows whenever no token is passed.
     """
+    profile = profile or profiles.bootstrap_default()
     base = (server_url or SERVER_URL).rstrip("/")
     endpoint = f"{base}/v1/opamp"
     if in_container:
         for local in ("127.0.0.1", "localhost", "0.0.0.0"):
             endpoint = endpoint.replace(f"//{local}", "//host.docker.internal")
-    headers = ""
-    if agent_auth == "token":
-        credential = (
-            f"Bearer {token_literal}" if token_literal else f"Bearer ${{env:{AGENT_TOKEN_ENV}}}"
-        )
-        headers = (
-            "        headers:\n"
-            f'          Authorization: "{credential}"\n'
-        )
-    return f"""extensions:
-  opamp:
-    server:
-      http:
-        endpoint: {endpoint}
-        polling_interval: {poll_interval}
-{headers}    agent_description:
-      non_identifying_attributes:
-        "agent.name": "{agent_name}"      # your label; the Agents page shows it
-        "deployment.environment": "development"
-    capabilities:
-      reports_health: true
-      reports_effective_config: true      # needed for config push and drift
-      reports_available_components: true  # needed for the component inventory
-
-receivers:
-  otlp:
-    protocols:
-      grpc:
-        endpoint: 127.0.0.1:4317
-      http:
-        endpoint: 127.0.0.1:4318
-
-processors:
-  batch:
-
-exporters:
-  debug:
-    verbosity: normal
-
-service:
-  extensions: [opamp]        # without this the extension never starts
-  pipelines:
-    traces:
-      receivers: [otlp]
-      processors: [batch]
-      exporters: [debug]
-"""
+    credential = (
+        token_literal if token_literal else f"${{env:{AGENT_TOKEN_ENV}}}"
+    )
+    return profile.onboarding_snippet(
+        endpoint,
+        credential,
+        auth=agent_auth == "token",
+        agent_name=agent_name,
+    ) or profile.bootstrap_snippet(endpoint, credential)
 
 
 def agent_auth_note(mode):
@@ -320,7 +287,7 @@ def mint_agent_token_form(
     )
     st.code(minted["token"], language="text")
     if show_snippet:
-        snippet = collector_config_snippet(
+        snippet = connect_snippet(
             get_server_url(),
             in_container=in_container,
             agent_auth="token",
@@ -920,9 +887,11 @@ def agent_type_badge(agent):
     label = f"{icon} {name}"
     if source and source != "fallback":
         label += f" ({source})"
-    # `agent_type_ambiguous` is on the payload (#134) but the badge does not render it
-    # yet: how a tie is shown is a copy decision, and it belongs to #121 with the rest
-    # of the wording pass.
+    # #134/#121: several profiles matched and this one won on priority. A tie is a
+    # decision nobody can audit, so the badge says so in one glyph — the detail page
+    # spells out the candidates (`agent_type_ambiguous`), because a table cell cannot.
+    if agent.get("agent_type_ambiguous"):
+        label += " ⚠️"
     return label
 
 
@@ -943,12 +912,6 @@ def get_collector_versions():
             return versions if versions else ["0.149.0"]
     except Exception:
         return ["0.149.0"]
-
-
-@st.cache_data(ttl=3600)
-def get_latest_collector_version():
-    versions = get_collector_versions()
-    return versions[0] if versions else "0.149.0"
 
 
 def show_slim_distro_builder_page(comps):

@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import string
 from collections import defaultdict
-from typing import Any, Callable, Dict, Mapping, Set, Tuple
+from typing import Any, Callable, Dict, Mapping, Sequence, Set, Tuple
 
 from loguru import logger
 
@@ -36,12 +36,35 @@ def transport_scheme(endpoint: str) -> str:
     return "ws" if (endpoint or "").startswith("ws") else "http"
 
 
-def check_template(template: str) -> str:
+def auth_block(token: str, indent: str = "        ") -> str:
+    """The credential block a template's `{auth}` stands for, or `""` for none.
+
+    This is the OpAMP spec's own shape (`server.<transport>.headers.Authorization`),
+    so it is protocol knowledge like `{scheme}`, not product knowledge — which is why
+    it is a template field the engine fills in rather than seven lines every
+    dictionary file would have to repeat. A profile that wants no credential block
+    simply does not use `{auth}` (#121).
+
+    The indent belongs to the *block*, not to a product: a YAML endpoint sits at a
+    fixed depth inside `extensions.opamp.server.<transport>`, and a template cannot
+    indent a multi-line substitution by itself.
+    """
+    return f'{indent}headers:\n{indent}  Authorization: "Bearer {token}"\n'
+
+
+def check_template(
+    template: str, required: Sequence[str] = ("endpoint", "token")
+) -> str:
     """`""` when `template` is usable, else the reason it is not.
 
     Checked at load time, not on first use: a snippet with a typo'd placeholder would
     otherwise raise the first time an operator opened the Help page, and "a bad file
     must not take the server down" has to include this.
+
+    `required` is per-template because the two kinds of snippet carry different
+    obligations (#121): the API's bootstrap block must show *where* and *with which
+    credential*, while a full onboarding config carries the credential inside `{auth}`
+    and so only has to show where (#121).
     """
     fields = set()
     try:
@@ -66,23 +89,41 @@ def check_template(template: str) -> str:
             f"snippet uses unknown placeholder(s) {unknown}; supported: "
             f"{list(_TEMPLATE_FIELDS)}"
         )
-    missing = [name for name in ("endpoint", "token") if name not in fields]
+    missing = [name for name in required if name not in fields]
     if missing:
         return f"snippet must use {{{'}}} and {{{'.join(missing)}}}"
     return ""
 
 
-_TEMPLATE_FIELDS: Tuple[str, ...] = ("endpoint", "token", "scheme")
+_TEMPLATE_FIELDS: Tuple[str, ...] = (
+    # Filled in from the endpoint by the engine.
+    "endpoint",
+    "scheme",
+    "token",
+    # Filled in from the server's configuration by the caller.
+    "auth",
+    "agent_name",
+)
 
 
-def snippet_from(template: str) -> Callable[[str, str], str]:
-    """Compile a snippet template into `(endpoint, token) -> str`."""
+def snippet_from(template: str) -> Callable[..., str]:
+    """Compile a snippet template into `(endpoint, token, *, auth, agent_name) -> str`.
 
-    def builder(endpoint: str, token: str) -> str:
+    One compiler for both snippet kinds (#121). A template that does not use a field
+    is unaffected by it, so the API's bootstrap block and a profile's full onboarding
+    config run through the same rules: same placeholder set, same load-time check,
+    same "no code from data" guarantee.
+    """
+
+    def builder(
+        endpoint: str, token: str, *, auth: bool = True, agent_name: str = ""
+    ) -> str:
         return template.format(
             endpoint=endpoint,
             token=token,
             scheme=transport_scheme(endpoint),
+            agent_name=agent_name,
+            auth=auth_block(token) if auth else "",
         )
 
     builder.__name__ = "snippet_from(dictionary)"

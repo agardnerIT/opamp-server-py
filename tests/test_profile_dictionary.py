@@ -402,7 +402,17 @@ class TestTheAPIShapeCarriesTheDictionary:
         assert entry["priority"] == 100
         assert entry["identity"]["match_any"][0]["attr"] == "service.name"
         assert entry["identity"]["sniff"]["config_sections_any"]
-        assert entry["telemetry"] == {"metric_prefix": "otelcol_"}
+        # #121: the telemetry block carries the words the detail page renders, not
+        # just the metric mapping — a heading is profile data or it is a lie about
+        # some other agent.
+        assert entry["telemetry"]["metric_prefix"] == "otelcol_"
+        assert entry["telemetry"]["title"] == "Collector Telemetry"
+        assert entry["telemetry"]["caption"].startswith("Real-time metrics")
+        # The two artefacts a profile may ship: a fragment for an existing config, and
+        # a whole config for a new agent. The second is optional on purpose.
+        assert entry["has_onboarding_snippet"] is True
+        assert entry["has_components"] is True
+        assert entry["guidance"].startswith("**Remote config**")
         assert [panel["id"] for panel in entry["panels"]] == [
             "data-flow-inputs",
             "data-flow-inputs-failed",
@@ -432,6 +442,10 @@ class TestTheAPIShapeCarriesTheDictionary:
         assert entry["reports_telemetry"] is False
         assert entry["identity"] == {"match_any": [], "sniff": None}
         assert entry["detectable"] is False
+        # No component inventory, no onboarding file to download: the page shows
+        # neither, rather than an empty collector (#121).
+        assert entry["has_components"] is False
+        assert entry["has_onboarding_snippet"] is False
 
 
 # ---------------------------------------------------------------- ambiguity ---

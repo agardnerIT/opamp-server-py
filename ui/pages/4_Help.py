@@ -4,34 +4,50 @@ import streamlit as st
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from ui.shared import (
-    SERVER_URL,
     agent_auth_mode,
     agent_auth_note,
-    collector_config_snippet,
+    connect_snippet,
     get_server_url,
     render_sidebar,
 )
+from server import profiles
 
 
 render_sidebar()
 
-st.markdown("## Collector Configuration")
-st.markdown("Add this minimal config to your OpenTelemetry Collector to connect to this OpAMP server:")
+# #121: this page used to open with "Add this minimal config to your OpenTelemetry
+# Collector", which is one product's onboarding sold as the server's. The server is
+# type-blind; what an agent's config *is* belongs to the profile dictionary, so the
+# page says the two things that are universal (endpoint, credential) and then hands
+# the rest to whichever profile the operator is actually running.
+st.markdown("## Connecting an agent")
+st.markdown(
+    "Every agent needs two things from this server: the **OpAMP endpoint** and, when "
+    "the server requires one, an **agent token**. Everything else in its configuration "
+    "belongs to the agent's product — this server stores that config as opaque content "
+    "unless a profile in its dictionary says it can interpret it."
+)
 
 # #116: one snippet for the Help page and the empty fleet view, so a fix to the config
 # can never land in only one of them. #124: the server's mode decides whether it carries
-# an agent credential — this page used to document the unauthenticated shape only.
+# an agent credential. #121: the *text* is the profile's (`bootstrap_default` answers
+# which one, because an operator reading the Help page has no agent to ask yet).
 auth_mode = agent_auth_mode()
-default_yaml = collector_config_snippet(get_server_url(), agent_auth=auth_mode)
+bootstrap = profiles.bootstrap_default()
+default_config = connect_snippet(
+    get_server_url(), profile=bootstrap, agent_auth=auth_mode
+)
+bootstrap_filename = bootstrap.filename_for()
+bootstrap_language = "yaml" if bootstrap.onboarding else "text"
 
-st.code(default_yaml, language="yaml")
+st.code(default_config, language=bootstrap_language)
 
 st.download_button(
-    "Download config.yaml",
-    default_yaml,
-    file_name="config.yaml",
-    mime="text/yaml",
-    key="download_config"
+    f"Download {bootstrap_filename}",
+    default_config,
+    file_name=bootstrap_filename,
+    mime="text/yaml" if bootstrap_language == "yaml" else "text/plain",
+    key="download_config",
 )
 
 if note := agent_auth_note(auth_mode):
@@ -39,12 +55,56 @@ if note := agent_auth_note(auth_mode):
 
 st.divider()
 
+st.markdown("### Known agent types")
+st.markdown(
+    "The server's **profile dictionary** decides what it is willing to claim about an "
+    "agent: whether its config is interpreted at all, whether a component inventory or "
+    "a telemetry view is meaningful, and which reports describe it. The same list is "
+    "`GET /agent/types`, `opampctl agents types` and the **MCP** `list_agent_types` "
+    "tool — adding a type is a YAML file and a restart, with no server release."
+)
+
+for profile in profiles.PROFILES:
+    with st.expander(f"{profile.icon} {profile.display_name} — `{profile.name}`"):
+        st.markdown(profile.summary)
+
+        declares = [
+            "**Configuration**: "
+            + (
+                ", ".join(
+                    f"`{name}`" for name in sorted(
+                        {ct for fmt in profile.config_formats for ct in fmt.content_types}
+                    ) if name
+                )
+                or "any content type, opaque"
+            ),
+            "**Structural validation**: "
+            + ("yes, this profile is judged by its own rules" if profile.validates_structure
+               else "no, the body is not interpreted"),
+            "**Component inventory**: " + ("yes" if profile.has_components else "no concept of one"),
+            "**Telemetry view**: "
+            + (profile.telemetry.title if profile.telemetry else "this agent reports none here"),
+            "**Reports**: " + (", ".join(profile.reports) or "none"),
+        ]
+        st.markdown("  \n".join(f"- {line}" for line in declares))
+
+        # The product's own caveats: what it does with a pushed config, what happens
+        # when one is wrong. True of one product, so it lives in that product's file.
+        if profile.guidance:
+            st.markdown(profile.guidance)
+
+        snippet = connect_snippet(
+            get_server_url(), profile=profile, agent_auth=auth_mode
+        )
+        st.code(snippet, language="yaml" if profile.onboarding else "text")
+
+st.divider()
+
 st.markdown("### Agent tokens")
 st.markdown("""
 Agents authenticate with `Authorization: Bearer <token>`; the server refuses a
-connection without one, and the token belongs in the agent's own config
-(`extensions.opamp.server.http.headers`, or `server.ws.headers` for the WebSocket
-transport).
+connection without one, and the token belongs in the agent's own config (where it
+goes is the agent's business — the snippet for its type above shows the shape).
 
 | Kind | Mint | What it is |
 |---|---|---|
@@ -88,25 +148,27 @@ st.divider()
 
 st.markdown("### Agent Description")
 st.markdown("""
-The OpAMP extension supports both **identifying** and **non-identifying** attributes:
+The OpAMP protocol supports both **identifying** and **non-identifying** attributes:
 
 - **Identifying attributes** uniquely identify the agent (e.g., `agent.id`, `host.name`)
 - **Non-identifying attributes** provide additional context (e.g., `environment`, `service.name`)
 
-These are used for filtering and grouping in the Agents view.
+They are used for filtering and grouping in the Agents view, and — because the spec
+says `service.name` SHOULD be a reverse FQDN naming the agent type — they are also
+what the server matches profiles on when an agent does not say what it is.
 """)
 
 st.divider()
 
 st.markdown("### Capabilities")
 st.markdown("""
-The OpAMP extension can report:
+An agent can report:
 
 | Capability | Description |
 |------------|-------------|
 | `reports_health` | Send periodic health status |
-| `reports_effective_config` | Report current collector configuration |
-| `reports_available_components` | Report which components (receivers, processors, exporters) are in use |
+| `reports_effective_config` | Report its current configuration |
+| `reports_available_components` | Report which components it has in use (the vocabulary is the agent's own) |
 """)
 
 st.divider()
@@ -153,16 +215,9 @@ review rather than a single "push" button. The flow:
    *roll back* creates a new revision per applied agent and runs it as its own gated
    rollout.
 
-Two prerequisites, both upstream realities:
-
-- A pushed config is applied by the **OpAMP Supervisor** (`cmd/opampsupervisor`), not by
-  `extension/opampextension` — a bare collector never advertises `AcceptsRemoteConfig`.
-- An invalid config leaves the collector **down until it is manually restarted** (the
-  extension is no longer running), which is why rollout staging and the health gate are
-  not optional.
-
 Need a restart after the config lands? Tick "Restart each agent once its batch passes
-the gate" on the rollout plan — and enable `accepts_restart_command: true` in the
-collector's `opamp` extension, or the server will refuse the restart with a 409 rather
-than pretending to have sent one.
+  the gate" on the rollout plan, and the agent must advertise `accepts_restart_command`
+— otherwise the server refuses the restart with a 409 rather than pretending to have
+sent one. What a *pushed config* does to a particular product (who applies it, and
+what happens if it is invalid) is described under **Known agent types** above.
 """)

@@ -443,8 +443,8 @@ def test_the_empty_fleet_shows_a_snippet_built_by_the_shared_helper():
     """
     agents = source(AGENTS_PAGE)
     help_page = source(UI_DIR / "pages" / "4_Help.py")
-    assert "collector_config_snippet(" in agents
-    assert "collector_config_snippet(" in help_page
+    assert "connect_snippet(" in agents
+    assert "connect_snippet(" in help_page
     assert "No agents connected. Start an OpenTelemetry Collector" not in agents
     # The snippet is useless without the line people forget, so it is asserted below
     # in the helper test rather than trusted to prose.
@@ -453,9 +453,9 @@ def test_the_empty_fleet_shows_a_snippet_built_by_the_shared_helper():
 def test_the_empty_fleet_snippet_is_runnable_yaml_for_this_server():
     pytest.importorskip("streamlit")
     yaml = pytest.importorskip("yaml")
-    from ui.shared import collector_config_snippet
+    from ui.shared import connect_snippet
 
-    document = yaml.safe_load(collector_config_snippet("http://opamp.example:4320/"))
+    document = yaml.safe_load(connect_snippet("http://opamp.example:4320/"))
 
     assert document["extensions"]["opamp"]["server"]["http"]["endpoint"] == (
         "http://opamp.example:4320/v1/opamp"
@@ -477,10 +477,10 @@ def test_the_empty_fleet_snippet_is_runnable_yaml_for_this_server():
 def test_the_container_variant_rewrites_only_the_host():
     pytest.importorskip("streamlit")
     yaml = pytest.importorskip("yaml")
-    from ui.shared import collector_config_snippet
+    from ui.shared import connect_snippet
 
     def endpoint(url, **kwargs):
-        return yaml.safe_load(collector_config_snippet(url, **kwargs))["extensions"][
+        return yaml.safe_load(connect_snippet(url, **kwargs))["extensions"][
             "opamp"
         ]["server"]["http"]["endpoint"]
 
@@ -494,15 +494,126 @@ def test_the_container_variant_rewrites_only_the_host():
     )
 
 
+# ------------------------------------------------- the snippet is the profile's (#121)
+
+
+def test_the_otelcol_snippet_still_says_exactly_what_116_shipped():
+    """#121 moved the text out of `ui/shared.py` and into `otelcol.yaml`.
+
+    A move, not a rewrite: this is the string an operator has been pasting since #116,
+    byte for byte. If it changes, that is a decision someone has to make on purpose —
+    not something that falls out of a refactor.
+
+    `poll_interval` used to be a keyword argument of the UI helper and is now part of
+    the profile's own text (`5s`), which is the point: it is a fact about how this
+    config is written, not a knob the page offers.
+    """
+    pytest.importorskip("streamlit")
+    from ui.shared import connect_snippet
+
+    assert connect_snippet(
+        "http://opamp.example:4320", agent_name="my-collector", agent_auth="off"
+    ) == (
+        "extensions:\n"
+        "  opamp:\n"
+        "    server:\n"
+        "      http:\n"
+        "        endpoint: http://opamp.example:4320/v1/opamp\n"
+        "        polling_interval: 5s\n"
+        "    agent_description:\n"
+        "      non_identifying_attributes:\n"
+        '        "agent.name": "my-collector"      # your label; the Agents page shows it\n'
+        '        "deployment.environment": "development"\n'
+        "    capabilities:\n"
+        "      reports_health: true\n"
+        "      reports_effective_config: true      # needed for config push and drift\n"
+        "      reports_available_components: true  # needed for the component inventory\n"
+        "\n"
+        "receivers:\n"
+        "  otlp:\n"
+        "    protocols:\n"
+        "      grpc:\n"
+        "        endpoint: 127.0.0.1:4317\n"
+        "      http:\n"
+        "        endpoint: 127.0.0.1:4318\n"
+        "\n"
+        "processors:\n"
+        "  batch:\n"
+        "\n"
+        "exporters:\n"
+        "  debug:\n"
+        "    verbosity: normal\n"
+        "\n"
+        "service:\n"
+        "  extensions: [opamp]        # without this the extension never starts\n"
+        "  pipelines:\n"
+        "    traces:\n"
+        "      receivers: [otlp]\n"
+        "      processors: [batch]\n"
+        "      exporters: [debug]\n"
+    )
+
+
+def test_a_non_collector_is_never_handed_a_collector_config():
+    """The bug #121 exists to fix: every agent type used to get collector YAML.
+
+    A profile with no onboarding snippet — `generic` is the shipped example — returns
+    its `bootstrap_snippet` instead, which is plain text saying where to point and what
+    the credential is. Inventing a YAML file for a product that does not read it is
+    worse than saying nothing.
+    """
+    pytest.importorskip("streamlit")
+    from ui.shared import connect_snippet
+    from server import profiles
+
+    generic = profiles.get("generic")
+    assert generic.onboarding_snippet("http://h:4320/v1/opamp", "tok") == ""
+    snippet = connect_snippet("http://h:4320", profile=generic)
+
+    assert "http://h:4320/v1/opamp" in snippet
+    assert "Authorization: Bearer" in snippet
+    for collector_key in ("receivers:", "exporters:", "extensions:", "processors:"):
+        assert collector_key not in snippet, collector_key
+
+
+def test_every_profile_gets_a_snippet_it_can_call_its_own():
+    """Whatever the profile is, the page has something to show and nothing invented."""
+    pytest.importorskip("streamlit")
+    from ui.shared import connect_snippet
+    from server import profiles
+
+    for profile in profiles.PROFILES:
+        snippet = connect_snippet("http://opamp.example:4320", profile=profile)
+        assert snippet.strip(), profile.name
+        assert "http://opamp.example:4320/v1/opamp" in snippet, profile.name
+
+
+def test_the_help_page_shows_one_section_per_profile():
+    """The Help page is the dictionary's, not a collector's page with a disclaimer.
+
+    "A bare collector never advertises AcceptsRemoteConfig" used to be printed as
+    general truth; it is now otelcol's `guidance`, rendered under otelcol.
+    """
+    help_page = source(UI_DIR / "pages" / "4_Help.py")
+    assert "for profile in profiles.PROFILES" in help_page
+    assert "profile.guidance" in help_page
+    # The product-specific claims are not in the page any more.
+    assert "a bare collector never advertises" not in help_page.lower()
+    assert "down until it is manually restarted" not in help_page.lower()
+    from server import profiles
+
+    assert "a bare collector never advertises" in profiles.get("otelcol").guidance.lower()
+
+
 # --------------------------------------------- the snippet must match the mode (#124)
 
 
 def _opamp_server_block(**kwargs):
     pytest.importorskip("streamlit")
     yaml = pytest.importorskip("yaml")
-    from ui.shared import collector_config_snippet
+    from ui.shared import connect_snippet
 
-    return yaml.safe_load(collector_config_snippet("http://opamp.example:4320", **kwargs))[
+    return yaml.safe_load(connect_snippet("http://opamp.example:4320", **kwargs))[
         "extensions"
     ]["opamp"]["server"]
 
@@ -604,6 +715,30 @@ class TestAgentTypeBadge:
         assert _shared.agent_type_badge(
             {"agent_type": "generic", "agent_type_source": "fallback"}
         ) == "📦 generic"
+
+    def test_an_ambiguous_match_says_so(self, _shared):
+        """#134 leaves a tie visible on the payload; #121 renders it (#121).
+
+        The badge is a table cell, so it gets one glyph; the detail page names the
+        candidates. A tie nothing shows is a decision nobody can audit.
+        """
+        assert (
+            _shared.agent_type_badge(
+                {
+                    "agent_type": "otelcol",
+                    "agent_type_source": "declared",
+                    "agent_type_ambiguous": ["otelcol", "fluentbit"],
+                }
+            )
+            == "🧩 otelcol (declared) ⚠️"
+        )
+        # No tie, no glyph.
+        assert (
+            _shared.agent_type_badge(
+                {"agent_type": "otelcol", "agent_type_source": "declared"}
+            )
+            == "🧩 otelcol (declared)"
+        )
 
     def test_a_missing_type_does_not_crash_the_fleet_view(self, _shared):
         assert _shared.agent_type_badge(None) == "⚪ unknown"

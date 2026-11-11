@@ -298,6 +298,26 @@ class TestUiCanRenderANonEmptyKey:
         # If the `raw` object had won, there would be no `extensions` section at all.
         assert shown["service"]["extensions"] == ["opamp"]
 
+    def test_a_non_interpreting_profile_never_gets_a_pipeline_added(self):
+        """#121: the augmentation is gated by the agent's *profile*, not by a shape.
+
+        `_COLLECTOR_SECTIONS` made this module decide what a collector config is for
+        every agent. The page now passes the resolved profile, so a `generic` agent's
+        body — which this server does not interpret — is displayed exactly as it was
+        reported: no injected `processors.batch`, no invented `traces` pipeline.
+        """
+        from server import profiles
+        from ui.config_view import display_config_yaml
+
+        rendered = display_config_yaml(
+            json.dumps(_doc(collector=CONFIG)), profile=profiles.get("generic")
+        )
+        assert rendered is not None
+        shown = yaml.safe_load(rendered)
+        assert "processors" not in shown
+        assert shown["service"] == yaml.safe_load(CONFIG)["service"]
+        assert "telemetry" not in shown["service"]
+
     def test_display_yaml_is_none_when_nothing_parses(self):
         from ui.config_view import display_config_yaml
 

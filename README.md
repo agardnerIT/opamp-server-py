@@ -1844,20 +1844,40 @@ identity:
     component_sections_any: [receivers, exporters]
     config_sections_any: [receivers, service]
 reports: [fleet, agent, heavy, outdated]
-telemetry: {metric_prefix: "otelcol_"}   # omit entirely = "reports no telemetry"
+telemetry:                     # omit entirely = "this agent reports no telemetry here"
+  metric_prefix: "otelcol_"
+  title: Collector Telemetry   # the words the detail page uses, because "collector"
+  caption: Real-time metrics…  # is accurate for this product and a lie about others
 components: {sections: {receivers: receiver, ...}}   # how to read the inventory
-snippet: |                     # {endpoint}, {token}, {scheme} are substituted
+snippet: |                     # {endpoint}, {token}, {scheme}, {auth} are substituted
   extensions:
     opamp:
       server:
         {scheme}:
           endpoint: {endpoint}
+# A *whole* config for a new agent (#121), as opposed to the fragment above. Optional:
+# a profile without one shows its `snippet`, rather than an invented file.
+onboarding_snippet: |
+  extensions:
+    opamp:
+      server:
+        {scheme}:
+          endpoint: {endpoint}
+{auth}
+guidance: |                    # shown on the Help page under this profile only
+  What this product does with a pushed config, and what it does with a bad one.
 panels:                        # the agent-detail blocks this profile declares
   - id: data-flow-inputs
     widget: metrics            # WIDGETS is closed: a widget with no renderer is a lie
     metrics: [{label: Logs In, metric: otelcol_receiver_accepted_log_records}]
 bootstrap_default: false       # at most one profile; the snippet shown before an agent connects
 ```
+
+**The UI is rendered from this file (#121).** The agent-detail page has no product
+vocabulary of its own: the icon in the badge, the telemetry heading, the panels and
+their metric labels, the download filename, the Help page's per-profile section and
+the reports a fleet is offered are all fields above. `git grep -i collector ui/`
+returns nothing but strings that came from a profile.
 
 **Adding an agent type** is one file and a restart. No Python, no release:
 

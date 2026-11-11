@@ -149,8 +149,22 @@ class IdentityDocument(_Strict):
 
 
 class TelemetryDocument(_Strict):
+    """What this profile's agents report to `POST /v1/metrics`, and what to call it.
+
+    The mapping half (`metric_prefix` / `metric_map`) is the declaration; the three
+    text fields are the heading the agent-detail page renders above its panels. They
+    are here rather than in `ui/` because the wording is a fact about the product:
+    "Collector Telemetry" is accurate for a collector and a lie for anything else,
+    and #121's whole job is that no non-collector is ever shown the collector's words.
+    """
+
     metric_prefix: str = ""
     metric_map: Dict[str, str] = Field(default_factory=dict)
+    #: Heading above the panels, and the one-line explanation under it.
+    title: str = "Telemetry"
+    caption: str = ""
+    #: The expander that dumps every reported metric, and what it says it is dumping.
+    raw_caption: str = ""
 
     @model_validator(mode="after")
     def _some_mapping(self):
@@ -244,6 +258,17 @@ class ProfileDocument(_Strict):
     telemetry: Optional[TelemetryDocument] = None
     components: Optional[ComponentsDocument] = None
     snippet: str = ""
+    #: A complete, runnable config for a *new* agent of this type (#121). `snippet` is
+    #: the fragment an existing config gains; this is the whole file an operator with
+    #: an empty fleet pastes and runs. Empty means "this profile has no such thing" —
+    #: the UI then falls back to `snippet`, which is the honest answer for a product
+    #: whose config this server cannot write.
+    onboarding_snippet: str = ""
+    #: Per-profile prose for the Help page: what this product does with a pushed
+    #: config, what happens when one is wrong, what it must advertise. Claims like
+    #: "an invalid config leaves the collector down" are true of one product, so they
+    #: live in that product's file instead of being shown as general truth (#121).
+    guidance: str = ""
     panels: Tuple[PanelDocument, ...] = ()
     bootstrap_default: bool = False
 
@@ -287,6 +312,12 @@ class ProfileDocument(_Strict):
             problem = check_template(self.snippet)
             if problem:
                 raise ValueError(problem)
+        if self.onboarding_snippet:
+            # The credential arrives inside `{auth}`, so only the endpoint is required
+            # to appear literally in a full config.
+            problem = check_template(self.onboarding_snippet, required=("endpoint",))
+            if problem:
+                raise ValueError(f"onboarding_snippet: {problem}")
         return self
 
     @model_validator(mode="after")

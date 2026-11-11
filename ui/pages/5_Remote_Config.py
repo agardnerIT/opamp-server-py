@@ -252,7 +252,7 @@ elif (posture.get("config_push") or {}).get("insecure"):
 elif not posture.get("allowed"):
     st.info(
         "Config push is **disabled**. Set `OPAMP_CONFIG_PUSH_ENABLED=true` on a server "
-        "whose posture passes, or read the [Help page](/Help) for the collector setup."
+        "whose posture passes, or read the [Help page](/Help) for the agent setup."
     )
 for name, state in sorted(requirements.items()):
     if state.get("met"):
@@ -368,10 +368,13 @@ if saved_group is not None:
     agents = [agent for agent in agents if agent.get("id") in members]
 
 if not agents:
+    # #121: whether an agent applies a pushed config is a property of its product, not
+    # of this page — the profile dictionary says which agents accept one, so the page
+    # does not claim to know what a "bare collector" does.
     st.warning(
         "No agents match this selector. A rollout needs at least one agent that "
-        "advertises `AcceptsRemoteConfig` — a bare collector does not; the OpAMP "
-        "Supervisor does."
+        "advertises `AcceptsRemoteConfig`; which agents do is described under "
+        "**Known agent types** on the Help page."
     )
 
 counts = {}

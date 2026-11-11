@@ -11,10 +11,10 @@ generic agent. This file compares that capture to
 than a snapshot of nothing — runs the same capture against a page with one metric label
 renamed and requires it to notice.
 
-The `otelcol` half is the fence: keep it byte-identical through #121. The `generic`
-half records today's *wrong* behaviour (a `collector-config.yaml` download and OTel
-wording on an agent that is not a collector) and is expected to change once, in Phase 3,
-with the diff as the review.
+The `otelcol` half is the fence: it stayed byte-identical through #121. The `generic`
+half used to record the *wrong* behaviour (a `collector-config.yaml` download and OTel
+wording on an agent that is not a collector); it changed once, in Phase 3, and what it
+records now is the absence of both — plus the profile's own sentence about telemetry.
 
 Neither fixture is updated by a test run. Regenerate with::
 
@@ -62,21 +62,31 @@ def test_the_generic_detail_renders_exactly_what_was_recorded(golden):
 def test_the_capture_notices_a_renamed_metric_panel(golden, tmp_path):
     """A capture that passes while a panel is renamed is a snapshot of nothing.
 
-    This is the acceptance criterion from the plan: the fence has to fail when the
-    thing it fences changes. The rename is applied to a *copy* of the real page, so the
-    proof uses the same render path as the fixture — not a hand-built dict.
+    This is the acceptance criterion from the plan: the fence has to fail when the thing
+    it fences changes. #121 moved the panel out of the page and into the dictionary, so
+    the mutation moved with it — renaming a label in a *copy* of `otelcol.yaml` and
+    reloading the registry now proves the harder claim: that the page really renders
+    what the profile file says, rather than a copy of it that happens to agree today.
     """
-    source = ui_golden.AGENTS_PAGE.read_text(encoding="utf-8")
-    assert 'st.metric("Logs In"' in source, (
+    import shutil
+
+    from server import profiles
+
+    directory = tmp_path / "data"
+    shutil.copytree(profiles.loader.directory(), directory)
+    document = directory / "otelcol.yaml"
+    text = document.read_text(encoding="utf-8")
+    assert "Logs In" in text, (
         "the panel this test renames is gone; pick another metric label rather than "
         "deleting the proof"
     )
-    mutated = tmp_path / "1_Agents.py"
-    mutated.write_text(
-        source.replace('st.metric("Logs In"', 'st.metric("Records In"'), encoding="utf-8"
-    )
+    document.write_text(text.replace("Logs In", "Records In"), encoding="utf-8")
 
-    changed = ui_golden.capture("otelcol", page=mutated)
+    try:
+        profiles.reload(directory, strict=True)
+        changed = ui_golden.capture("otelcol")
+    finally:
+        profiles.reload()  # never leave the shipped dictionary mutated for other tests
 
     assert changed != golden["otelcol"], "renaming a metric panel changed nothing"
     assert "Records In" in ui_golden.texts(changed)
@@ -102,18 +112,82 @@ def test_the_otelcol_half_really_exercises_the_collector_path(golden):
     assert '"Name"' in body and "otlphttp" in body
 
 
-def test_the_generic_half_records_the_chrome_phase_3_must_delete(golden):
-    """The point of capturing a non-collector: today it still gets collector artefacts.
+def test_the_generic_half_has_no_collector_chrome_left(golden):
+    """The point of capturing a non-collector, after #121: it gets none of it.
 
-    When #121 lands, this test fails — deliberately. Replace the assertions with the
-    opposite ones ("no collector-config.yaml, no OTel wording") and regenerate the
-    fixture; that swap is the proof the issue was fixed.
+    This test used to assert the opposite (a `collector-config.yaml` download and OTel
+    wording) and fail the moment Phase 3 landed. Flipping it *is* the proof the issue
+    was fixed, and it is the mechanical version of the acceptance screenshot.
     """
     body = ui_golden.texts(golden["generic"])
-    assert "collector-config.yaml" in body
-    assert "otelcol" not in body.lower(), (
-        "the generic agent now mentions otelcol: Phase 3 may already have landed. If it "
-        "has, flip this test and regenerate the fixture."
-    )
-    # It does have its own shape, so the capture is not a copy of the otelcol one.
+    for artefact in (
+        "collector-config.yaml",
+        "Collector Telemetry",
+        "Data Flow",
+        "otelcol_",
+        "Create Slim Distro",
+        "manifest.yaml",
+    ):
+        assert artefact not in body, artefact
+    assert "collector" not in body.lower()
+
+    # The two sentences that replaced one: a product fact, not a fault, and this agent
+    # reports no telemetry at all.
+    assert "This profile does not report telemetry to the server." in body
+    assert "No telemetry received yet." not in body
+    # No component inventory for a profile that has no such concept — and no "0/0".
+    assert "0/0 in use" not in body
+    assert "No components reported" not in body
+    # It has its own shape, so the capture is not a copy of the otelcol one.
     assert golden["generic"] != golden["otelcol"]
+
+
+def test_a_profile_with_no_panels_renders_generic_chrome(tmp_path):
+    """The plan's Phase 3 gate: a data-only profile needs no UI work to render.
+
+    A brand-new agent type — a YAML file with an identity rule and nothing else — must
+    come out as generic chrome: no OTel wording, no empty metric grid, no collector
+    artefact, and no Python change. That is acceptance criterion 1 of #117 made
+    executable at the UI layer instead of asserted in prose.
+    """
+    import shutil
+
+    from server import profiles
+
+    directory = tmp_path / "data"
+    shutil.copytree(profiles.loader.directory(), directory)
+    (directory / "fluentbit.yaml").write_text(
+        """\
+name: fluentbit
+display_name: FluentBit
+icon: "🪵"
+priority: 50
+summary: A log forwarder. This server does not interpret its configuration.
+identity:
+  match_any:
+    - attr: service.name
+      prefix: ["fluent-bit", "fluentbit"]
+""",
+        encoding="utf-8",
+    )
+
+    try:
+        profiles.reload(directory, strict=True)
+        captured = ui_golden.capture(
+            "generic",
+            server=ui_golden._GoldenServer(
+                metrics={},
+                components={},
+                effective_config=None,
+                description=ui_golden._description("fluent-bit"),
+                agent_type="fluentbit",
+            ),
+        )
+    finally:
+        profiles.reload()
+
+    body = ui_golden.texts(captured)
+    assert "🪵 fluentbit" in body, "the badge did not take the profile's own icon"
+    assert "collector" not in body.lower()
+    assert "otelcol" not in body.lower()
+    assert "This profile does not report telemetry to the server." in body

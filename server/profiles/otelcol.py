@@ -21,7 +21,6 @@ Two things to know before editing:
 
 from __future__ import annotations
 
-import os
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 
@@ -32,6 +31,8 @@ from server.config_validation import (
     _as_list,
     _is_mapping,
     _path,
+    allowed_exporter_hosts,
+    allowed_opamp_endpoints,
     looks_yaml_like,
 )
 
@@ -55,46 +56,6 @@ PIPELINE_SECTIONS = {
 
 
 OPAMP_EXTENSION = "opamp"
-
-
-ADDRESS_SECTIONS = frozenset(COMPONENT_SECTIONS) | {
-    "pipelines",  # collector: service.pipelines.<id>
-    "schedule",  # osquery: schedule.<query name>
-    "packs",  # osquery: packs.<pack name>
-}
-
-
-def allowed_exporter_hosts() -> Tuple[str, ...]:
-    """`CONFIG_ALLOWED_EXPORTER_HOSTS` (comma-separated); empty means "no opinion"."""
-    raw = (os.environ.get("CONFIG_ALLOWED_EXPORTER_HOSTS") or "").strip()
-    if not raw:
-        return ()
-    return tuple(part.strip().lower() for part in raw.split(",") if part.strip())
-
-
-def allowed_opamp_endpoints() -> Tuple[str, ...]:
-    """Endpoints a pushed config may keep/point the `opamp` extension at.
-
-    Deliberately built from *this* server's advertised addresses plus an explicit
-    allowlist: moving a fleet's control channel is exactly the chicken-and-egg
-    outage #83 warns about, so it needs a deliberate opt-in, not a typo.
-    """
-    from server import posture
-
-    values: List[str] = []
-    for name in ("OPAMP_SERVER_ENDPOINT", "OPAMP_WS_ENDPOINT", "OPAMP_HTTP_ENDPOINT"):
-        value = (os.environ.get(name) or "").strip()
-        if value:
-            values.append(value)
-    public_url = (posture.public_url() or "").strip()
-    if public_url:
-        values.append(public_url)
-        parsed = urlparse(public_url)
-        if parsed.hostname:
-            values.append(parsed.hostname)
-    raw = (os.environ.get("CONFIG_ALLOWED_OPAMP_ENDPOINTS") or "").strip()
-    values.extend(part.strip() for part in raw.split(",") if part.strip())
-    return tuple(dict.fromkeys(values))
 
 
 def check_structure(doc: Any, path: str, verdict: Verdict) -> None:

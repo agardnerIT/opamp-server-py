@@ -96,9 +96,6 @@ from server import (
     tracing,
     updates,
 )
-
-# #119: the collector's structural rules live in its profile engine.
-from server.profiles import otelcol  # noqa: E402
 from server.http_body import BodyTooLarge, UnsupportedEncoding, read_body
 from server.redaction import redact_document
 from server.auth import (  # noqa: F401  (privileged routes below)
@@ -939,17 +936,14 @@ async def receive_metrics(request: Request):
         
         if "application/json" in content_type:
             data = await request.json()
-            service_name = None
-            service_instance_id = None
             
-            for resource in data.get("resourceMetrics", []):
-                for attr in resource.get("resource", {}).get("attributes", []):
-                    if attr.get("key") == "service.name":
-                        service_name = attr.get("value", {}).get("stringValue")
-                    elif attr.get("key") == "service.instance.id":
-                        service_instance_id = attr.get("value", {}).get("stringValue")
-            
-            agent_id = (service_instance_id or service_name or "").replace("-", "")
+            agent_id = _identity_from_resource(
+                [
+                    (attr.get("key"), (attr.get("value") or {}).get("stringValue"))
+                    for resource in data.get("resourceMetrics", [])
+                    for attr in resource.get("resource", {}).get("attributes", [])
+                ]
+            )
             
             # #108: per-scrape lines are DEBUG. One line per collector per scrape at
             # INFO is hot-loop noise, and it was the loudest line in a healthy fleet.
@@ -980,17 +974,13 @@ async def receive_metrics(request: Request):
             metrics_req = ExportMetricsServiceRequest()
             metrics_req.ParseFromString(body)
             
-            service_name = None
-            service_instance_id = None
-            
-            for resource in metrics_req.resource_metrics:
-                for attr in resource.resource.attributes:
-                    if attr.key == "service.name":
-                        service_name = attr.value.string_value
-                    elif attr.key == "service.instance.id":
-                        service_instance_id = attr.value.string_value
-            
-            agent_id = (service_instance_id or service_name or "").replace("-", "")
+            agent_id = _identity_from_resource(
+                [
+                    (attr.key, attr.value.string_value)
+                    for resource in metrics_req.resource_metrics
+                    for attr in resource.resource.attributes
+                ]
+            )
             
             logger.bind(
                 event="metrics.ingest",
@@ -1024,6 +1014,32 @@ async def receive_metrics(request: Request):
             f"Failed to process metrics: {e}"
         )
         return {"status": "error", "error": str(e)}
+
+
+#: OTLP resource attributes that identify the reporting agent, in preference order.
+#: A product that uses another attribute is **one entry here**, not a code change (#122).
+IDENTITY_ATTRIBUTES = ("service.instance.id", "service.name")
+
+
+def _identity_from_resource(attributes) -> str:
+    """The agent id an OTLP resource describes, or `""` when it identifies nothing (#122).
+
+    The derivation is deliberately dumb — preference order, then dashes stripped, because
+    an OpAMP instance uid is hex and a `service.name` is not — and it exists **once**, so
+    the JSON and protobuf branches of `POST /v1/metrics` cannot drift apart. They had two
+    copies of the same expression, which is how one of them eventually grows a fix the
+    other does not have.
+
+    An unknown identity is not an error: ingestion is best-effort by design, the caller
+    logs at DEBUG and drops the batch. Changing the attribute table is a policy change for
+    who may write metrics, so it is data (`IDENTITY_ATTRIBUTES`) rather than a branch.
+    """
+    values = {str(key): (value or "") for key, value in attributes if key}
+    for name in IDENTITY_ATTRIBUTES:
+        candidate = str(values.get(name) or "").strip()
+        if candidate:
+            return candidate.replace("-", "")
+    return ""
 
 
 def _extract_json_metric_value(metric: Dict) -> Any:
@@ -2720,7 +2736,12 @@ def generate_agent_manifest(agent_id: str, request: ManifestRequest | None = Non
         )
 
     return {
-        "manifest_yaml": generate_manifest(components, version),
+        # #122: the distro name is the profile's, not a literal in the manifest
+        # module: "otelcol" + "-slim" reproduces the historical bytes for the
+        # collector, and a fork gets its own name for free.
+        "manifest_yaml": generate_manifest(
+            components, version, dist_name=f"{agent.profile.name}-slim"
+        ),
         "ocb_command": generate_ocb_command(version),
         "collector_version": version,
     }
@@ -5274,7 +5295,7 @@ def config_posture(request: Request):
                 "max_aliases": config_validation.max_aliases(),
                 "max_depth": config_validation.max_depth(),
                 "max_nodes": config_validation.max_nodes(),
-                "allowed_exporter_hosts": list(otelcol.allowed_exporter_hosts()),
+                "allowed_exporter_hosts": list(config_validation.allowed_exporter_hosts()),
             },
         },
     }

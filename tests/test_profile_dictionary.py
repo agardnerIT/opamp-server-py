@@ -534,3 +534,55 @@ class TestAmbiguityIsVisible:
 
     def test_the_read_surface_carries_the_key(self):
         assert "agent_type_ambiguous" in _agent().to_dict()
+
+
+# -------------------------- no product vocabulary in the server core (#122)
+
+
+def test_no_product_name_reaches_the_shared_server_layers():
+    """#122 acceptance, mechanically: OTel vocabulary belongs in the dictionary.
+
+    Comments and docstrings are excluded (explaining a decision by naming the product is
+    how the next reader understands it); *code* is not. The one allowed exception is the
+    #119 compatibility shim in `config_validation.py`, which resolves the pre-split names
+    to the profile's engine so semi-public imports keep working.
+    """
+    import ast
+
+    repo = Path(profiles.__file__).resolve().parent.parent
+    allowed = {
+        # The #119 shim: resolves the pre-split names to the profile's engine, so
+        # `config_validation.check_structure` keeps working for existing callers.
+        ("config_validation.py", "otelcol"),
+        # A help string in `GET /agents/query/schema`: documentation an operator reads,
+        # not behaviour. Naming an example profile is the point of it.
+        ("agent_query.py", "Resolved profile name, e.g. otelcol or generic"),
+    }
+    offenders = []
+
+    for path in sorted(repo.glob("*.py")):
+        tree = ast.parse(path.read_text())
+        docstrings = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                body = getattr(node, "body", [])
+                if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+                    docstrings.add(id(body[0].value))
+        for node in ast.walk(tree):
+            name = None
+            if isinstance(node, ast.ImportFrom):
+                name = node.module or ""
+            elif isinstance(node, ast.Name):
+                name = node.id
+            elif isinstance(node, ast.Attribute):
+                name = node.attr
+            elif isinstance(node, ast.Constant) and id(node) not in docstrings:
+                name = node.value if isinstance(node.value, str) else None
+            if name and "otelcol" in str(name):
+                if (path.name, "otelcol") in allowed or (path.name, str(name)) in allowed:
+                    continue
+                offenders.append(f"{path.name}:{node.lineno}: {name}")
+
+    assert not offenders, (
+        "a product name leaked into the shared server layers (#122): " + "; ".join(offenders)
+    )

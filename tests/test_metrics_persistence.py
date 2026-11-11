@@ -98,3 +98,83 @@ class TestIngestPersists:
         assert resp.json()["metrics"]["otelcol_process_uptime"] == 42
 
         AGENT_REGISTRY.remove(agent_id)
+
+
+# ------------------------------------------------- one identity path (#122)
+
+
+import pytest
+
+
+@pytest.fixture()
+def client_with_agent(monkeypatch, tmp_path):
+    """A client with one registered agent on a throwaway metrics store."""
+    agent_id = "ab" * 16
+    state = AgentState(instance_uid=bytes.fromhex(agent_id), agent_id=agent_id)
+    AGENT_REGISTRY.register(agent_id, state)
+    store = SQLiteMetricsStore(tmp_path / "metrics.db")
+    monkeypatch.setattr(server_main, "AGENT_REGISTRY", AGENT_REGISTRY)
+    monkeypatch.setattr(server_main, "METRICS_STORE", store, raising=False)
+    yield TestClient(server_main.app), agent_id
+    AGENT_REGISTRY.remove(agent_id)
+
+
+class TestTheIdentityDerivationExistsOnce:
+    """The same expression lived in the JSON branch and the protobuf branch of
+    `POST /v1/metrics`, which is how one of them eventually grows a fix the other does
+    not have. There is one function now, and both encodings have to agree.
+    """
+
+    def test_the_attribute_order_and_the_dash_stripping(self):
+        from server.main import IDENTITY_ATTRIBUTES, _identity_from_resource
+
+        assert IDENTITY_ATTRIBUTES == ("service.instance.id", "service.name")
+        assert _identity_from_resource(
+            [("service.name", "otelcol"), ("service.instance.id", "ab-cd-ef")]
+        ) == "abcdef"
+        # Falls back when the preferred attribute is absent or blank.
+        assert _identity_from_resource([("service.name", "otelcol-1")]) == "otelcol1"
+        assert _identity_from_resource(
+            [("service.instance.id", "   "), ("service.name", "otelcol")]
+        ) == "otelcol"
+        # Nothing identifying: no id, and no exception — ingestion is best-effort.
+        assert _identity_from_resource([]) == ""
+        assert _identity_from_resource([("other.attr", "x")]) == ""
+
+    def test_both_encodings_land_on_the_same_agent(self, client_with_agent):
+        """JSON and protobuf are the same request in two spellings; the id must match."""
+        client, agent_id = client_with_agent
+        resource = {"attributes": [
+            {"key": "service.instance.id",
+             "value": {"stringValue": agent_id[:8] + "-" + agent_id[8:]}},
+        ]}
+
+        json_body = {"resourceMetrics": [{
+            "resource": resource,
+            "scopeMetrics": [{"metrics": [{"name": "otelcol_process_uptime",
+                                           "gauge": {"dataPoints": [{"asInt": "12"}]}}]}],
+        }]}
+        assert client.post("/v1/metrics", json=json_body).status_code == 200
+
+        from opentelemetry.proto.collector.metrics.v1 import metrics_service_pb2
+
+        request = metrics_service_pb2.ExportMetricsServiceRequest()
+        resource_metrics = request.resource_metrics.add()
+        attribute = resource_metrics.resource.attributes.add()
+        attribute.key = "service.instance.id"
+        attribute.value.string_value = agent_id[:8] + "-" + agent_id[8:]
+        scope = resource_metrics.scope_metrics.add()
+        metric = scope.metrics.add()
+        metric.name = "otelcol_process_uptime"
+        metric.gauge.data_points.add().as_int = 34
+        assert client.post(
+            "/v1/metrics",
+            content=request.SerializeToString(),
+            headers={"content-type": "application/x-protobuf"},
+        ).status_code == 200
+
+        stored = client.get(f"/agent/{agent_id}/metrics").json()
+        values = stored.get("metrics") or {}
+        assert values.get("otelcol_process_uptime") == 34, (
+            "the protobuf batch must have hit the same agent the JSON batch did"
+        )

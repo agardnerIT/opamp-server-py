@@ -757,6 +757,29 @@ break; deleting rows *before* the checkpoint still shows up as tampering.
 | `error` | recorded, then the mutation failed (see the second row for the outcome) |
 | `noop` | idempotent no-change (e.g. logging out twice) |
 
+## Internal telemetry (#122)
+
+The telemetry view is **one profile's capability, not the definition of telemetry**. What
+this server accepts and what it shows:
+
+- **Ingestion is OTLP-only.** `POST /v1/metrics` speaks OTLP over HTTP (JSON or protobuf)
+  and nothing else. It is deliberately **unauthenticated** — existing behaviour, and
+  changing it is a separate decision with its own threat review — so treat it as a
+  write-only sink, not as a trusted source.
+- **Identity is one derivation, in one place.** The reporting agent is the resource
+  attribute `service.instance.id`, falling back to `service.name`, with dashes stripped
+  (`server.main.IDENTITY_ATTRIBUTES`, `_identity_from_resource`). Both encodings go through
+  that function, so JSON and protobuf cannot drift. An unknown identity is accepted, logged
+  at `DEBUG` and **dropped**: metrics attach to a *known* agent or to nothing.
+- **A profile that reports nothing shows nothing.** Which panels appear, and whether a
+  missing value is a fact ("this profile does not report telemetry to the server") or a gap
+  ("no telemetry received yet"), is the profile dictionary's answer (`telemetry:` on
+  `otelcol`; absent on `generic`). The UI renders the profile's own sentence rather than
+  guessing, and `null` values are not drawn as zeros.
+
+If a product needs push-based metrics over another protocol, that is a new sub-issue with
+its own design — not a widening of this route.
+
 ## Config objects (#68)
 
 `EffectiveConfig.config_map` holds **configuration objects**, and their keys are
@@ -1765,7 +1788,7 @@ The UI signs in the same way the CLI does — `POST /auth/session` — and then 
 | GET | `/auth/verify` | viewer | Validate a credential — any role passes (200, 401, or 429 when locked out); failures feed the lockout |
 | POST | `/v1/opamp` | 🔑 | OpAMP protocol endpoint — agents connect here (protobuf). With `OPAMP_AGENT_AUTH=token` the agent must send `Authorization: Bearer <token>`: 401 without a valid one, 403 when the token is for another `instance_uid`. Malformed input (including an empty `instance_uid`) is 400 with a `BAD_REQUEST` error body; a body over `OPAMP_MAX_MESSAGE_BYTES` (after decompression) is 413; an unsupported `Content-Encoding` is 415; when the server is overloaded the request is 503 with `Retry-After` and no state change (#78). The `OpAMP-Instance-UID` header is read and cross-checked against the body (#76); a duplicate uid is answered with a server-generated replacement (#75) |
 | WS | `/v1/opamp` | 🔑 | Same endpoint over WebSocket (`OPAMP_WS_ENABLED`, on by default); credential checked before `accept()`, refusals close `1008`. Malformed messages (including an empty `instance_uid`) get a `BAD_REQUEST` error frame then close `1002`; oversized frames close `1009`; an overloaded server refuses the upgrade with `503` + `Retry-After` (#78) |
-| POST | `/v1/metrics` | | OTLP/HTTP metrics ingestion from collectors (JSON or protobuf) |
+| POST | `/v1/metrics` | | OTLP/HTTP metrics ingestion (JSON or protobuf), keyed on `service.instance.id` then `service.name`. **Unauthenticated and OTLP-only** — one profile's telemetry, not a general metrics API (#122) |
 | GET | `/agents` | | List agents. Filters: `healthy=true\|false\|unknown`, `status=` (remote config status, or alias `remote_config_status=`), or any description attribute, e.g. `?environment=prod`. Repeated params are OR. Each agent carries a `credential` block |
 | GET | `/agent/types` | | The agent types (profiles) this build recognises, in match order: `name`, `display_name`, `icon`, `priority`, `summary`, `validates_structure`, `content_types`, `default_filename`, `reports`, `reports_telemetry`, `telemetry`, `detectable`, `identity` (`match_any` rules + `sniff`), `panels`, `components`, `bootstrap_default`. `otelcol` is an OpenTelemetry Collector; `generic` is any other OpAMP agent, whose config is stored and relayed **without being interpreted**. The list comes from the profile dictionary — see [Agent profiles](#agent-profiles-the-dictionary) |
 | PUT | `/agent/{id}/type` | operator | **Pin** the agent's type (`{"agent_type": "otelcol"}`) or clear the pin (`null`). A pin outranks every signal the agent sends (`service.name`, `content_type`, payload shape), survives restarts and is audited (`agent.type.pinned` / `agent.type.auto`). 422 for an unknown name (never a silent `generic`), 404 for an unknown agent. Returns the four `agent_type*` fields with provenance |

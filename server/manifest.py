@@ -109,7 +109,17 @@ def get_gomod_path(comp_type: str, comp_id: str) -> str:
     return f"github.com/open-telemetry/opentelemetry-collector-contrib/{comp_type}/{comp_id}"
 
 
-def generate_manifest(components: dict, version: str = DEFAULT_VERSION) -> str:
+def generate_manifest(
+    components: dict, version: str = DEFAULT_VERSION, dist_name: str = "dist"
+) -> str:
+    """One OCB `manifest.yaml` for the components an agent actually uses.
+
+    `dist_name` is the built distro's name, and it comes from the **profile** (#122): a
+    fork building a different collector should not have to patch a string in this module
+    to rename its own artefact. The default names no product on purpose — the route
+    passes `f"{profile.name}-slim"`, which reproduces the historical bytes for the
+    collector and gives every other profile its own name for free.
+    """
     receivers = []
     processors = []
     exporters = []
@@ -135,9 +145,9 @@ def generate_manifest(components: dict, version: str = DEFAULT_VERSION) -> str:
 
     lines = [
         f"dist:",
-        f"  name: otelcol-slim",
-        f"  description: OpenTelemetry Collector slim build",
-        f"  output_path: ./otelcol",
+        f"  name: {dist_name}",
+        f"  description: {dist_name} (OpenTelemetry Collector Builder)",
+        f"  output_path: ./{dist_name.replace('-slim', '')}",
         f"  version: {version}",
         f"  otel_col_version: {BASE_COLLECTOR_VERSION}",
         f"exporters:",

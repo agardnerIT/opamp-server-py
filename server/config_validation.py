@@ -56,6 +56,7 @@ import os
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from urllib.parse import urlparse
 
 import yaml
 from loguru import logger
@@ -368,6 +369,42 @@ def check_expansion(document: Any, budget: Optional[int] = None) -> None:
             stack.extend(node.values())
         elif isinstance(node, (list, tuple)):
             stack.extend(node)
+
+
+#: Push-side allowlists: settings about *this server*, not about a product (#122).
+#: They live here because `GET /config/posture` reports them; the collector's
+#: rules are what consult them, and those are the profile's.
+def allowed_exporter_hosts() -> Tuple[str, ...]:
+    """`CONFIG_ALLOWED_EXPORTER_HOSTS` (comma-separated); empty means "no opinion"."""
+    raw = (os.environ.get("CONFIG_ALLOWED_EXPORTER_HOSTS") or "").strip()
+    if not raw:
+        return ()
+    return tuple(part.strip().lower() for part in raw.split(",") if part.strip())
+
+
+def allowed_opamp_endpoints() -> Tuple[str, ...]:
+    """Endpoints a pushed config may keep/point the `opamp` extension at.
+
+    Deliberately built from *this* server's advertised addresses plus an explicit
+    allowlist: moving a fleet's control channel is exactly the chicken-and-egg
+    outage #83 warns about, so it needs a deliberate opt-in, not a typo.
+    """
+    from server import posture
+
+    values: List[str] = []
+    for name in ("OPAMP_SERVER_ENDPOINT", "OPAMP_WS_ENDPOINT", "OPAMP_HTTP_ENDPOINT"):
+        value = (os.environ.get(name) or "").strip()
+        if value:
+            values.append(value)
+    public_url = (posture.public_url() or "").strip()
+    if public_url:
+        values.append(public_url)
+        parsed = urlparse(public_url)
+        if parsed.hostname:
+            values.append(parsed.hostname)
+    raw = (os.environ.get("CONFIG_ALLOWED_OPAMP_ENDPOINTS") or "").strip()
+    values.extend(part.strip() for part in raw.split(",") if part.strip())
+    return tuple(dict.fromkeys(values))
 
 
 def looks_yaml_like(content_type: str) -> str:
@@ -1171,8 +1208,6 @@ def __getattr__(name: str):
 #: Names that moved to a profile engine in #119 and are still importable from here.
 _PROFILE_OWNED = frozenset(
     {
-        "allowed_exporter_hosts",
-        "allowed_opamp_endpoints",
         "check_invariants",
         "check_inventory",
         "check_structure",

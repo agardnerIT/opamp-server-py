@@ -135,8 +135,11 @@ class TestGenerateManifest:
 
     def test_output_is_valid_yaml(self):
         comps = {"receiver": [{"id": "otlp", "version": "0.98.0", "used": True}]}
-        parsed = yaml.safe_load(generate_manifest(comps))
+        # #122: the distro name is the caller's (the profile's), so the module default
+        # names no product. The route passes `f"{profile.name}-slim"`.
+        parsed = yaml.safe_load(generate_manifest(comps, dist_name="otelcol-slim"))
         assert parsed["dist"]["name"] == "otelcol-slim"
+        assert yaml.safe_load(generate_manifest(comps))["dist"]["name"] == "dist"
         assert parsed["receivers"] == [
             {"gomod": "github.com/open-telemetry/opentelemetry-collector-contrib/receiver/otlpreceiver v0.98.0"}
         ]

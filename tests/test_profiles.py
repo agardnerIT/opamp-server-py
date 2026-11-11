@@ -168,7 +168,14 @@ class TestResolutionPrecedence:
         assert profiles.resolve(_named("OTelCol-Contrib")).name == "otelcol"
 
     def test_an_unrelated_service_name_is_not_otelcol(self):
-        assert profiles.resolve(_named("fluent-bit")).name == "generic"
+        """`fluent-bit` is a *known* product with its own profile (#123), not a collector.
+
+        The assertion is deliberately "not otelcol" rather than "generic": the fallback
+        was the right answer until the dictionary learned the product, and a test that
+        pinned `generic` would have to be rewritten every time a profile is added.
+        """
+        assert profiles.resolve(_named("fluent-bit")).name == "fluentbit"
+        assert profiles.resolve(_named("acme-agent")).name == "generic"
 
     def test_available_components_sniff_the_collector(self):
         agent = _agent(
@@ -192,7 +199,7 @@ class TestResolutionPrecedence:
     def test_an_unknown_pin_falls_through_to_detection(self):
         """A pin naming a profile this build does not have must not be trusted."""
         agent = _named("otelcol")
-        agent.agent_type = "fluentbit"  # #123 will add it; today it is unknown
+        agent.agent_type = "no-such-product"  # a downgrade, or a typo in the database
         resolution = profiles.resolve(agent)
         assert (resolution.name, resolution.source) == ("otelcol", "declared")
 

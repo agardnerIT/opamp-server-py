@@ -291,6 +291,37 @@ def _used_from_health(agent: Any, spec: ComponentsSpec) -> Dict[str, Set[str]]:
 STRUCTURE_ENGINES: Dict[str, Callable[..., bool]] = {}
 
 
+#: The engines a profile may name in `components_engine` (#123). Same closed-registry
+#: rule as `structure`: a file may name one, never import one.
+COMPONENTS_ENGINES: Dict[str, Callable[[Any], Dict[str, list]]] = {}
+
+
+def register_components_engine(name: str, extract: Callable[[Any], Dict[str, list]]) -> None:
+    """Add a component extractor to the registry (called by the engine modules)."""
+    if name in COMPONENTS_ENGINES:
+        raise RuntimeError(f"components engine {name!r} is registered twice")
+    extract.ENGINE = name  # type: ignore[attr-defined]
+    COMPONENTS_ENGINES[name] = extract
+
+
+def components_engine_from(name: Optional[str]) -> Optional[Callable[[Any], Dict[str, list]]]:
+    """The extractor called `name`, or `None`.
+
+    Lazy import for the same reason as `structure_from`: engines import the validator.
+    """
+    if not name:
+        return None
+    from server.profiles import fluentbit  # noqa: F401  (registers itself)
+
+    engine = COMPONENTS_ENGINES.get(name)
+    if engine is None:
+        raise KeyError(
+            f"unknown components engine {name!r}; known engines: "
+            f"{', '.join(sorted(COMPONENTS_ENGINES)) or 'none'}"
+        )
+    return engine
+
+
 def register_structure_engine(name: str, validate: Callable[..., bool]) -> None:
     """Add one engine to the registry (called by the engine modules themselves)."""
     if name in STRUCTURE_ENGINES:

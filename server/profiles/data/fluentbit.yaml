@@ -1,0 +1,99 @@
+name: fluentbit
+display_name: Fluent Bit
+icon: "🪵"
+priority: 90
+summary: >-
+  Fluent Bit, managed by the opamp-observe supervisor (`opamp-core`). Its config is
+  classic INI, it reports the file it runs but no component inventory, and its OpAMP
+  settings live in the supervisor's own configuration — not in the body we can push.
+
+# Written against real payloads from opamp-observe/opamp-core 0.6.0 supervising
+# Fluent Bit 5.1.5 (#123), not against the documentation. What the spike captured:
+#   service.name    = "Fluentbit"                (capital F — not a reverse FQDN)
+#   service.type    = "Fluent Bit"               (the strongest, most stable signal)
+#   service.version = "Fluent Bit - 5.1.5 (Community)"
+#   effective config: one object, key "./fluent-bit.conf", content_type "text/plain"
+
+config_formats:
+  # The daemon reads INI (`fluent-bit.conf`). `text/plain` is what the supervisor
+  # actually declares, so it has to be here or every report would look undeclared.
+  # YAML is in the list because Fluent Bit 5 accepts a YAML config file too, and a user
+  # may hand us one.
+  - content_types:
+      - ""
+      - text/plain
+      - text/x-ini
+      - application/x-ini
+      - text/yaml
+      - application/yaml
+    default_filename: fluent-bit.conf
+    distinctive: false
+
+# Both halves are the profile's own engine, because this product is neither judged nor
+# inventoried the way a collector is (#123): the rules are INI-shaped, and the inventory
+# comes from the config document because the supervisor sends no `AvailableComponents`.
+validates_structure: true
+structure:
+  engine: fluentbit
+  # `[INPUT] Name cpu` names a plugin: two config sources defining the same plugin id
+  # collide when the daemon merges them, exactly like a collector component id.
+  address_sections: [input, filter, output]
+components_engine: fluentbit
+
+identity:
+  match_any:
+    # `service.type` first: the supervisor sets it from the consumer's own product name,
+    # so it does not move when an operator renames the instance.
+    - attr: service.type
+      prefix:
+        - "Fluent Bit"
+        - "FluentBit"
+        - "fluent-bit"
+        - "fluentbit"
+    - attr: service.name
+      prefix:
+        - "fluentbit"
+        - "fluent-bit"
+    # A Fluent Bit config is INI — `[SERVICE]`/`[INPUT]` is evidence from the payload,
+    # and no other product this dictionary knows about reports one.
+    # (`sniff.config_sections_any` is a substring list, so it matches headers.)
+  sniff:
+    config_sections_any: ["[SERVICE]", "[INPUT]"]
+
+# Neither fleet report applies: "heavy" counts *unused* components and every plugin here
+# is in use by definition, and "outdated" needs component versions this agent does not
+# report. Both reports now skip this profile by declaration and say so (#120).
+reports: [fleet, agent]
+
+# No telemetry view: Fluent Bit exposes its own HTTP metrics on its own port; it does not
+# push OTLP to this server, and a panel of empty tiles would be a lie (#121/#122).
+telemetry: null
+
+# The operator's own words, shown on the Help page. This is the paragraph a Fluent Bit
+# user needs and a collector user does not.
+guidance: >-
+  Fluent Bit is supervised by `opamp-core`, and the supervisor — not this server — owns
+  the daemon: it writes the config file, restarts the process, and reports health. What
+  this server pushes is the **configuration document**, addressed by the name the agent
+  reports (`./fluent-bit.conf`). Structural validation here is best effort: `[SERVICE]`,
+  at least one `[INPUT]` and one `[OUTPUT]`, and a `Name` on every plugin section are
+  errors; everything else is advice. This server cannot run `fluent-bit -c … --dry-run`
+  for you, so an approver is the last check before a rollout.
+
+# This product has no OpAMP block in *its* config file: the supervisor's own `opamp.json`
+# points the agent at a server. So the "snippet" is the supervisor's configuration rather
+# than an invented `fluent-bit.conf` (the collector's mistake, one layer over) — and it is
+# a runnable document, which is what the Help page needs.
+snippet: |
+  # Fluent Bit has no OpAMP block in its own config file: the opamp-observe supervisor
+  # (opamp-core) owns the control channel. Put this server's endpoint in the
+  # supervisor's "opamp.json" (service_type: fluentbit, agent_config_path:
+  # ./fluent-bit.conf), then run: opamp-consumer --config-path ./opamp.json
+  #
+  #   {endpoint}
+  #
+  # Keep "Health_Check On" in [SERVICE]: without a health endpoint the supervisor
+  # reports healthy=false and every rollout pauses on "unhealthy" (#123).
+  #
+  # Agent credential (if this server requires one): in the same file, as
+  # "OpAMP-token": "{token}"

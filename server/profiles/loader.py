@@ -125,6 +125,13 @@ def compile_document(document: ProfileDocument) -> AgentProfile:
         )
         components = engines.components_from(components_spec)
 
+    components_engine = None
+    if document.components_engine:
+        try:
+            components_engine = engines.components_engine_from(document.components_engine)
+        except KeyError as exc:
+            raise ProfileLoadError(document.name, str(exc)) from exc
+
     structure = None
     if document.structure is not None:
         try:
@@ -177,7 +184,9 @@ def compile_document(document: ProfileDocument) -> AgentProfile:
         identity_match_any=rules,
         sniff_spec=sniff_spec,
         sniff=sniff,
-        components=components,
+        # `components_engine` wins when declared: it inventories the live config, and the
+        # profile may not declare both (schema guard).
+        components=components_engine or components,
         components_spec=components_spec,
         reports=document.reports,
         telemetry=telemetry,

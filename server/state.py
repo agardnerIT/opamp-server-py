@@ -3172,7 +3172,7 @@ class AgentState:
           (the hash-only report case in README §"Hash-only component lists");
         * `reported` — an inventory exists and is what `components` returns.
         """
-        if self.profile.components_spec is None:
+        if not self.profile.has_components:
             return "unsupported"
         return "reported" if self.components else "unreported"
 

@@ -7,6 +7,10 @@ OpenTelemetry OpAMP server in Python with FastAPI + Streamlit UI. Optional integ
 This server also lets you:
 
 - Filter collectors by metadata (such as `environment: production`) or by **SQL** (`SELECT * FROM agents WHERE host_arch = 'amd64'`) — see [`docs/sql-agent-queries.md`](docs/sql-agent-queries.md)
+- Manage **any OpAMP agent**, not just OpenTelemetry Collectors: agent types are a data
+  dictionary (`otelcol`, `fluentbit`, `generic`), and what the server can say about one —
+  config format, structural rules, components, reports, telemetry panels — comes from that
+  dictionary, not from a product name in the code (see [Agent profiles](docs/agent-profiles.md))
 - Build minimal OTel Collectors (server generates a new `manifest.yaml` which you build with the [OpenTelemetry Collector Builder [OCB]](https://github.com/open-telemetry/opentelemetry-collector/tree/main/cmd/builder))
 - Validate connected collectors against OPA compliance policies
 - Be driven by **AI agents** — a REST API with a self-documenting OpenAPI schema, an `opampctl` CLI with JSON output, a shared `opamp_client` Python library, and an MCP server with typed tools
@@ -1790,7 +1794,9 @@ The UI signs in the same way the CLI does — `POST /auth/session` — and then 
 | WS | `/v1/opamp` | 🔑 | Same endpoint over WebSocket (`OPAMP_WS_ENABLED`, on by default); credential checked before `accept()`, refusals close `1008`. Malformed messages (including an empty `instance_uid`) get a `BAD_REQUEST` error frame then close `1002`; oversized frames close `1009`; an overloaded server refuses the upgrade with `503` + `Retry-After` (#78) |
 | POST | `/v1/metrics` | | OTLP/HTTP metrics ingestion (JSON or protobuf), keyed on `service.instance.id` then `service.name`. **Unauthenticated and OTLP-only** — one profile's telemetry, not a general metrics API (#122) |
 | GET | `/agents` | | List agents. Filters: `healthy=true\|false\|unknown`, `status=` (remote config status, or alias `remote_config_status=`), or any description attribute, e.g. `?environment=prod`. Repeated params are OR. Each agent carries a `credential` block |
-| GET | `/agent/types` | | The agent types (profiles) this build recognises, in match order: `name`, `display_name`, `icon`, `priority`, `summary`, `validates_structure`, `content_types`, `default_filename`, `reports`, `reports_telemetry`, `telemetry`, `detectable`, `identity` (`match_any` rules + `sniff`), `panels`, `components`, `bootstrap_default`. `otelcol` is an OpenTelemetry Collector; `generic` is any other OpAMP agent, whose config is stored and relayed **without being interpreted**. The list comes from the profile dictionary — see [Agent profiles](#agent-profiles-the-dictionary) |
+| GET | `/agent/types` | | The agent types (profiles) this build recognises, in match order: `name`, `display_name`, `icon`, `priority`, `summary`, `validates_structure`, `content_types`, `default_filename`, `reports`, `reports_telemetry`, `telemetry`, `detectable`, `identity` (`match_any` rules + `sniff`), `panels`, `components`, `bootstrap_default`. `otelcol` is an OpenTelemetry Collector, `fluentbit` a Fluent Bit supervised by
+`opamp-observe/opamp-core`, and `generic` any other OpAMP agent, whose config is stored
+and relayed **without being interpreted**. The list comes from the profile dictionary — see [Agent profiles](#agent-profiles-the-dictionary) |
 | PUT | `/agent/{id}/type` | operator | **Pin** the agent's type (`{"agent_type": "otelcol"}`) or clear the pin (`null`). A pin outranks every signal the agent sends (`service.name`, `content_type`, payload shape), survives restarts and is audited (`agent.type.pinned` / `agent.type.auto`). 422 for an unknown name (never a silent `generic`), 404 for an unknown agent. Returns the four `agent_type*` fields with provenance |
 | GET | `/agent/{id}` | | Agent details incl. latest OTLP metrics, `credential` state (`enrolled`, `active`, `last_seen_at`, `revoked_at` — never a token) and `agent_type` / `agent_type_source` (`pinned`\|`declared`\|`sniffed`\|`fallback`) / `agent_type_pinned` / `agent_type_warning` |
 | GET | `/agent/{id}/metrics` | | Latest OTLP metric values for the agent (persisted across restarts) |

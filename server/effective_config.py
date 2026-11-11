@@ -214,6 +214,34 @@ def load_object(key: str, entry: Any, *, accept_json: bool = False) -> ConfigObj
     )
 
 
+def raw_bodies(effective_config: Any) -> List[str]:
+    """Every object's body as **text**, decoded, without judging its format (#123).
+
+    `objects()` is for bodies this build can read: a `text/plain` Fluent Bit config is
+    skipped there, which is right for display and wrong for a profile that speaks INI.
+    So this returns the decoded text of every object and lets the caller decide — the
+    one reader of `configMap` shapes stays one reader (a second decoder is how the UI
+    once handed an operator base64, #131).
+    """
+    if isinstance(effective_config, (bytes, bytearray)):
+        effective_config = bytes(effective_config).decode("utf-8", "replace")
+    if isinstance(effective_config, str):
+        try:
+            effective_config = json.loads(effective_config)
+        except (TypeError, ValueError):
+            return []
+    config_map = _config_map(effective_config)
+    bodies: List[str] = []
+    for key in _ordered_keys(config_map):
+        entry = config_map[key]
+        if not isinstance(entry, Mapping):
+            continue
+        body, problem = _decode_body(entry)
+        if body:
+            bodies.append(body)
+    return bodies
+
+
 def objects(effective_config: Any, *, accept_json: bool = False) -> List[ConfigObject]:
     """Every object in the map, decoded, with `""` first. Never raises."""
     config_map = _config_map(effective_config)

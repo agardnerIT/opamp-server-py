@@ -146,10 +146,17 @@ class IdentityRule:
     equals: Tuple[str, ...] = ()
 
     def matches(self, attrs: Mapping[str, str]) -> bool:
+        """Case-insensitive, both sides (#123).
+
+        The attribute value is folded and so are the declared strings: `Fluent Bit` in a
+        dictionary file is how an operator writes a product name, and a matcher that only
+        worked for lower-case entries would fail silently — the agent would just resolve
+        to the fallback profile with no error anywhere.
+        """
         value = (attrs.get(self.attr) or "").casefold()
         if self.prefix:
-            return any(value.startswith(wanted) for wanted in self.prefix)
-        return value in self.equals
+            return any(value.startswith(wanted.casefold()) for wanted in self.prefix)
+        return value in {entry.casefold() for entry in self.equals}
 
     def to_dict(self) -> Dict[str, Any]:
         rule: Dict[str, Any] = {"attr": self.attr}
@@ -436,8 +443,12 @@ class AgentProfile:
         The UI asks this before drawing an empty table: "no components reported" is
         information for a collector, and meaningless for an agent whose product has
         no components to report (#121).
+
+        True when the profile has *any* extractor (#123): `components_spec` reads the
+        agent's report, a `components_engine` reads its config. A product that reports no
+        inventory but whose config names its plugins still has components.
         """
-        return self.components_spec is not None
+        return self.components is not None
 
     def detect_component_type(self, component_id: str) -> str:
         """Component type from its id (`receivers/otlp` -> `receiver`), or `unknown`.

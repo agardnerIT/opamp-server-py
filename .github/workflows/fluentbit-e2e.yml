@@ -1,0 +1,154 @@
+name: Fluent Bit e2e
+
+# The other half of #113: a *non-OTel* agent, end to end (#123).
+#
+# `collector-e2e.yml` proves the OpenTelemetry path. This one proves #117's claim that
+# the server is not collector-shaped: a real Fluent Bit, supervised by
+# `opamp-observe/opamp-core`, registers, is **identified** from its own description, is
+# inventoried from its **INI config**, and takes a pushed config that its profile's
+# rules judged — with no collector vocabulary in the exchange.
+#
+# Non-blocking on purpose, like the collector workflow: it needs Docker, two downloads
+# (Fluent Bit, the consumer wheel) and a network, and a green unit suite should never be
+# red because a runner was slow. Delete `continue-on-error` once it has a stable streak.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: fluentbit-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fluentbit-e2e:
+    name: Fluent Bit (opamp-core) against the server
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 15
+
+    env:
+      # Pin both halves: this is the client implementation the profile's rules were
+      # written against (#123's spike), so a floating version would hide the thing
+      # under test.
+      FLUENT_BIT_VERSION: "3.2.10"
+      OPAMP_CORE_REF: "v0.6.0"
+      SERVER_URL: http://localhost:4320
+      ADMIN_PASSWORD: fluentbit-e2e-admin-pw-123
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install server dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Start the server
+        # A pushing server with the local-development posture override: this workflow is
+        # about the agent, not about TLS. A fresh DATA_DIR keeps the run hermetic.
+        env:
+          OPAMP_CONFIG_PUSH_ENABLED: "true"
+          OPAMP_ALLOW_INSECURE_CONFIG_PUSH: "true"
+          OPAMP_AGENT_AUTH: "off"
+        run: |
+          mkdir -p "$RUNNER_TEMP/opamp"
+          DATA_DIR="$RUNNER_TEMP/opamp" nohup python -m uvicorn server.main:app \
+            --host 127.0.0.1 --port 4320 > "$RUNNER_TEMP/server.log" 2>&1 &
+          for _ in $(seq 60); do
+            curl --max-time 20 --connect-timeout 5 -sf "$SERVER_URL/health" >/dev/null && break
+            sleep 1
+          done
+          curl --max-time 20 --connect-timeout 5 -sf "$SERVER_URL/health" | python -m json.tool
+
+      - name: Install Fluent Bit
+        run: |
+          curl --max-time 20 --connect-timeout 5 -fsSL -o fluent-bit.deb \
+            "https://packages.fluentbit.io/ubuntu/noble/pool/main/f/fluent-bit/fluent-bit_${FLUENT_BIT_VERSION}_arm64.deb" \
+            || curl --max-time 20 --connect-timeout 5 -fsSL -o fluent-bit.deb \
+            "https://packages.fluentbit.io/ubuntu/noble/pool/main/f/fluent-bit/fluent-bit_${FLUENT_BIT_VERSION}_amd64.deb"
+          sudo dpkg -i fluent-bit.deb || sudo apt-get -f install -y
+          fluent-bit --version
+
+      - name: Install the opamp-core consumer
+        # The supervisor is a Python package (`opamp-observe/opamp-core`, `consumer/`).
+        run: |
+          python -m venv "$RUNNER_TEMP/oc"
+          "$RUNNER_TEMP/oc/bin/pip" install --upgrade pip
+          "$RUNNER_TEMP/oc/bin/pip" install \
+            "git+https://github.com/opamp-observe/opamp-core@${OPAMP_CORE_REF}#subdirectory=consumer"
+
+      - name: Start the supervised agent
+        # `Health_Check On` matters: without it Fluent Bit's `/api/v1/health` is 404, the
+        # supervisor reports `healthy: false` forever, and every rollout pauses on
+        # `unhealthy` — the finding recorded on #123. `agent_capabilities` is what makes
+        # the consumer advertise `AcceptsRemoteConfig` at all (its defaults do not).
+        run: |
+          mkdir -p "$RUNNER_TEMP/agent"
+          cd "$RUNNER_TEMP/agent"
+          cat > fluent-bit.conf <<'EOF'
+          [SERVICE]
+              Health_Check On
+              Flush    2
+              Daemon   off
+              Log_Level info
+              HTTP_Server On
+              HTTP_Listen 0.0.0.0
+              HTTP_Port 2020
+
+          [INPUT]
+              Name  dummy
+              Tag   dummy
+
+          [OUTPUT]
+              Name  stdout
+              Match *
+          EOF
+          cat > opamp.json <<EOF
+          {
+            "consumer": {
+              "server_url": "http://localhost",
+              "server_port": 4320,
+              "client_status_port": 2020,
+              "transport": "http",
+              "server-authorization": "none",
+              "service_type": "fluentbit",
+              "agent_config_path": "./fluent-bit.conf",
+              "processTracking": "Supervisor",
+              "heartbeat_frequency": 5,
+              "agent_capabilities": ["AcceptsRemoteConfig", "ReportsHeartbeat", "ReportsEffectiveConfig"],
+              "log_level": "info"
+            }
+          }
+          EOF
+          nohup "$RUNNER_TEMP/oc/bin/opamp-consumer" --config-path ./opamp.json \
+            > "$RUNNER_TEMP/consumer.log" 2>&1 &
+
+      - name: Assert identity, inventory, and a pushed config the profile judged
+        # The script polls for an agent the *server* resolved to `fluentbit` — a
+        # dictionary regression that made this agent `generic` again fails here.
+        run: |
+          python scripts/fluentbit_e2e.py --server "$SERVER_URL" --password "$ADMIN_PASSWORD" --timeout 180
+
+      - name: Server log
+        if: always()
+        run: cat "$RUNNER_TEMP/server.log" || true
+
+      - name: Consumer log
+        if: always()
+        run: tail -200 "$RUNNER_TEMP/consumer.log" || true
+
+      - name: Fleet as the server saw it
+        if: always()
+        run: curl --max-time 20 --connect-timeout 5 -s "$SERVER_URL/agents" | python -m json.tool || true

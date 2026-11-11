@@ -434,8 +434,16 @@ _BATCH = "batch"
 #: format layer (size, parse, redaction), so a rule here may assume `doc` parsed. The
 #: verdict is the same object the core fills, so findings land in the same list, with the
 #: same key paths and the same order they had before #119 split them out.
-def validate(doc: Any, path: str, ctx: Any, verdict: Verdict) -> None:
-    """Judge one parsed collector config (#100 stage 3+4)."""
+def validate(doc: Any, path: str, ctx: Any, verdict: Verdict) -> bool:
+    """Judge one parsed collector config (#100 stage 3+4).
+
+    `doc` is `None` when the body did not parse: a collector config is YAML/JSON, so
+    there is nothing here to judge and the core's parse finding stands (#123 made this
+    reachable — every other profile gets first refusal on a body it may understand in its
+    own dialect).
+    """
+    if doc is None:
+        return False
     kind = looks_yaml_like(getattr(ctx, "content_type", "") or "")
     if kind == "unknown" and not _looks_like_collector_config(doc):
         # Undeclared type and not a collector shape: the body may be something else

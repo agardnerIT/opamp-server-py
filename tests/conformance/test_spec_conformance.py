@@ -513,7 +513,9 @@ def test_a_non_collector_agent_is_stored_and_displayed_as_opaque(opamp):
     message = spec.agent_message(uid, sequence_num=1)
     attribute = message.agent_description.identifying_attributes.add()
     attribute.key = "service.name"
-    attribute.value.string_value = "fluent-bit"
+    # A product no profile claims: since #123 `fluent-bit` is a *known* type, and this
+    # test is about the case where nobody knows what the agent is.
+    attribute.value.string_value = "acme-agent"
     message.health.healthy = True
     # Not YAML, and not a config fragment: only the agent knows what this means.
     message.effective_config.config_map.config_map["main"].body = b"\x00\x01binary\xff"

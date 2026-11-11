@@ -3910,6 +3910,10 @@ def validate_config(body: ValidateConfigRequest, request: Request):
             # decided. `""` means the request named no agent, so nothing was assumed.
             "profile": verdict.profile,
             "profile_source": verdict.profile_source,
+            # #119/#123: did a profile actually judge the structure of every body? The
+            # approve step refuses an unchecked one until a human acknowledges it, so a
+            # caller asking "may I?" has to be able to see the answer.
+            "structure_checked": verdict.structure_checked,
         }
     size = _config_size(verdict.normalised)
     return {
@@ -3925,6 +3929,7 @@ def validate_config(body: ValidateConfigRequest, request: Request):
         "objects": len(verdict.normalised),
         "profile": verdict.profile,
         "profile_source": verdict.profile_source,
+        "structure_checked": verdict.structure_checked,
     }
 
 

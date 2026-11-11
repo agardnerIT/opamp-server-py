@@ -97,8 +97,10 @@ class TestPinEndpoint:
     def test_an_unknown_name_is_refused_not_treated_as_generic(self, client):
         register()
 
+        # `fluentbit` is a real profile since #123, so the example has to be a name no
+        # dictionary could plausibly ship.
         response = client.put(
-            f"/agent/{AGENT}/type", headers=headers(), json={"agent_type": "fluentbit"}
+            f"/agent/{AGENT}/type", headers=headers(), json={"agent_type": "no-such-product"}
         )
 
         assert response.status_code == 422

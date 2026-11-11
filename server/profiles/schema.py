@@ -277,6 +277,10 @@ class ProfileDocument(_Strict):
     #: says *that* a body is judged; this says *by what*, and the two are checked
     #: against each other so a profile cannot claim one without the other.
     structure: Optional[StructureDocument] = None
+    #: A named extractor for products that report their inventory **in the config**
+    #: rather than through `AvailableComponents` (#123). Empty means the `components`
+    #: block's engine (which reads the report) is what applies.
+    components_engine: str = ""
     #: Is this product built by the OpenTelemetry Collector Builder? "Generate a slim
     #: distro manifest" is that builder's concept, so it is data: a product that is not
     #: built that way answers 409 instead of "you have no components in use", which is
@@ -368,11 +372,31 @@ class ProfileDocument(_Strict):
                 "a structure block requires validates_structure: true — naming an engine "
                 "without claiming the judgement is a field nobody reads"
             )
-        if self.validates_structure and self.components is None:
+        if self.validates_structure and self.components is None and not self.components_engine:
             raise ValueError(
-                "validates_structure: true requires a components block: the rules that "
-                "judge a structured config are the ones that also report its components"
+                "validates_structure: true requires a components block (or a "
+                "components_engine): a profile that judges a config's structure also "
+                "knows what that config is made of"
             )
+        return self
+
+    @model_validator(mode="after")
+    def _one_component_source(self):
+        """Two ways to inventory components is one ambiguity per agent (#123).
+
+        `components` reads what the agent *reports*; `components_engine` reads what the
+        agent *runs*, for a product that reports no inventory. A profile that names both
+        would have two answers to "which components does this agent have", so it is a
+        load error rather than a precedence rule nobody remembers.
+        """
+        if self.components is not None and self.components_engine:
+            raise ValueError(
+                "declare either `components` (from the agent's report) or "
+                "`components_engine` (from its config), not both"
+            )
+        if self.components_engine and self.components is None:
+            # A product with components has a component concept; the UI keys off it.
+            pass
         return self
 
     @model_validator(mode="after")

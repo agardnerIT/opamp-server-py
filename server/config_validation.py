@@ -53,6 +53,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -405,6 +406,30 @@ def allowed_opamp_endpoints() -> Tuple[str, ...]:
     raw = (os.environ.get("CONFIG_ALLOWED_OPAMP_ENDPOINTS") or "").strip()
     values.extend(part.strip() for part in raw.split(",") if part.strip())
     return tuple(dict.fromkeys(values))
+
+
+#: Content types that mean "INI", which is what Fluent Bit's config is (#123). Matched
+#: by substring like `looks_yaml_like`, because `text/plain` and `""` are both in the wild
+#: and a body that starts with a `[SECTION]` header is INI whatever it was labelled.
+INI_CONTENT_TYPES = ("ini", "text/plain", "x-conf", "conf")
+
+
+def accepts_ini(content_type: str, body: str = "") -> bool:
+    """Whether a body should be read as INI by a profile that speaks INI (#123).
+
+    Two signals, either of which is enough: the declared content type, or a leading
+    `[SECTION]` header. The second one matters because `opamp-core` reports
+    `content_type: text/plain` for a Fluent Bit config — a label that says nothing.
+    """
+    value = (content_type or "").lower()
+    if any(marker in value for marker in INI_CONTENT_TYPES):
+        return True
+    for line in (body or "").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("#", ";")):
+            continue
+        return bool(re.match(r"^\[[A-Za-z_][A-Za-z0-9_]*\]$", stripped))
+    return False
 
 
 def looks_yaml_like(content_type: str) -> str:
@@ -938,6 +963,12 @@ class StructureContext:
     """
 
     content_type: str = ""
+    #: The body as the agent/server stored it, and why it did not parse as YAML/JSON
+    #: (`""` when it did). A profile whose product does not use YAML judges this instead:
+    #: Fluent Bit's config is INI, and `fluent-bit.conf` is a perfectly valid body that
+    #: PyYAML refuses (#123).
+    body: str = ""
+    parse_error: str = ""
     allow_endpoint_change: bool = False
     allowed_endpoints: Optional[Tuple[str, ...]] = None
     allowed_exporters: Optional[Tuple[str, ...]] = None
@@ -1036,10 +1067,37 @@ def check_config_map(
             verdict.add_error(key, str(exc), "fix the document and re-validate")
             continue
         except yaml.YAMLError as exc:
+            # The historical wording, kept because callers and tests match on it. It is
+            # only ever emitted when a body really could not be read as *any* config the
+            # target understands: a profile whose own engine reads the body (Fluent Bit's
+            # INI, #123) returns above and never reaches this line.
             message = f"body is not valid {entry['content_type'] or 'YAML'}: {exc}"
-            if kind == "unknown" or engine is None:
-                # Undeclared type, or a profile that does not interpret the body at all:
-                # it may be INI, a certificate or a shell script. Advisory by contract.
+            if engine is None:
+                # A profile that does not interpret the body at all: it may be INI, a
+                # certificate or a shell script. Advisory by contract.
+                verdict.add_warning(key, message)
+                continue
+            # A declared type that will not parse. Before refusing, give the profile's
+            # engine the raw body: a product that does not use YAML (Fluent Bit reads
+            # INI) is judged by its own rules, and only a profile that declines leaves
+            # the parse failure standing.
+            if engine(
+                None,
+                key,
+                replace(
+                    context, content_type=entry["content_type"] or "", body=body,
+                    parse_error=str(exc),
+                ),
+                verdict,
+            ):
+                continue
+            # The engine declined. Nobody judged this object, so the approver is told
+            # exactly that (they are asked to acknowledge an unchecked body).
+            verdict.structure_checked = False
+            if kind == "unknown":
+                # Historical behaviour for an undeclared/opaque type: advisory. A PEM
+                # certificate or a shell script alongside the real config is legal and
+                # was never refusable — #123 must not make it fatal on the way past.
                 verdict.add_warning(key, message)
                 continue
             verdict.add_error(
@@ -1065,7 +1123,7 @@ def check_config_map(
         if not engine(
             doc,
             key,
-            replace(context, content_type=entry["content_type"] or ""),
+            replace(context, content_type=entry["content_type"] or "", body=body),
             verdict,
         ):
             # The engine looked at it and declined (not its product's shape), which is
@@ -1226,6 +1284,7 @@ __all__ = [
     "check_merge_collisions",
     "check_policy",
     "check_shape",
+    "accepts_ini",
     "contains_document",
     "document_drift",
     "looks_yaml_like",

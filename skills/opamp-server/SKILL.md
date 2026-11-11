@@ -337,6 +337,16 @@ Rules that matter when acting on this:
 - **`config get` offline (`--db`)** shows metadata only and always redacts; there is
   no credential and no audit trail offline, so there is no reveal.
 
+### Agents are not all collectors (#117/#123)
+
+Check `agent_type` (and `components_status`) before reasoning about components,
+validation or reports. `otelcol` is judged by collector rules; `fluentbit` (Fluent Bit via
+`opamp-observe/opamp-core`) is judged by INI rules and its components come from its config;
+`generic` is stored and relayed as **opaque text** and its reports say "not applicable".
+A `generic`/unchecked revision needs `confirm_unchecked_structure` on approve — that is the
+server asking a human to accept that nothing validated the body. Full model:
+`docs/agent-profiles.md`.
+
 ### Two-phase flow: propose → approve → roll back (#99/#100)
 
 Use this when the change matters. A direct `agents config set` is approval-by-fiat

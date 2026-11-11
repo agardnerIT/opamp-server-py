@@ -313,7 +313,9 @@ def elements(app) -> dict:
     return captured
 
 
-def capture(case: str, page: Path | None = None, server=None) -> dict:
+def capture(
+    case: str, page: Path | None = None, server=None, show_config: bool = False
+) -> dict:
     """Render one agent-detail view and return what it said.
 
     `page` exists so the fence can be proved: `tests/test_ui_golden.py` runs the same
@@ -323,19 +325,35 @@ def capture(case: str, page: Path | None = None, server=None) -> dict:
     `server` lets a test point the same capture at an agent of a *different* profile
     (one loaded from a tmp dictionary), which is how "a new agent type needs no UI
     release" is checked rather than asserted in a docstring.
+
+    `show_config` opens the "Configuration" panel, which is closed by default and where
+    the #131 editor lives. It is a second capture rather than part of the first so the
+    closed-panel captures stay byte-identical to what they recorded before the editor
+    existed.
     """
     server = server or _server(case)
     with _transport(server):
         app = AppTest.from_file(str(page or AGENTS_PAGE), default_timeout=60)
         app.query_params["agent_id"] = AGENT_ID
         app.run()
+        if show_config:
+            app.toggle(key=f"show_config_{AGENT_ID[:8]}").set_value(True).run()
     assert not app.exception, app.exception
     return {"case": case, "elements": elements(app)}
 
 
 def capture_all() -> dict:
-    """The committed fixture: one otelcol agent, one generic agent."""
-    return {case: capture(case) for case in ("otelcol", "generic")}
+    """The committed fixture: one otelcol agent, one generic agent, one open editor.
+
+    The third is #131's deliverable captured rather than described: the generic agent's
+    config panel on a server that may push config, where the box is an editor that
+    proposes a revision instead of a read-only block.
+    """
+    return {
+        "otelcol": capture("otelcol"),
+        "generic": capture("generic"),
+        "generic_editable": capture("generic", show_config=True),
+    }
 
 
 def texts(captured: dict) -> str:

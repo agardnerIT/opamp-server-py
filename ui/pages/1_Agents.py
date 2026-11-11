@@ -7,6 +7,7 @@ import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from ui.sql_search import sql_search
+from ui.config_view import config_map, edit_blocker, editable_config, is_redacted
 from ui.shared import (
     AGENT_TOKEN_ENV,
     EXPIRY_CHOICES,
@@ -17,6 +18,7 @@ from ui.shared import (
     agent_auth_mode,
     agent_auth_note,
     agent_type_badge,
+    config_push_state,
     connect_snippet,
     format_local_time,
     get_agents,
@@ -26,6 +28,8 @@ from ui.shared import (
     admin_request,
     render_sidebar,
     require_admin,
+    response_detail,
+    response_payload,
     reissue_banner_text,
     show_slim_distro_builder_page,
     display_config_yaml,
@@ -133,6 +137,97 @@ def _config_mime(profile):
 def _config_language(profile):
     """The syntax highlighter for the config body, or `None` for opaque content."""
     return "yaml" if _config_filename(profile).endswith((".yaml", ".yml")) else None
+
+
+#: Session key prefix for the proposal an editor produced, one entry per agent.
+_PROPOSAL_PREFIX = "agent_proposal_"
+
+
+def _propose_config(agent_id, editable):
+    """#131: the config box is an **editor** when a change here is a proposal, not a push.
+
+    Two conditions decide it, both in `ui.config_view.edit_blocker`: the server can push
+    config at all, and this agent advertises `AcceptsRemoteConfig`. Then the box holds the
+    agent's own body — `editable_config`, decoded by `server.effective_config` — and not
+    `display_config_yaml`'s view of it: that view adds the telemetry pipeline this
+    dashboard would run, which is fine to *display* and wrong to propose, because the
+    agent never had that document.
+
+    **Propose** is where this stops. The server stores an immutable revision per target
+    and delivers nothing; an approver creates the gated rollout on the **Remote Config**
+    page, which is the flow every other proposal takes. No approve/rollout logic is
+    duplicated here.
+    """
+    suffix = agent_id[:8]
+    st.caption(
+        f"Editing object `{editable.key or '<empty key>'}` as `{editable.content_type}`. "
+        "**Proposing changes nothing on the agent**: the server stores a revision and an "
+        "approver decides, exactly as on the Remote Config page."
+    )
+    body = st.text_area(
+        "Config body",
+        value=editable.body,
+        height=400,
+        key=f"propose_body_{suffix}",
+        help=(
+            "The config this agent reports, decoded — the same document the agent is "
+            "running, without the pipeline the download above adds. A body containing "
+            "`<redacted>` is refused by the server: pushing a redacted document would "
+            "wipe the fleet's credentials (#98)."
+        ),
+    )
+    if is_redacted(body):
+        st.error(
+            "This body contains `<redacted>`. The server refuses it on purpose: pushing a "
+            "redacted document would wipe every credential in the fleet (#98)."
+        )
+
+    note = st.text_input("Note (recorded in the audit log)", key=f"propose_note_{suffix}")
+
+    session = get_session()
+    if session is None or not session.can(ROLE_OPERATOR):
+        st.caption(
+            "🔒 Proposing is audited and needs the `operator` role — you will be asked "
+            "to sign in."
+        )
+    if st.button(
+        "Propose this change",
+        type="primary",
+        key=f"propose_config_{suffix}",
+        disabled=not (body or "").strip(),
+    ):
+        require_admin(ROLE_OPERATOR)  # renders sign-in and stops when needed
+        response = admin_request(
+            "POST",
+            "/config/revisions",
+            required_role=ROLE_OPERATOR,
+            json={
+                # The key and the content type are the agent's own: proposing under a
+                # different name is how a good body gets refused by the agent, and
+                # `config_map()` is the same shape the Remote Config page sends.
+                "config_map": config_map(
+                    body, editable.content_type, role=editable.role, name=editable.key
+                ),
+                "scope": {"agents": [agent_id]},
+                "note": (note or "").strip() or None,
+            },
+        )
+        if response is not None and response.status_code == 200:
+            st.session_state[f"{_PROPOSAL_PREFIX}{suffix}"] = (
+                response_payload(response, {}) or {}
+            )
+        elif response is not None:
+            st.error(f"Proposal refused ({response.status_code}):")
+            st.code(response_detail(response))
+
+    proposal = st.session_state.get(f"{_PROPOSAL_PREFIX}{suffix}")
+    if proposal:
+        st.info(
+            f"Proposed `{proposal.get('proposal_id')}` for {proposal.get('agents')} "
+            f"agent(s), hash `{(proposal.get('config_hash') or '')[:12]}…`. Nothing has "
+            "been delivered: an approver creates the gated rollout on the **Remote "
+            "Config** page."
+        )
 
 
 def _mint_token_and_snippet(in_container):
@@ -779,9 +874,17 @@ if agent_id_param:
                 mime=_config_mime(profile),
                 key=f"download_config_{selected_id[:8] if selected_id else 'none'}",
             )
-            st.code(cleaned_yaml, language=_config_language(profile), height=400)
+        editable = editable_config(effective_config)
+        blocker = edit_blocker(config_push_state(health_data), detailed_agent)
+        if editable is not None and blocker is None:
+            _propose_config(selected_id, editable)
         else:
-            st.caption("No config object in this agent's report is readable as YAML or JSON")
+            if cleaned_yaml:
+                st.code(cleaned_yaml, language=_config_language(profile), height=400)
+            else:
+                st.caption("No config object in this agent's report is readable as YAML or JSON")
+            if blocker:
+                st.caption(blocker)
     elif effective_config:
         st.caption("Toggle to show configuration")
     else:

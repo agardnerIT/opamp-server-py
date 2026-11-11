@@ -103,6 +103,9 @@ class FakeServer:
         self.calls = []
         # Request bodies, so a test can assert what the page *sent*, not only where (#131).
         self.bodies = []
+        # #131: what `POST /config/revisions` answers with. `None` is the happy path; a
+        # dict is the 422 `detail` the server sends for a config that fails validation.
+        self.propose_refusal = None
 
     # -- assertions helpers -----------------------------------------------
     def methods_for(self, fragment):
@@ -330,6 +333,8 @@ class FakeServer:
                 },
             )
         if "/config/revisions" in url and method == "POST":
+            if self.propose_refusal is not None:
+                return FakeResponse(422, {"detail": self.propose_refusal})
             return FakeResponse(200, {"proposal_id": "prop-1", "agents": 1,
                                       "config_hash": "a" * 64, "status": "proposed"})
         if "/config/revisions" in url:
@@ -397,7 +402,13 @@ class FakeServer:
                 200,
                 {
                     "opa_enabled": True,
-                    "config_push": {"agent_auth": self.agent_auth_mode},
+                    # #131: `enabled` is what decides whether the agent-detail config
+                    # box is an editor, and the real `/health` always publishes it.
+                    "config_push": {
+                        "agent_auth": self.agent_auth_mode,
+                        "enabled": self.push_allowed,
+                        "insecure": False,
+                    },
                 },
             )
         if url.endswith("/agents"):
@@ -426,7 +437,11 @@ class FakeServer:
         """One agent's detail view. Only the fields the pages read are filled; the
         point is to render the effective-config panel, not to model the API."""
         agent_id = url.rsplit("/", 1)[-1].split("?")[0]
-        detail = dict(fake_agent(agent_id))
+        # The detail payload carries the agent's own capabilities (#131: whether it
+        # accepts remote config decides if its config box is an editor), so the row the
+        # listing already serves is the source of truth — not a fresh default agent.
+        row = next((a for a in self.agents if a.get("id") == agent_id), None)
+        detail = dict(row or fake_agent(agent_id))
         detail["effective_config"] = self.effective_config
         detail["metrics"] = {}
         detail["components"] = {}
@@ -1768,8 +1783,220 @@ def test_the_agent_detail_shows_the_config_an_osquery_agent_actually_runs(server
     app.toggle(key=f"show_config_{agent['id'][:8]}").set_value(True).run()
     assert not app.exception, app.exception
 
-    shown = "\n".join(str(element.value) for element in app.code)
+    # #131: this agent advertises `AcceptsRemoteConfig` on a pushing server, so the panel
+    # is the editor — the *body the agent reported*, not `display_config_yaml`'s view.
+    shown = "\n".join(widget.value for widget in config_box(app))
+    assert shown, [widget.label for widget in app.text_area]
     assert "SELECT percent_remaining FROM battery;" in shown
-    assert "interval: 30" in shown
+    # The body is shown **verbatim** — it is what a proposal would push, and
+    # re-formatting it (pretty-printing YAML) would rewrite the document on its way
+    # back to the agent. The read-only view could reformat because nothing followed it.
+    assert '"interval": 30' in shown
     # Not rewritten into a collector config the agent never ran.
     assert "receivers:" not in shown
+
+
+# ------------------------------------------------ the config box is an editor (#131)
+
+
+def osquery_detail(server, capabilities=0x2 | 0x4, key="osquery.json"):
+    """An agent whose report is a base64 JSON body, the way osquery actually reports.
+
+    Base64 on purpose: that is what protobuf `MessageToDict` renders a `bytes` body as,
+    so it is the shape an editor must never adopt verbatim (#131's prefill bug).
+    """
+    agent = fake_agent(capabilities=capabilities)
+    server.agents = [agent]
+    document = json.dumps(
+        {
+            "schedule": {
+                "battery_stats": {
+                    "query": "SELECT percent_remaining FROM battery;",
+                    "interval": 32,
+                }
+            }
+        }
+    )
+    server.effective_config = json.dumps(
+        {
+            "configMap": {
+                "configMap": {
+                    key: {
+                        "body": base64.b64encode(document.encode()).decode(),
+                        "contentType": "application/json",
+                    }
+                }
+            }
+        }
+    )
+    return agent, document
+
+
+def open_agent_detail(server, agent, *, show_config=True, role="approver"):
+    """The detail screen, optionally signed in and with the config panel revealed."""
+    app = AppTest.from_file(str(AGENTS_PAGE), default_timeout=30)
+    if role:
+        app.session_state["admin_session"] = ui_session.AdminSession.from_login(
+            {
+                "token": TOKEN,
+                "expires_at": "2030-01-01T00:00:00+00:00",
+                "principal": {"name": "alice", "role": role},
+            }
+        )
+    app.query_params["agent_id"] = agent["id"]
+    app.run()
+    assert not app.exception, app.exception
+    if show_config:
+        app.toggle(key=f"show_config_{agent['id'][:8]}").set_value(True).run()
+        assert not app.exception, app.exception
+    return app
+
+
+def config_box(app):
+    return [widget for widget in app.text_area if widget.label == "Config body"]
+
+
+def test_a_pushable_agent_gets_an_editor_holding_the_decoded_config(server):
+    """Read-only `st.code` until the change can be proposed, and then it is a box.
+
+    The box holds the agent's own body, decoded — not the base64 of the report, and not
+    `display_config_yaml`'s view, which adds a telemetry pipeline the agent never ran.
+    """
+    agent, document = osquery_detail(server)
+
+    app = open_agent_detail(server, agent)
+
+    boxes = config_box(app)
+    assert len(boxes) == 1, [widget.label for widget in app.text_area]
+    assert boxes[0].value == document
+    assert "percent_remaining" in boxes[0].value
+    assert any(button.label == "Propose this change" for button in app.button)
+    # The read-only block is gone: one config on screen, not two accounts of it.
+    shown = "\n".join(str(element.value) for element in app.code)
+    assert "percent_remaining" not in shown
+
+
+def test_proposing_from_the_agent_screen_sends_a_revision_for_that_agent(server):
+    """A change here is a *proposal*: keyed like the agent's object, scoped to it.
+
+    Approving and rolling out stay on the Remote Config page — this screen must not
+    grow a second approve button, which is why the assertion is on what was sent and on
+    the sentence naming the approver.
+    """
+    agent, _ = osquery_detail(server)
+
+    app = open_agent_detail(server, agent)
+    edited = json.dumps({"schedule": {"battery_stats": {"query": "SELECT 1;", "interval": 60}}})
+    config_box(app)[0].set_value(edited).run()
+    app.text_input(key=f"propose_note_{agent['id'][:8]}").input("halve the interval").run()
+    [button for button in app.button if button.label == "Propose this change"][0].click().run()
+    assert not app.exception, app.exception
+
+    sent = server.body_for("/config/revisions")
+    assert sent["config_map"] == {
+        "osquery.json": {"body": edited, "content_type": "application/json"}
+    }
+    assert sent["scope"] == {"agents": [agent["id"]]}
+    assert sent["note"] == "halve the interval"
+    # Nothing was delivered and nothing was approved here.
+    assert server.methods_for("/config/rollouts") == []
+    assert "prop-1" in texts(app)
+    assert "approver" in texts(app) and "Remote Config" in texts(app)
+
+
+def test_an_agent_without_accepts_remote_config_keeps_the_read_only_view(server):
+    """An agent that can only report would refuse the push, so there is no editor."""
+    agent, document = osquery_detail(server, capabilities=0x1 | 0x4)
+
+    app = open_agent_detail(server, agent)
+
+    assert config_box(app) == []
+    shown = "\n".join(str(element.value) for element in app.code)
+    assert "percent_remaining" in shown
+    assert "AcceptsRemoteConfig" in texts(app)
+    assert "SELECT percent_remaining FROM battery;" in document  # the fixture is the same
+
+
+def test_push_off_means_a_read_only_config_and_why(server):
+    server.push_allowed = False
+    agent, _ = osquery_detail(server)
+
+    app = open_agent_detail(server, agent)
+
+    assert config_box(app) == []
+    assert "OPAMP_CONFIG_PUSH_ENABLED" in texts(app)
+    assert not any(button.label == "Propose this change" for button in app.button)
+
+
+def test_a_redacted_report_is_never_loaded_into_the_editor(server):
+    """Pushing a redacted body back wipes the fleet's credentials (#98)."""
+    agent = fake_agent(capabilities=0x2 | 0x4)
+    server.agents = [agent]
+    server.effective_config = json.dumps(
+        {
+            "configMap": {
+                "configMap": {
+                    "": {
+                        "body": "exporters:\n  otlp:\n    headers:\n      api-key: <redacted>\n",
+                        "contentType": "text/yaml",
+                    }
+                }
+            }
+        }
+    )
+    # The server reports the flag alongside the masked body (`AgentState.to_dict`).
+    original = server._agent_detail
+
+    def detail(url):
+        response = original(url)
+        response._payload["effective_config_redacted"] = True
+        return response
+
+    server._agent_detail = detail
+
+    app = open_agent_detail(server, agent)
+
+    assert config_box(app) == []
+    assert "#98" in texts(app)
+    assert "credentials" in texts(app)
+
+
+def test_a_refused_proposal_shows_the_servers_findings(server):
+    """A 422 is a list of findings, not one dict repr on a line."""
+    server.propose_refusal = {
+        "message": "config validation failed",
+        "errors": [
+            {
+                "path": "service.pipelines.traces",
+                "message": "references an exporter that is not defined",
+                "severity": "error",
+            }
+        ],
+    }
+    agent, _ = osquery_detail(server)
+
+    app = open_agent_detail(server, agent)
+    [button for button in app.button if button.label == "Propose this change"][0].click().run()
+    assert not app.exception, app.exception
+
+    assert "Proposal refused (422)" in "\n".join(str(e.value) for e in app.error)
+    findings = "\n".join(str(element.value) for element in app.code)
+    assert "config validation failed" in findings
+    assert "service.pipelines.traces" in findings
+    assert "references an exporter that is not defined" in findings
+
+
+def test_proposing_unsigned_asks_for_a_password_only_after_the_click(server):
+    """Reading a config must not require signing in; proposing is audited and does."""
+    agent, _ = osquery_detail(server)
+
+    app = open_agent_detail(server, agent, role=None)
+    assert "sign-in required" not in texts(app)
+    assert len(config_box(app)) == 1
+
+    [button for button in app.button if button.label == "Propose this change"][0].click().run()
+    assert not app.exception, app.exception
+
+    assert "Admin sign-in required" in texts(app)
+    # Nothing was proposed before the password existed.
+    assert server.methods_for("/config/revisions") == []

@@ -496,3 +496,121 @@ class TestTheEditorGetsDecodedText:
             _doc(**{"": self._json_object(json.dumps(BATTERY_SCHEDULE))})
         )
         assert editable is not None and "percent_remaining" in editable.body
+
+
+class TestWhenTheConfigBoxIsAnEditor:
+    """#131: the box is editable only when a change made in it can actually be proposed.
+
+    Two independent facts decide it — the server pushes config at all, and the *agent*
+    advertises `AcceptsRemoteConfig` — and a redacted report is refused whatever the two
+    say, because pushing one back wipes the fleet's credentials (#98). The decision is
+    streamlit-free so it can be asserted here instead of through a page render.
+    """
+
+    PUSH = {"enabled": True, "insecure": False}
+    AGENT = {"capabilities": 0x2 | 0x1}
+
+    def test_a_pushing_server_and_a_willing_agent_means_an_editor(self):
+        from ui.config_view import edit_blocker
+
+        assert edit_blocker(self.PUSH, self.AGENT) is None
+
+    def test_push_off_keeps_the_read_only_view_and_says_which_flag(self):
+        from ui.config_view import edit_blocker
+
+        reason = edit_blocker({"enabled": False}, self.AGENT)
+
+        assert "OPAMP_CONFIG_PUSH_ENABLED" in reason
+        # An editor whose every submit is refused by a 404 is a form that lies.
+        assert "read-only" in reason
+
+    def test_an_agent_that_cannot_accept_config_has_nothing_to_propose_to(self):
+        from ui.config_view import edit_blocker
+
+        reason = edit_blocker(self.PUSH, {"capabilities": 0x1})
+
+        assert "AcceptsRemoteConfig" in reason
+        # Not an error state: reporting a config is a legitimate agent behaviour.
+        assert "cannot accept a replacement" in reason
+
+    def test_a_missing_or_junk_capability_reads_as_cannot_accept(self):
+        from ui.config_view import accepts_remote_config, edit_blocker
+
+        assert accepts_remote_config(0x2)
+        for value in (None, "", "junk", 0x1, 0):
+            assert not accepts_remote_config(value)
+            assert edit_blocker(self.PUSH, {"capabilities": value}) is not None
+
+    def test_a_redacted_report_is_never_handed_to_an_editor(self):
+        from ui.config_view import edit_blocker
+
+        reason = edit_blocker(self.PUSH, {**self.AGENT, "effective_config_redacted": True})
+
+        assert "redacted" in reason and "#98" in reason
+        assert "credentials" in reason
+
+    def test_an_unknown_posture_reads_as_push_off(self):
+        """A server we cannot ask must not conjure an editor that its submit refuses."""
+        from ui.config_view import edit_blocker
+
+        assert edit_blocker({}, self.AGENT) is not None
+        assert edit_blocker(None, self.AGENT) is not None
+
+
+class TestTheProposalShape:
+    """One `config_map` implementation, because the key is the agent-side object name."""
+
+    def test_the_key_is_the_name_the_agent_reported(self):
+        from ui.config_view import config_map
+
+        assert config_map('{"schedule": {}}', "application/json", name="osquery.json") == {
+            "osquery.json": {"body": '{"schedule": {}}', "content_type": "application/json"}
+        }
+
+    def test_role_is_omitted_unless_the_agent_declared_one(self):
+        from ui.config_view import config_map
+
+        assert "role" not in config_map("a: b")[""]
+        assert config_map("a: b", role="raw")[""]["role"] == "raw"
+
+    def test_an_unnamed_object_keeps_the_empty_key_a_collector_uses(self):
+        from ui.config_view import config_map
+
+        assert list(config_map("a: b", name="   ")) == [""]
+
+    def test_a_missing_content_type_falls_back_to_yaml(self):
+        from ui.config_view import config_map
+
+        assert config_map("a: b", "")[""]["content_type"] == "text/yaml"
+
+
+class TestTheRedactionGuardIsTheServersOwn:
+    """A local `<redacted>` substring test misses two of the three shapes (#98).
+
+    The UI is not the boundary — `config_validation` refuses these bodies — but a page
+    that says "fine" while the server says 422 teaches operators to distrust the panel,
+    and the cheapest way to avoid a third opinion is to use the server's check.
+    """
+
+    def test_the_sentinel_the_document_marker_and_base64_of_either_are_all_caught(self):
+        import base64
+
+        from server import redaction
+        from ui.config_view import is_redacted
+
+        sentinel = "exporters:\n  otlp:\n    headers:\n      api-key: <redacted>\n"
+        marker = f"exporters: {{}}\n# {redaction.MARKER}\n"
+        encoded = base64.b64encode(sentinel.encode()).decode()
+
+        assert is_redacted(sentinel)
+        # The #98 document marker: a local `"<redacted>" in body` test misses this one.
+        assert is_redacted(marker)
+        # And the shape an operator copies out of a raw report: base64 *of* a redacted doc.
+        assert is_redacted(encoded)
+
+    def test_a_real_config_is_not_flagged(self):
+        from ui.config_view import is_redacted
+
+        assert not is_redacted("receivers:\n  otlp: {}\n")
+        assert not is_redacted("")
+        assert not is_redacted(None)

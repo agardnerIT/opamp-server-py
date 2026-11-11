@@ -43,8 +43,15 @@ from ui.shared import (  # noqa: E402
     format_local_time,
     require_admin,
     render_sidebar,
+    response_detail,
+    response_payload,
 )
-from ui.config_view import EDITOR_CONTENT_TYPES, editable_config  # noqa: E402
+from ui.config_view import (  # noqa: E402
+    EDITOR_CONTENT_TYPES,
+    config_map,
+    editable_config,
+    is_redacted,
+)
 
 render_sidebar()
 
@@ -100,25 +107,12 @@ PAUSE_HELP = {
 
 def _payload(response, default=None):
     """Parse a response body, tolerating an empty or non-JSON body."""
-    if response is None:
-        return default
-    try:
-        return response.json()
-    except Exception:
-        return default
+    return response_payload(response, default)
 
 
 def _detail(response):
     """The server's `detail`, rendered as text instead of a Python repr."""
-    body = _payload(response, {})
-    if isinstance(body, dict):
-        detail = body.get("detail")
-        if isinstance(detail, dict):
-            return detail.get("message") or json.dumps(detail, indent=2)
-        if detail:
-            return str(detail)
-        return json.dumps(body, indent=2)
-    return str(body)
+    return response_detail(response)
 
 
 def _config_map(body, content_type, role="", name=""):
@@ -130,15 +124,16 @@ def _config_map(body, content_type, role="", name=""):
     `osquery.json` (it reports `expected a single osquery.json object, got ['']`). It was
     hardcoded to `""` here, so every proposal made from this page was misaddressed and
     the agent failed it — correctly, and the rollout paused at batch 0.
+
+    The shape itself lives in `ui.config_view.config_map` since #131: the agent detail
+    panel proposes through the same helper, and two spellings of one wire shape is how
+    one of them ends up mis-addressed.
     """
-    entry = {"body": body, "content_type": content_type or "text/yaml"}
-    if role:
-        entry["role"] = role
-    return {(name or "").strip(): entry}
+    return config_map(body, content_type, role=role, name=name)
 
 
 def _is_redacted(text):
-    return "<redacted>" in (text or "")
+    return is_redacted(text)
 
 
 def _plan_body(gate=None):

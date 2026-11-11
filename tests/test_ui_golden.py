@@ -56,6 +56,29 @@ def test_the_generic_detail_renders_exactly_what_was_recorded(golden):
     assert ui_golden.capture("generic") == golden["generic"]
 
 
+def test_the_open_config_panel_renders_exactly_what_was_recorded(golden):
+    """#131: the panel with the editor, which the closed-panel captures cannot see.
+
+    Both closed captures stayed byte-identical when the editor landed, on purpose: the
+    editor only exists once the panel is opened. This half records what is *in* it —
+    the body the agent reported, the propose button, and no read-only block beside them.
+    """
+    captured = ui_golden.capture("generic", show_config=True)
+    assert captured == golden["generic_editable"]
+
+    elements = captured["elements"]
+    inputs = {(entry["kind"], entry["label"]): entry["value"] for entry in elements["input"]}
+    # The box holds the body the agent reported, verbatim — that is what a proposal
+    # pushes, so it is not pretty-printed or re-serialised on the way in.
+    assert inputs[("text_area", "Config body")] == (
+        ui_golden.EFFECTIVE_CONFIG["configMap"]["configMap"][""]["body"]
+    )
+    assert ("text_input", "Note (recorded in the audit log)") in inputs
+    assert any(button["label"] == "Propose this change" for button in elements["button"])
+    # One account of the config on screen, not a code block beside the editor.
+    assert [entry["value"] for entry in elements.get("code", [])] == [ui_golden.AGENT_ID]
+
+
 # ------------------------------------------------- proving the fence is a fence ----
 
 

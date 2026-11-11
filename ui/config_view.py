@@ -27,6 +27,7 @@ from server.effective_config import (
     preferred_document,
     preferred_object,
 )
+from server.redaction import contains_redaction
 
 DEFAULT_SERVER_URL = "{scheme}://{address}:{port}".format(
     scheme=os.environ.get("SERVER_HTTP_SCHEME", "http"),
@@ -73,6 +74,34 @@ def _clean_config(value: Any) -> Any:
 #: these are the two the form offers, so a prefill has to land inside them.
 EDITOR_CONTENT_TYPES = ("text/yaml", "application/json")
 
+#: `Capabilities.AcceptsRemoteConfig`: the agent takes a config *from the server*.
+#: An agent without this bit can report what it runs but never accept a replacement,
+#: so offering it an editor would be offering it a proposal it must refuse (#131).
+ACCEPTS_REMOTE_CONFIG = 0x2
+
+
+def accepts_remote_config(capabilities: Any) -> bool:
+    """Whether an agent's capability bitmask includes `AcceptsRemoteConfig`.
+
+    Tolerates a missing or non-numeric value: an older payload, or a hand-built dict in
+    a test, must read as "cannot accept" rather than raising on the read path.
+    """
+    try:
+        return bool(int(capabilities) & ACCEPTS_REMOTE_CONFIG)
+    except (TypeError, ValueError):
+        return False
+
+
+def is_redacted(body: Any) -> bool:
+    """True when a body carries a redaction artefact, so it must never be pushed (#98).
+
+    Delegates to `server.redaction.contains_redaction` — the same check the server's
+    validation pipeline refuses on. A local `"<redacted>" in body` test sees the
+    sentinel and misses the #98 document marker and a base64 body that decodes to
+    either, which is exactly the body an operator copies out of a raw report.
+    """
+    return contains_redaction(body)
+
 
 @dataclass(frozen=True)
 class EditableConfig:
@@ -114,6 +143,59 @@ def _parsed_report(effective_config: Any) -> Optional[dict]:
         except (TypeError, ValueError):
             return None
     return effective_config if isinstance(effective_config, dict) else None
+
+
+def config_map(body: str, content_type: str = "text/yaml", role: str = "", name: str = "") -> dict:
+    """The one-object `config_map` a revision stores.
+
+    `name` is the map key — the agent-side **config object name**, not decoration. The
+    spec types it `map<string, AgentConfigFile>` and leaves the meaning to the agent: a
+    collector is happy with `""`, osquery's OpAMP extension refuses anything but
+    `osquery.json`. One implementation, because a second spelling of this shape is how
+    a proposal gets mis-addressed and the rollout pauses at batch 0 (#131).
+    """
+    entry = {"body": body, "content_type": content_type or "text/yaml"}
+    if role:
+        entry["role"] = role
+    return {(name or "").strip(): entry}
+
+
+def edit_blocker(push: Optional[dict], agent: Optional[dict]) -> Optional[str]:
+    """Why this agent's config cannot be **edited** here, or `None` when it can (#131).
+
+    Two facts decide it, and both have to be true:
+
+    * `push` — the server's `config_push` block from `GET /health`. With push off the
+      server refuses every proposal (404 on the whole surface), so an editor here would
+      be a form whose submit button is a lie.
+    * the agent's own `AcceptsRemoteConfig` capability. Remote config is something an
+      agent opts into: a bare agent reports what it runs and would refuse the push.
+
+    `agent` is the `GET /agent/{id}` payload, so a **redacted** report is refused too —
+    it is a display artefact and pushing it back wipes the fleet's credentials (#98).
+    The reason is returned as markdown for the panel to render; the security boundary
+    stays on the server (`config_validation` refuses the same bodies).
+    """
+    push = push or {}
+    agent = agent or {}
+    if not push.get("enabled"):
+        return (
+            "Config push is **off** on this server (`OPAMP_CONFIG_PUSH_ENABLED=false`), "
+            "so this config is read-only. With it on, this box is where a change starts."
+        )
+    if agent.get("effective_config_redacted"):
+        return (
+            "This agent's reported config is **redacted** (`<redacted>` markers), so it is "
+            "not loaded into an editor: proposing a redacted body back would wipe the "
+            "fleet's credentials (#98). Read the real document on the **Remote Config** "
+            "page, or with `opampctl agents config get <id> --reveal` as an approver."
+        )
+    if not accepts_remote_config(agent.get("capabilities")):
+        return (
+            "This agent does not advertise `AcceptsRemoteConfig`: it reports what it runs "
+            "but cannot accept a replacement, so there is nothing to propose to it."
+        )
+    return None
 
 
 def editable_config(effective_config: Any) -> Optional[EditableConfig]:

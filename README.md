@@ -786,6 +786,14 @@ through it, and `ui/config_view.py` renders it):
   component and agent-type paths stay YAML-only, so an arbitrary JSON document is
   never mistaken for collector config, and the collector telemetry augmentation is
   applied only to a collector-shaped document.
+- **Editing is a proposal, not a push (#131).** When the server may push config
+  (`OPAMP_CONFIG_PUSH_ENABLED`, per `GET /health`) *and* the agent advertises
+  `AcceptsRemoteConfig`, the agent detail's config box is an editor: the body it holds
+  is the agent's own, decoded (`editable_config`), never the augmented display view.
+  *Propose* stores a revision — `POST /config/revisions`, scoped to that one agent and
+  keyed by the object name the agent reported — and an approver creates the gated
+  rollout on the Remote Config page. A redacted report never reaches the editor, and a
+  body carrying a redaction artefact is refused by the server as well as the UI.
 
 A role is carried end-to-end by the push path too: validated (and bounded to 128
 characters), included in the canonical hash **only when set** — so revisions stored

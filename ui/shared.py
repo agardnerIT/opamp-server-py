@@ -87,6 +87,21 @@ def get_health():
 _UNSET = object()
 
 
+def config_push_state(health_data=_UNSET):
+    """The server's public `config_push` posture block, from `GET /health` (#131).
+
+    `enabled` is `OPAMP_CONFIG_PUSH_ENABLED` and `insecure` means it is on despite an
+    unsafe posture. Read from `/health` rather than `/config/posture` on purpose: the
+    agent detail screen renders for a viewer who has not signed in, and `/config/posture`
+    needs the `viewer` role, so asking for a password to decide whether a box is editable
+    would make reading an agent's config depend on signing in. `{}` when the server
+    cannot be asked, which reads as "push off" — a missing answer never conjures an
+    editor for a server that may refuse it.
+    """
+    data = get_health() if health_data is _UNSET else health_data
+    return dict((data or {}).get("config_push") or {})
+
+
 def agent_auth_mode(health_data=_UNSET):
     """The server's `OPAMP_AGENT_AUTH` mode, from the public posture block (#96).
 
@@ -463,6 +478,50 @@ def get_auth_headers():
     if session is None or session.expired():
         return {}
     return admin_session.session_headers(session.token)
+
+
+def response_payload(response, default=None):
+    """A response body as JSON, tolerating an empty or non-JSON body."""
+    if response is None:
+        return default
+    try:
+        return response.json()
+    except Exception:
+        return default
+
+
+def response_detail(response, default="the request was refused"):
+    """The server's `detail`, as text an operator can read instead of a Python repr.
+
+    A refusal is not always one sentence: `POST /config/revisions` answers 422 with
+    `{"message", "errors": [{path, message, severity}], "warnings": [...]}`, and
+    `str(detail)` renders that as a dict on one line. Flattening it puts the message and
+    each finding on its own line, which is what the pages show (#131).
+    """
+    if response is None:
+        return default
+    body = response_payload(response, None)
+    if body is None:
+        text = (getattr(response, "text", "") or "").strip()
+        return text or default
+    detail = body.get("detail") if isinstance(body, dict) else body
+    if isinstance(detail, dict):
+        lines = []
+        if detail.get("message"):
+            lines.append(str(detail["message"]))
+        for finding in detail.get("errors") or []:
+            if isinstance(finding, dict):
+                lines.append(
+                    f"{finding.get('path') or 'config'}: {finding.get('message') or ''}"
+                )
+            else:
+                lines.append(str(finding))
+        if detail.get("hint"):
+            lines.append(str(detail["hint"]))
+        return "\n".join(lines) or json_module.dumps(detail, indent=2)
+    if detail:
+        return str(detail)
+    return json_module.dumps(body, indent=2)
 
 
 def _login_form(status, required_role, replacing=None):

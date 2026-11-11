@@ -82,6 +82,112 @@
       ]
     }
   },
+  "generic_editable": {
+    "case": "generic",
+    "elements": {
+      "button": [
+        {
+          "disabled": false,
+          "label": "\u21bb Refresh"
+        },
+        {
+          "disabled": false,
+          "label": "\ud83d\udd0d Check Compliance"
+        },
+        {
+          "disabled": false,
+          "label": "Propose this change"
+        },
+        {
+          "disabled": false,
+          "label": "\u2190 Back to Agents"
+        }
+      ],
+      "caption": [
+        "N/A",
+        "\ud83d\udce6 generic (sniffed)",
+        "The server could not tell what this agent is, so it is showing the generic view. If you know, pin it: `opampctl agents set-type abababababababababababababababab <profile>` (`opampctl agents types` lists them).",
+        "No capabilities",
+        "None advertised",
+        "None",
+        "This profile does not report telemetry to the server.",
+        "\ud83d\udd12 Checking compliance is audited and needs the `operator` role \u2014 you will be asked to sign in.",
+        "Compliance not yet evaluated. Click 'Check Compliance' to evaluate.",
+        "Editing object `<empty key>` as `text/yaml`. **Proposing changes nothing on the agent**: the server stores a revision and an approver decides, exactly as on the Remote Config page.",
+        "\ud83d\udd12 Proposing is audited and needs the `operator` role \u2014 you will be asked to sign in.",
+        "Not signed in \u2014 sign in on the Admin page.",
+        "\ud83d\udfe2 Online",
+        "\ud83d\udfe2 Available",
+        "0"
+      ],
+      "code": [
+        {
+          "language": "python",
+          "value": "abababababababababababababababab"
+        }
+      ],
+      "download_button": [
+        {
+          "file_name": "config",
+          "label": "Download Config"
+        }
+      ],
+      "input": [
+        {
+          "kind": "text_input",
+          "label": "Note (recorded in the audit log)",
+          "value": ""
+        },
+        {
+          "kind": "text_area",
+          "label": "Config body",
+          "value": "receivers:\n  otlp:\n    protocols:\n      grpc: {}\nexporters:\n  debug: {}\nservice:\n  pipelines:\n    traces:\n      receivers: [otlp]\n      exporters: [debug]\n"
+        }
+      ],
+      "markdown": [
+        "### Agent Details",
+        "**Agent ID**",
+        "**Last Heartbeat**",
+        "**Type**",
+        "**Attributes**",
+        "**service.name:** fluent-bit",
+        "**deployment.environment:** production",
+        "**Capabilities**",
+        "**Custom capabilities**",
+        "**Violations**",
+        "**Compliance**",
+        "**Configuration**",
+        "**Admin Session**",
+        "**Server Status**",
+        "**Open Policy Agent Status**",
+        "**Agents Connected**",
+        "**Version**"
+      ],
+      "metric": [
+        {
+          "delta": "",
+          "label": "Status",
+          "value": "Healthy"
+        },
+        {
+          "delta": "",
+          "label": "Capabilities",
+          "value": "0"
+        },
+        {
+          "delta": "",
+          "label": "Compliance",
+          "value": "Unknown"
+        }
+      ],
+      "toggle": [
+        {
+          "label": "Show",
+          "value": true
+        }
+      ]
+    }
+  },
   "otelcol": {
     "case": "otelcol",
     "elements": {

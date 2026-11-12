@@ -54,7 +54,7 @@ from server.main import app
 from server.state import AGENT_REGISTRY, SQLiteCredentialStore
 from server.ws import CLOSE_POLICY_VIOLATION, REGISTRY as WS_REGISTRY
 from tests.fake_agent import FakeAgent
-from tests.support import ADMIN, admin_headers, basic, pin_collector, spec_wire_hash
+from tests.support import ADMIN, admin_headers, anonymous, basic, pin_collector, spec_wire_hash
 
 FIXTURES = Path(__file__).parent / "fixtures" / "configs"
 SECRET = "s3cr3t-config-value"
@@ -181,7 +181,7 @@ class TestAgentIdentity:
         response = client.post(
             "/v1/opamp",
             content=agent.message(),
-            headers={"Content-Type": "application/x-protobuf"},
+            headers={"Content-Type": "application/x-protobuf", **anonymous()},
         )
 
         assert response.status_code == 401
@@ -194,7 +194,7 @@ class TestAgentIdentity:
         response = client.post(
             "/v1/opamp",
             content=b"\xff\xff\xffnot-a-protobuf",
-            headers={"Content-Type": "application/x-protobuf"},
+            headers={"Content-Type": "application/x-protobuf", **anonymous()},
         )
         assert response.status_code == 401
 
@@ -240,7 +240,7 @@ class TestAgentIdentity:
 
         agent.headers = {}
         with pytest.raises(AssertionError):
-            agent.poll_http(client, headers={})
+            agent.poll_http(client, headers=anonymous())
 
     def test_ws_binding_takeover_is_refused(self, client, monkeypatch):
         """One socket bound an agent; a different credential may not take it over."""
@@ -343,7 +343,8 @@ class TestPosture:
             posture.assert_startup_posture()
 
         message = str(exc.value)
-        assert "agents are not authenticated" in message
+        # #125: agent auth is mandatory, so it is never a posture gap.
+        assert "agents are not authenticated" not in message
         assert "not served over TLS" in message
         assert "stored unencrypted" in message
 

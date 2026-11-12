@@ -250,9 +250,9 @@ async def lifespan(app: FastAPI):
     # exactly one startup line.
     auth.warn_if_read_only()
     auth.warn_if_legacy()
-    # Agents are unauthenticated by default (#94) — say so once, loudly, rather
-    # than letting an operator discover it from an incident.
-    agent_auth.warn_if_unenforced()
+    # Agents are authenticated on every message (#125) — one line saying where the
+    # credential comes from, not a warning that it might be off.
+    agent_auth.log_startup()
     # #134: the profile dictionary is loaded on import (a bad file is logged and that
     # profile is absent, so a fleet is never down because of a YAML edit). With
     # `--strict-profiles` / `OPAMP_PROFILES_STRICT=true` the same validation is fatal,
@@ -263,8 +263,9 @@ async def lifespan(app: FastAPI):
         except profiles.ProfileLoadError as exc:
             logger.error(f"profile dictionary is invalid: {exc}")
             raise
-    # Refuses to start (non-zero exit) when config push is enabled on an insecure
-    # posture (#96). Read-only deployments are unaffected.
+    # Refuses to start when agent auth is not the mandatory token mode (#125), or
+    # when config push is enabled on an insecure posture (#96). Read-only deployments
+    # are only affected by the first check.
     posture.assert_startup_posture()
     # #108: the posture is public on /health already; publishing it as metrics is
     # what makes "someone left the insecure override on" a pager rule instead of a
@@ -448,10 +449,11 @@ app = FastAPI(
         "`ADMIN_PASSWORD`). With no credential configured the server runs in read-only "
         "mode: reads are open and every privileged write answers 403 — check "
         "`GET /auth/status`.\n\n"
-        "**Agent auth:** off by default. With `OPAMP_AGENT_AUTH=token` every agent "
-        "message must carry `Authorization: Bearer <token>`; mint one with "
-        "`POST /agents/{id}/token` (or `opampctl agents token create`). "
-        "`GET /agents` reports each agent's credential state.\n\n"
+        "**Agent auth:** mandatory. Every agent message must carry "
+        "`Authorization: Bearer <token>`; mint a fleet token with "
+        "`POST /agent-tokens` (or `opampctl agent-tokens create`) and put it in the "
+        "agent's config before it connects. `GET /agents` reports each agent's "
+        "credential state.\n\n"
         "**Config push:** off by default (`OPAMP_CONFIG_PUSH_ENABLED=false`); its "
         "routes 404 and no `remote_config` is ever sent until the posture is secure. "
         "Check `GET /health` → `config_push`.\n\n"
@@ -1459,10 +1461,11 @@ def _handle_agent_message(
     transport only differs in framing and connection lifecycle. Returns the
     serialized reply plus the fields the socket layer needs for its registry.
 
-    `principal` is who presented the credential (#94); `None` in `off` mode. A
-    credential that does not match the claimed `instance_uid`, or a uid already
-    bound to a different principal, raises `AgentAuthError` — before any state is
-    read or written, so a refusal can never leave a half-applied report behind.
+    `principal` is who presented the credential (#94); it is never `None` on the
+    network paths since #125 made agent authentication mandatory. A credential that
+    does not match the claimed `instance_uid`, or a uid already bound to a different
+    principal, raises `AgentAuthError` — before any state is read or written, so a
+    refusal can never leave a half-applied report behind.
 
     A body that is not a usable `AgentToServer` raises `protocol.BadRequest` (#73):
     the HTTP transport answers 400 and the socket closes 1002, each after sending a
@@ -1518,11 +1521,12 @@ def _handle_agent_message(
         # before `_apply_status_report`, so a refusal cannot mutate state even briefly.
         agent_auth.authorize_agent(principal, agent_id)
         if wants_uid:
-            # A server-minted uid has no credential behind it, so honouring this in
-            # token mode would create an unauthenticated agent (D1). Refuse instead.
+            # A server-minted uid has no credential behind it, so honouring this
+            # would create an agent whose identity nobody authenticated (D1, #125).
+            # Fleet tokens solve bootstrap without this: mint before any uid exists.
             raise protocol.BadRequest(
-                "RequestInstanceUid is only available when OPAMP_AGENT_AUTH=off; "
-                "with agent authentication the credential is the identity",
+                "RequestInstanceUid is not supported: agents must present a token "
+                "for an instance_uid they already have",
                 instance_uid=original_uid,
             )
         # Keyed on the credential, not the uid: two agents behind one fleet token are
@@ -1936,14 +1940,14 @@ async def opamp_endpoint(request: Request) -> Response:
     config status. Not for human/agent tooling use — pointed at by the collector's
     `opamp` extension (`endpoint: http://host:4320/v1/opamp`).
 
-    **Authentication** depends on `OPAMP_AGENT_AUTH`. With `token` the agent must
-    send `Authorization: Bearer <token>` (minted by `POST /agents/{id}/token`):
-    a missing, unknown or revoked token is **401 with no `ServerToAgent` body**, so
-    an unauthenticated client never learns the server's capabilities; a valid
-    token claiming another agent's `instance_uid` is **403** and the real agent's
-    state is untouched. Every rejection is audited and counted in
-    `opamp_agent_auth_failures_total{reason}`. The default (`off`) is
-    unauthenticated, exactly as before.
+    **Authentication** is mandatory. The agent must send
+    `Authorization: Bearer <token>` (minted by `POST /agent-tokens`, or
+    `POST /agents/{id}/token` for a bound credential): a missing, unknown, revoked or
+    expired token is **401 with no `ServerToAgent` body**, so an unauthenticated client
+    never learns the server's capabilities; a bound token claiming another agent's
+    `instance_uid` is **403** and the real agent's state is untouched. A fleet token
+    may speak for many uids but is capped by `max_agents`. Every rejection is audited
+    and counted in `opamp_agent_auth_failures_total{reason}`.
 
     **Malformed input** (unparseable protobuf, empty `instance_uid`, corrupt gzip) is
     **400** with a `ServerToAgent.error_response` (`type: BAD_REQUEST`,
@@ -1972,9 +1976,9 @@ async def opamp_endpoint(request: Request) -> Response:
     identities or a counter that keeps going backwards. The newcomer is answered with
     `agent_identification.new_instance_uid` and keeps being served, under the new id,
     with `uid_reissued_from` / `uid_reissue_reason` explaining it in `GET /agent/{id}`.
-    `OPAMP_DUPLICATE_UID_DETECTION=false` turns the check off. Re-issuing needs
-    `OPAMP_AGENT_AUTH=off`: a token is bound to the uid it was minted for (#94), so in
-    `token` mode a duplicate is logged and counted but never renamed.
+    `OPAMP_DUPLICATE_UID_DETECTION=false` turns the check off. Re-issuing a uid is
+    never done for an authenticated agent: handing it a new uid would get it refused
+    on its next message, so a duplicate is logged and counted but never renamed.
 
     **`OpAMP-Instance-UID` header** (#76): read on every request and cross-checked
     against the body. A mismatch — or a value that is not a readable uuid — is logged
@@ -2118,8 +2122,8 @@ async def opamp_ws_endpoint(websocket: WebSocket) -> None:
     varint header (must be 0) followed by an `AgentToServer` protobuf, per spec
     §WebSocket Transport.
 
-    Authentication runs **before** `accept()` (#94): with `OPAMP_AGENT_AUTH=token`
-    a missing/unknown/revoked token fails the handshake (close 1008, which a
+    Authentication runs **before** `accept()` (#125):
+    a missing/unknown/revoked/expired token fails the handshake (close 1008, which a
     client sees as a rejected upgrade), and a message claiming a uid that belongs
     to a different credential closes the socket with 1008 mid-stream. A browser
     `Origin` must also satisfy `CORS_ORIGINS`, because WebSocket upgrades are not
@@ -2577,7 +2581,7 @@ def create_agent_token(
     response: Response,
     body: AgentTokenRequest | None = None,
 ):
-    """Mint a per-agent token for `OPAMP_AGENT_AUTH=token`. Requires admin auth.
+    """Mint a per-agent token. Requires admin auth.
 
     `agent_id` is the hex `instance_uid` the token is bound to — the credential
     *is* the identity, so a token may only ever speak for that one agent. The
@@ -5328,14 +5332,15 @@ if __name__ == "__main__":
         os.environ["OPAMP_PROFILES_STRICT"] = "true"
 
     admin_auth.ensure()
-    agent_auth.warn_if_unenforced()
     try:
         # Fail here with a readable message and a non-zero exit; the lifespan hook
-        # repeats the check for uvicorn/gunicorn startup.
+        # repeats the check for uvicorn/gunicorn startup. This includes the mandatory
+        # agent-auth check (#125).
         posture.assert_startup_posture()
-    except posture.PostureError as exc:
+    except (posture.PostureError, posture.AgentAuthConfigError) as exc:
         logger.error(str(exc))
         sys.exit(1)
+    agent_auth.log_startup()
 
     uvicorn.run(
         app,

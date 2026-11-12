@@ -262,6 +262,7 @@ def test_v020_agent_message_stores_exactly_as_before():
     """
     from fastapi.testclient import TestClient
 
+    from server import agent_auth
     from server.main import app
     from server.state import AGENT_REGISTRY
 
@@ -280,12 +281,16 @@ def test_v020_agent_message_stores_exactly_as_before():
     msg.effective_config.config_map.config_map["raw"].body = b"raw: {}\n"
     msg.effective_config.config_map.config_map["raw"].role = "raw"
 
+    token, _ = agent_auth.issue_token(label="proto-sync")
     client = TestClient(app)
     try:
         response = client.post(
             "/v1/opamp",
             content=msg.SerializeToString(),
-            headers={"Content-Type": "application/x-protobuf"},
+            headers={
+                "Content-Type": "application/x-protobuf",
+                "Authorization": f"Bearer {token}",
+            },
         )
         assert response.status_code == 200
 

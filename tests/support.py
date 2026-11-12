@@ -40,6 +40,16 @@ def bearer(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
+def anonymous() -> dict:
+    """Explicitly send *no* agent credential.
+
+    Since #125 the shared `client` fixture carries a real fleet token by default, so a
+    test asserting 401 has to say "no credential" rather than relying on an empty
+    header set. An empty value overrides the client default and reads as `missing`.
+    """
+    return {"Authorization": ""}
+
+
 def spec_wire_hash(message) -> str:
     """The spec's config hash (hex) for a message that is already on the wire (#136).
 

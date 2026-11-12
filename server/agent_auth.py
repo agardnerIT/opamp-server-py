@@ -9,9 +9,10 @@ take over its socket binding, or report health on its behalf.
 
 Why tokens and not mTLS: this server speaks plain HTTP behind the TLS terminator
 (uvicorn on loopback), so an app-level client certificate would mean trusting a
-header any local process can forge. ``server.posture.ENFORCED_AGENT_AUTH_MODES``
-decides which modes open the config-push gate and only ``token`` is implemented,
-so ``OPAMP_AGENT_AUTH=mtls`` fails closed instead of pretending.
+header any local process can forge. ``token`` is the only agent-auth mode (#125);
+``off`` and ``mtls`` are refused at startup rather than treated as "no credential
+required", because a tokenless endpoint believes whatever ``instance_uid`` a client
+puts in the body.
 
 Storage is SHA-256 only. Tokens are 256 bits of ``secrets.token_urlsafe``, so a
 fast hash is the right primitive — there is nothing to brute-force — and it gives
@@ -143,11 +144,6 @@ class Principal:
 
 
 # --------------------------------------------------------------------- helpers
-
-
-def mode() -> str:
-    """`off|token|mtls`, read at call time (same source as the posture report)."""
-    return posture.agent_auth_mode()
 
 
 def normalize_agent_id(agent_id: str) -> str:
@@ -362,17 +358,14 @@ def _is_expired(expires_at: str) -> bool:
 def authenticate(headers: Mapping[str, str]) -> Tuple[Optional[Principal], Optional[str]]:
     """Resolve a request's credential. Returns `(principal, None)` or `(None, reason)`.
 
-    In `off` mode this is a no-op returning `(None, None)` — the legacy behaviour, still
-    reachable through `OPAMP_ALLOW_UNAUTHENTICATED_AGENTS=true` (#126).
+    There is no tokenless path (#125): every call requires a credential, and a
+    deployment configured for `off`/`mtls` refuses to start rather than reaching here.
 
     Every refusal is a reason, and the reasons are ordered by what the operator has to
     fix: `missing`/`malformed` (the agent's config), `unknown`/`revoked`/`expired` (the
     token), `agent_limit` and `uid_mismatch` (the policy), `binding_conflict` (a live
     socket).
     """
-    if mode() != "token":
-        return None, None
-
     digest, reason = _hash_from_header(headers)
     if digest is None:
         return None, reason
@@ -633,31 +626,15 @@ def collector_snippet(
 # --------------------------------------------------------------------- startup
 
 
-def warn_if_unenforced() -> None:
-    """Startup warning for `off` / `mtls` (call from the lifespan and `__main__`).
+def log_startup() -> None:
+    """One startup line naming the one way in (call from the lifespan and `__main__`).
 
-    `off` is the default so existing deployments keep working, but nobody should
-    discover it from an incident: any client that can reach the port can claim any
-    identity until this is `token`, and config push refuses to start without it.
+    This is not a warning any more (#125): a configuration that would disable agent
+    auth is refused before this runs, so the only honest message is where the token
+    comes from.
     """
-    auth_mode = mode()
-    if auth_mode == "off":
-        logger.warning(
-            "agent authentication is OFF (OPAMP_AGENT_AUTH=off or "
-            "OPAMP_ALLOW_UNAUTHENTICATED_AGENTS=true): any client that can reach this "
-            "server can claim any instance_uid, and a tokenless connection cannot be "
-            "told from a real agent. Mint a token (`opampctl agent-tokens create`) and "
-            "unset the override before exposing this port (#126)."
-        )
-    elif auth_mode == "mtls":
-        logger.warning(
-            "OPAMP_AGENT_AUTH=mtls is configured but NOT enforced by this build: client "
-            "certificates are terminated by your proxy, and trusting a forwarded header "
-            "would be forgeable. Agent identity stays unauthenticated; use "
-            "OPAMP_AGENT_AUTH=token (mTLS lands with the CA work in #83)."
-        )
-    else:
-        logger.info(
-            "agent authentication is on (token): agents must present a token minted with "
-            "`opampctl agent-tokens create` (or `agents token create` for one bound agent)"
-        )
+    logger.info(
+        "agent authentication is mandatory (token): every agent presents a token "
+        "minted with `opampctl agent-tokens create` (or `agents token create` for one "
+        "bound agent); a tokenless connection is refused 401/1008"
+    )

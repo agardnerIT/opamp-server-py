@@ -146,9 +146,17 @@ def expect_reply(response: Any, status: int = 200) -> opamp_pb2.ServerToAgent:
 class OpampHarness:
     """An in-process OpAMP client. One per test, like the server it drives."""
 
-    def __init__(self, app: Any, *, base_url: str = "http://opamp.test"):
+    def __init__(
+        self,
+        app: Any,
+        *,
+        base_url: str = "http://opamp.test",
+        headers: Optional[Mapping[str, str]] = None,
+    ):
         self._http = httpx.Client(
-            transport=InProcessASGITransport(app), base_url=base_url
+            transport=InProcessASGITransport(app),
+            base_url=base_url,
+            headers=dict(headers or {}),
         )
 
     # -- HTTP -------------------------------------------------------------

@@ -443,7 +443,9 @@ def test_the_empty_fleet_shows_a_snippet_built_by_the_shared_helper():
     """
     agents = source(AGENTS_PAGE)
     help_page = source(UI_DIR / "pages" / "4_Help.py")
-    assert "connect_snippet(" in agents
+    # #125: the empty fleet cannot print a runnable snippet before a token exists, so
+    # it mints one; Help still renders the shared profile snippet.
+    assert "mint_agent_token_form(" in agents
     assert "connect_snippet(" in help_page
     assert "No agents connected. Start an OpenTelemetry Collector" not in agents
     # The snippet is useless without the line people forget, so it is asserted below
@@ -512,7 +514,7 @@ def test_the_otelcol_snippet_still_says_exactly_what_116_shipped():
     from ui.shared import connect_snippet
 
     assert connect_snippet(
-        "http://opamp.example:4320", agent_name="my-collector", agent_auth="off"
+        "http://opamp.example:4320", agent_name="my-collector"
     ) == (
         "extensions:\n"
         "  opamp:\n"
@@ -520,6 +522,8 @@ def test_the_otelcol_snippet_still_says_exactly_what_116_shipped():
         "      http:\n"
         "        endpoint: http://opamp.example:4320/v1/opamp\n"
         "        polling_interval: 5s\n"
+        "        headers:\n"
+        '          Authorization: "Bearer ${env:OPAMP_AGENT_TOKEN}"\n'
         "    agent_description:\n"
         "      non_identifying_attributes:\n"
         '        "agent.name": "my-collector"      # your label; the Agents page shows it\n'
@@ -618,20 +622,22 @@ def _opamp_server_block(**kwargs):
     ]["opamp"]["server"]
 
 
-def test_a_token_server_gets_the_headers_block_and_an_open_one_does_not():
-    """#124: the server's mode decides whether the pasted config can authenticate.
+def test_every_server_gets_the_headers_block():
+    """#125: there is no server mode that accepts a tokenless agent.
 
-    `OPAMP_AGENT_AUTH=token` answers 401 to the unauthenticated shape, and every server
-    that can push config must be in `token` mode — so the UI's default snippet was wrong
-    on exactly the deployments that were working.
+    #124 let the UI omit the credential for an `off` server. That mode is gone, so the
+    default snippet would otherwise be wrong on every deployment.
     """
     assert _opamp_server_block(agent_auth="token")["http"]["headers"] == {
         "Authorization": "Bearer ${env:OPAMP_AGENT_TOKEN}"
     }
-    # `off` must be byte-for-byte what it always was: nothing to migrate for a default
-    # install, and no credential invented for a server that would ignore it.
-    assert "headers" not in _opamp_server_block(agent_auth="off")["http"]
-    assert "headers" not in _opamp_server_block()["http"]
+    assert "headers" not in _opamp_server_block(agent_auth="off")["http"], (
+        "the explicit `off` argument is kept only for call-site compatibility; "
+        "it must not smuggle back a tokenless snippet"
+    )
+    assert _opamp_server_block()["http"]["headers"] == {
+        "Authorization": "Bearer ${env:OPAMP_AGENT_TOKEN}"
+    }
 
 
 def test_the_credential_is_read_from_the_environment_not_the_file():
@@ -650,35 +656,38 @@ def test_the_mode_comes_from_the_public_posture_block_and_never_defaults_to_open
     from ui.shared import AGENT_AUTH_UNKNOWN, agent_auth_mode
 
     assert agent_auth_mode({"config_push": {"agent_auth": "token"}}) == "token"
-    assert agent_auth_mode({"config_push": {"agent_auth": "off"}}) == "off"
-    assert agent_auth_mode({"config_push": {"agent_auth": "mtls"}}) == "mtls"
-    # Unreachable, empty, or a mode this build does not know: `unknown`, because assuming
-    # "open" is how the snippet ends up 401ing (#124).
-    for payload in ({}, None, {"config_push": {}}, {"config_push": {"agent_auth": "nope"}}):
+    # Unreachable, empty, or a mode this build does not accept: `unknown`, never
+    # "open" (#124/#125).
+    for payload in (
+        {}, None, {"config_push": {}}, {"config_push": {"agent_auth": "nope"}},
+        {"config_push": {"agent_auth": "off"}},
+        {"config_push": {"agent_auth": "mtls"}},
+    ):
         assert agent_auth_mode(payload) == AGENT_AUTH_UNKNOWN
 
 
-def test_every_mode_gets_a_sentence_and_an_unknown_mode_admits_it():
+def test_token_and_unknown_get_a_sentence_and_unknown_admits_it():
     pytest.importorskip("streamlit")
     from ui.shared import AGENT_AUTH_UNKNOWN, agent_auth_note
 
     token_note = agent_auth_note("token")
-    assert "instance_uid" in token_note and "agents token create" in token_note
-    assert "off" in agent_auth_note("off")
-    assert "not enforced" in agent_auth_note("mtls")
+    assert "agent-tokens create" in token_note and "OPAMP_AGENT_TOKEN" in token_note
     assert "Could not read" in agent_auth_note(AGENT_AUTH_UNKNOWN)
     # Nothing to say is a real answer, and the pages read `if note := ...`.
+    assert agent_auth_note("off") is None
     assert agent_auth_note("something-else") is None
 
 
-def test_both_snippet_pages_pass_the_server_mode_through():
-    """One helper, two pages: no second copy of the YAML (#116), no second mode read."""
+def test_pages_use_the_shared_credential_helpers():
+    """One helper for the snippet (#116), one place that mints the first token (#125)."""
     agents = source(AGENTS_PAGE)
     help_page = source(UI_DIR / "pages" / "4_Help.py")
-    for page in (agents, help_page):
-        assert "agent_auth_mode()" in page
-        assert "agent_auth=auth_mode" in page
-        assert "agent_auth_note(" in page
+    # The empty fleet mints rather than printing a placeholder credential.
+    assert "mint_agent_token_form(" in agents
+    # Help still reads the public posture and shows the shared note.
+    assert "agent_auth_mode()" in help_page
+    assert "connect_snippet(" in help_page
+    assert "agent_auth_note(" in help_page
 
 
 # --------------------------------------------------- agent type badge (#118)

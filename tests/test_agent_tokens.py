@@ -13,7 +13,8 @@ The owner's decision (issue #125) is what these tests encode:
 - tokens have a validity period (1/7/30 days or never);
 - a token has a cap, and agent N+1 is refused with an error to the client **and** a line
   in the server log, so a leaked token cannot consume the server;
-- tokenless connections are not allowed.
+- tokenless connections are not allowed. #125 made that unconditional: there is no
+  `off` mode, no override and no startup that accepts one.
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from server import admin_auth, agent_auth, posture
+from server.main import app
 from server.state import AGENT_REGISTRY, SQLiteCredentialStore, utcnow
 from server.ws import REGISTRY
 from tests.support import ADMIN, admin_headers, basic, bearer
@@ -60,6 +62,12 @@ def count_failures(reason: str) -> float:
     return agent_auth.PROM_AGENT_AUTH_FAILURES.labels(reason=reason)._value.get()
 
 
+@pytest.fixture
+def client():
+    """A bare client: these tests are about the credential, so none is attached."""
+    return TestClient(app)
+
+
 @pytest.fixture(autouse=True)
 def isolated(monkeypatch, tmp_path):
     """Token mode, a throwaway credential DB, an admin credential, no leftovers."""
@@ -82,8 +90,8 @@ def isolated(monkeypatch, tmp_path):
 # ------------------------------------------------------------------ the default
 
 
-class TestMandatoryByDefault:
-    """Unset means `token`: the open endpoint has to be a decision, not an omission."""
+class TestMandatory:
+    """#125: a token is required before an agent connects, with no way around it."""
 
     def test_an_unset_mode_requires_a_token(self, client, monkeypatch):
         monkeypatch.delenv("OPAMP_AGENT_AUTH", raising=False)
@@ -91,27 +99,22 @@ class TestMandatoryByDefault:
         assert posture.agent_auth_mode() == "token"
         assert post(client, UID_A).status_code == 401
 
-    def test_the_override_restores_the_old_behaviour(self, client, monkeypatch):
-        monkeypatch.delenv("OPAMP_AGENT_AUTH", raising=False)
-        monkeypatch.setenv("OPAMP_ALLOW_UNAUTHENTICATED_AGENTS", "true")
-        assert posture.agent_auth_mode() == "off"
-        assert post(client, UID_A).status_code == 200
-        # ...and it is reported, so no surface can pretend the endpoint is closed.
-        assert client.get("/health").json()["config_push"]["agent_auth_override"] is True
-
-    def test_an_explicit_off_is_honoured_and_reported(self, client, monkeypatch):
+    def test_off_is_refused_at_startup_instead_of_honoured(self, client, monkeypatch):
         monkeypatch.setenv("OPAMP_AGENT_AUTH", "off")
-        assert posture.agent_auth_mode() == "off"
-        assert post(client, UID_A).status_code == 200
-        health = client.get("/health").json()["config_push"]
-        assert health["agent_auth"] == "off"
-        assert health["agent_auth_override"] is False
+        with pytest.raises(posture.AgentAuthConfigError, match="#125"):
+            posture.assert_agent_auth_posture()
+        assert client.get("/health").json()["config_push"]["agent_auth"] == "token"
+
+    def test_the_removed_override_is_refused_at_startup(self, monkeypatch):
+        monkeypatch.setenv("OPAMP_ALLOW_UNAUTHENTICATED_AGENTS", "true")
+        with pytest.raises(posture.AgentAuthConfigError, match="OPAMP_ALLOW_UNAUTHENTICATED_AGENTS"):
+            posture.assert_agent_auth_posture()
 
     def test_a_typo_does_not_open_the_endpoint(self, client, monkeypatch):
-        """`OPAMP_AGENT_AUTH=tokn` used to mean "off". It now means "on, and I warned"."""
         monkeypatch.setenv("OPAMP_AGENT_AUTH", "tokn")
-        assert posture.agent_auth_mode() == "token"
         assert post(client, UID_A).status_code == 401
+        with pytest.raises(posture.AgentAuthConfigError):
+            posture.assert_agent_auth_posture()
 
 
 # ---------------------------------------------------------------- fleet tokens

@@ -138,7 +138,7 @@ opampctl agents compliance <agent-id>
 | Re-encrypt stored bodies | `config rotate-key --db data/opamp.db` | — | — |
 | Offline (no server) | `--db data/opamp.db …` | — | — |
 
-## Agent tokens (`OPAMP_AGENT_AUTH=token`, the default)
+## Agent tokens (mandatory since #125)
 
 Agents present `Authorization: Bearer <token>` in their config
 (`extensions.opamp.server.http.headers`, or `server.ws.headers`). Two kinds, and picking
@@ -171,10 +171,12 @@ Rules that matter when acting on this:
 - Always set `--expires-in-days` and `--max-agents` on a fleet token: those two are what
   bound the damage from a leak. Revocation is not a wipe — the agent's record, state and
   desired config stay.
-- Agent auth is on unless someone set `OPAMP_ALLOW_UNAUTHENTICATED_AGENTS=true`; check
-  `/health` → `config_push.agent_auth` and `agent_auth_override` before assuming either
-  way. Minting needs admin auth, and the MCP write tools are **absent** unless the MCP
-  process runs with `OPAMP_MCP_ALLOW_WRITES=true`. That is intentional.
+- Agent auth is **mandatory**: there is no tokenless mode, no override and no `off`.
+  A server configured with `OPAMP_AGENT_AUTH=off`, `mtls` or the removed
+  `OPAMP_ALLOW_UNAUTHENTICATED_AGENTS=true` refuses to start. `/health` →
+  `config_push.agent_auth` is always `token`. Minting needs admin auth, and the MCP
+  write tools are **absent** unless the MCP process runs with
+  `OPAMP_MCP_ALLOW_WRITES=true`. That is intentional.
 
 ## Agent types (#118)
 

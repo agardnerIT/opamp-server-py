@@ -133,7 +133,8 @@ def push_server(monkeypatch, tmp_path):
     # posture (which has its own tests), and an insecure server is the cheapest way to
     # have every requirement met without a TLS proxy.
     monkeypatch.setenv("OPAMP_ALLOW_INSECURE_CONFIG_PUSH", "true")
-    monkeypatch.setenv("OPAMP_AGENT_AUTH", "off")
+    # Agent auth is mandatory (#125); this suite drives the handler directly.
+    monkeypatch.setenv("OPAMP_AGENT_AUTH", "token")
     monkeypatch.setenv("PUBLIC_URL", "https://opamp.example.com")
     monkeypatch.setenv("CONFIG_AT_REST_KEY", crypto.generate_key())
     monkeypatch.setenv("CONFIG_REVERT_GRACE_SECONDS", "0")

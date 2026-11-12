@@ -201,10 +201,10 @@ class OpampClient:
     def config_posture(self) -> Dict[str, Any]:
         """``GET /config/posture`` — config push security posture (viewer).
 
-        Reports every requirement (admin auth, agent auth, TLS), which are met,
-        where the admin credential came from and whether the development override
-        is in force. Never contains a secret. 401 without valid credentials when
-        an admin credential is configured.
+        Reports every requirement (admin auth, mandatory agent auth, TLS), which are
+        met, where the admin credential came from and whether the config-push
+        development override is in force. Never contains a secret. 401 without valid
+        credentials when an admin credential is configured.
         """
         return self._get("/config/posture")
 

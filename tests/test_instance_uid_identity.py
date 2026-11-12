@@ -263,80 +263,78 @@ def test_an_oversized_body_still_logs_the_header(client, monkeypatch):
 # ------------------------------------------------------------------ #75 over HTTP
 
 
-def test_a_duplicate_uid_is_reissued_and_both_agents_survive(client):
-    before = duplicates(protocol.REASON_HOST_IDENTITY, "reissued")
+def test_a_duplicate_uid_is_detected_but_not_reissued(client):
+    """#125: an authenticated agent cannot be handed a different uid.
+
+    A bound token is tied to the uid it was minted for, so a server-minted uid would be
+    refused on the agent's next message. The duplicate is still detected, counted and
+    logged; the fleet keeps one row under the contested uid.
+    """
+    before = duplicates(protocol.REASON_HOST_IDENTITY, "detected")
     first = opamp_send(client, message(host="vm-a"))
     second = opamp_send(client, message(host="vm-b"))
     third = opamp_send(client, message(host="vm-a"))
     assert first.status_code == second.status_code == third.status_code == 200
 
-    # The first two messages are indistinguishable from one agent changing its mind;
-    # the *return* to `vm-a` is what proves there are two.
-    assert expect_reply(first).agent_identification.new_instance_uid == b""
-    assert expect_reply(second).agent_identification.new_instance_uid == b""
-
-    reissued = expect_reply(third).agent_identification.new_instance_uid
-    assert len(reissued) == 16 and reissued != UID
-    # The reply is addressed to the uid the agent sent, as the spec requires.
+    for response in (first, second, third):
+        assert expect_reply(response).agent_identification.new_instance_uid == b""
     assert expect_reply(third).instance_uid == UID
+    assert duplicates(protocol.REASON_HOST_IDENTITY, "detected") == before + 1
 
-    new_id = reissued.hex()
+    # No ghost row, no rename: the agent's own record is the only one.
     agents = {entry["id"]: entry for entry in client.get("/agents").json()["agents"]}
-    assert set(agents) == {AGENT_ID, new_id}  # no ghost row
-    # The old record belongs to the other agent and is left alone.
-    assert agents[AGENT_ID]["description"]["identifyingAttributes"][0]["value"]["stringValue"] == "vm-b"
-    assert agents[new_id]["uid_reissued_from"] == AGENT_ID
-    assert agents[new_id]["uid_reissue_reason"] == protocol.REASON_HOST_IDENTITY
-    assert duplicates(protocol.REASON_HOST_IDENTITY, "reissued") == before + 1
+    assert set(agents) == {AGENT_ID}
+    assert agents[AGENT_ID]["uid_reissued_from"] is None
 
 
-def test_the_reissued_uid_is_persisted(client):
+def test_the_contested_uid_is_persisted_under_its_original_identity(client):
     opamp_send(client, message(host="vm-a"))
     opamp_send(client, message(host="vm-b"))
-    reissued = expect_reply(opamp_send(client, message(host="vm-a"))).agent_identification.new_instance_uid
+    opamp_send(client, message(host="vm-a"))
     stored = AGENT_REGISTRY._store.load_all()
-    assert reissued.hex() in stored
-    assert stored[reissued.hex()].uid_reissued_from == AGENT_ID
+    assert set(stored) == {AGENT_ID}
+    assert stored[AGENT_ID].uid_reissued_from is None
 
 
-def test_one_more_poll_under_the_old_uid_is_suppressed(client):
-    """The duplicate needs a poll or two to adopt its new uid; don't mint per poll."""
+def test_repeated_polls_do_not_mint_a_second_agent(client):
+    before = duplicates(protocol.REASON_HOST_IDENTITY, "detected")
     opamp_send(client, message(host="vm-a"))
     opamp_send(client, message(host="vm-b"))
-    expect_reply(opamp_send(client, message(host="vm-a")))
+    opamp_send(client, message(host="vm-a"))
     fourth = opamp_send(client, message(host="vm-b"))
     assert expect_reply(fourth).agent_identification.new_instance_uid == b""
-    assert len(client.get("/agents").json()["agents"]) == 2
+    assert len(client.get("/agents").json()["agents"]) == 1
+    assert duplicates(protocol.REASON_HOST_IDENTITY, "detected") >= before + 1
 
 
-def test_a_rename_in_place_is_not_reissued(client):
-    before = duplicates(protocol.REASON_HOST_IDENTITY, "reissued")
+def test_a_rename_in_place_is_not_detected(client):
+    before = duplicates(protocol.REASON_HOST_IDENTITY, "detected")
     for host in ("vm-a", "vm-a", "vm-b", "vm-b", "vm-b"):
         assert expect_reply(opamp_send(client, message(host=host))).agent_identification.new_instance_uid == b""
     agents = client.get("/agents").json()["agents"]
     assert len(agents) == 1
     assert agents[0]["uid_reissued_from"] is None
-    assert duplicates(protocol.REASON_HOST_IDENTITY, "reissued") == before
+    assert duplicates(protocol.REASON_HOST_IDENTITY, "detected") == before
 
 
 def test_a_clone_with_the_same_host_name_is_caught_by_the_counter(client):
-    before = duplicates(protocol.REASON_SEQUENCE_REGRESSION, "reissued")
+    before = duplicates(protocol.REASON_SEQUENCE_REGRESSION, "detected")
     opamp_send(client, message(host="vm-clone", sequence_num=20))
     opamp_send(client, message(host="vm-clone", sequence_num=10))
     reissued = expect_reply(
         opamp_send(client, message(host="vm-clone", sequence_num=5))
     ).agent_identification.new_instance_uid
-    assert reissued and reissued != UID
-    assert duplicates(protocol.REASON_SEQUENCE_REGRESSION, "reissued") == before + 1
+    assert reissued == b""
+    assert duplicates(protocol.REASON_SEQUENCE_REGRESSION, "detected") == before + 1
 
 
 def test_detection_can_be_disabled(client, monkeypatch):
     monkeypatch.setenv("OPAMP_DUPLICATE_UID_DETECTION", "false")
-    before = duplicates(protocol.REASON_HOST_IDENTITY, "reissued")
+    before = duplicates(protocol.REASON_HOST_IDENTITY, "detected")
     for host in ("vm-a", "vm-b", "vm-a", "vm-b"):
         assert expect_reply(opamp_send(client, message(host=host))).agent_identification.new_instance_uid == b""
     assert len(client.get("/agents").json()["agents"]) == 1
-    assert duplicates(protocol.REASON_HOST_IDENTITY, "reissued") == before
+    assert duplicates(protocol.REASON_HOST_IDENTITY, "detected") == before
 
 
 def test_token_mode_detects_but_never_renames():

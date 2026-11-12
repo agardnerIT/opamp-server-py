@@ -51,7 +51,7 @@ st.download_button(
 )
 
 if note := agent_auth_note(auth_mode):
-    (st.warning if auth_mode == "token" else st.caption)(note)
+    st.warning(note)
 
 st.divider()
 

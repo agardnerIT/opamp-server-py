@@ -32,7 +32,7 @@ import gzip
 import pytest
 
 from proto import opamp_pb2
-from server import remote_config
+from server import agent_auth, remote_config
 from server.main import app
 from server.state import AGENT_REGISTRY
 from server.ws import REGISTRY as WS_REGISTRY
@@ -44,14 +44,15 @@ PROTOBUF = "application/x-protobuf"
 
 @pytest.fixture
 def opamp(monkeypatch):
-    """A clean in-process OpAMP client: no push, no agent auth, no leftover fleet."""
+    """A clean in-process OpAMP client with the mandatory agent token (#125)."""
     WS_REGISTRY.reset()
     for existing in list(AGENT_REGISTRY._agents):
         AGENT_REGISTRY.remove(existing)
     monkeypatch.delenv("OPAMP_CONFIG_PUSH_ENABLED", raising=False)
     monkeypatch.delenv("OPAMP_AGENT_AUTH", raising=False)
     monkeypatch.delenv("OPAMP_MAX_MESSAGE_BYTES", raising=False)
-    client = OpampHarness(app)
+    token, _ = agent_auth.issue_token(label="conformance")
+    client = OpampHarness(app, headers={"Authorization": f"Bearer {token}"})
     yield client
     client.close()
     WS_REGISTRY.reset()
@@ -196,34 +197,32 @@ def test_a_message_without_an_instance_uid_is_a_bad_request(opamp):
     assert AGENT_REGISTRY.count == 0
 
 
-def test_request_instance_uid_is_answered_with_a_new_uid(opamp):
-    """§Requesting instance_uid: the agent asks, the server mints.
+def test_request_instance_uid_is_refused(opamp):
+    """§Requesting instance_uid: ⚠️ deviation — refusal, not a minted uid.
 
-    The replacement travels in `agent_identification.new_instance_uid`, and the record
-    is keyed by the new uid — the temporary identity must not become a fleet entry.
+    Agent authentication is mandatory (#125), so an agent must present a token for a
+    uid it already has. A fleet token is minted *before* any agent exists, which
+    removes the bootstrap deadlock this spec feature used to solve. A server-assigned
+    identity would be one nobody authenticated (D1).
 
-    Note the deliberate edge: the flag is honoured for an agent that *has* a uid to be
-    answered under, not for one that sends none (previous case). Minting onto an empty
-    id would file every restored agent under the same key.
-
-    Detail: `tests/test_protocol_validation.py`, `tests/test_instance_uid_identity.py`.
+    Recorded in `docs/spec-conformance.md`. Detail:
+    `tests/test_protocol_validation.py`.
     """
     temporary = spec.uid("losing-its-identity")
-    reply = opamp.expect(spec.request_instance_uid(temporary))
+    response = opamp.send(spec.request_instance_uid(temporary))
 
-    assert reply.HasField("agent_identification")
-    minted = reply.agent_identification.new_instance_uid
-    assert len(minted) == 16
-    assert minted != temporary
-    assert AGENT_REGISTRY.get(minted.hex()) is not None
+    assert response.status_code == 400
     assert AGENT_REGISTRY.get(temporary.hex()) is None
+    assert AGENT_REGISTRY.count == 0
 
 
-def test_two_agents_sharing_one_instance_uid_are_separated(opamp):
+def test_two_agents_sharing_one_instance_uid_are_detected_not_renamed(opamp):
     """§Agent Identification: a uid identifies one agent.
 
     Two agents alternating under one uid (a cloned VM, a restored backup) are detected
-    from the interleaving and the second one is answered with a replacement uid.
+    from the interleaving. ⚠️ Since agent auth is mandatory (#125) the server does not
+    re-issue: handing an authenticated agent a new uid would get it refused on its
+    next message. Detect, count, log.
 
     Detail: `tests/test_instance_uid_identity.py`.
     """
@@ -240,9 +239,8 @@ def test_two_agents_sharing_one_instance_uid_are_separated(opamp):
     opamp.expect(with_host("host-b", 2))
     reply = opamp.expect(with_host("host-a", 3))
 
-    assert reply.HasField("agent_identification")
-    assert reply.agent_identification.new_instance_uid
-    # The incumbent's record is untouched: only the returning agent is re-identified.
+    assert not reply.HasField("agent_identification")
+    # Both messages still identify the same agent; nothing was silently renamed.
     assert AGENT_REGISTRY.get(uid.hex()) is not None
 
 

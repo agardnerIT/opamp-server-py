@@ -69,10 +69,10 @@ def secure_posture(monkeypatch):
     monkeypatch.setattr(admin_auth, "ADMIN_PASSWORD", ADMIN)
     monkeypatch.setattr(admin_auth, "PASSWORD_SOURCE", "env")
     monkeypatch.setenv("OPAMP_CONFIG_PUSH_ENABLED", "true")
-    # Agent auth is off here (the custom-message surface does not need it), and one
-    # test needs a real config offer, so the documented development override applies.
+    # Agent auth is mandatory (#125); these cases drive the handler directly, and one
+    # needs a real config offer, so the documented development override applies.
     monkeypatch.setenv("OPAMP_ALLOW_INSECURE_CONFIG_PUSH", "true")
-    monkeypatch.setenv("OPAMP_AGENT_AUTH", "off")
+    monkeypatch.setenv("OPAMP_AGENT_AUTH", "token")
     monkeypatch.setenv("PUBLIC_URL", "https://opamp.example.com")
     monkeypatch.setenv("CONFIG_AT_REST_KEY", crypto.generate_key())
     monkeypatch.delenv("OPAMP_ALLOW_PLAINTEXT_CONFIG_STORAGE", raising=False)

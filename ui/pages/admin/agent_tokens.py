@@ -14,7 +14,6 @@ from ui.admin_common import admin_section
 from ui.shared import (  # noqa: E402 - after the sys.path fix-up
     ROLE_ADMIN,
     admin_request,
-    agent_auth_mode,
     agent_token_rows,
     mint_agent_token_form,
     pd,
@@ -30,16 +29,10 @@ session = admin_section(
 # The form is a page-level thing, not something hidden behind a disclosure: an
 # operator arrives here either to mint a credential (usually the first one, before
 # any agent exists) or to replace one they just revoked — the two moments when
-# making it find the form is the entire task.
-if agent_auth_mode() == "token":
-    st.subheader("Mint a token")
-    mint_agent_token_form("admin_token")
-else:
-    st.info(
-        "This deployment does not require an agent credential "
-        "(`config_push.agent_auth` is not `token`), so there is nothing to mint here. "
-        "Set `OPAMP_AGENT_AUTH=token` to require one."
-    )
+# making it find the form is the entire task. Agent auth is mandatory (#125), so
+# there is no deployment where this page has nothing to offer.
+st.subheader("Mint a token")
+mint_agent_token_form("admin_token")
 
 st.divider()
 st.subheader("Issued tokens")

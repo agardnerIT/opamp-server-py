@@ -53,7 +53,7 @@ agent interoperate?" is answerable without reading source (#79).
 | Clause | Status | Pinned by | Notes |
 |---|---|---|---|
 | An `instance_uid` identifies one agent | ✅ | `test_two_agents_sharing_one_instance_uid_are_separated`, `tests/test_instance_uid_identity.py` | Duplicates detected from interleaved host identities or a counter that keeps going backwards (#75) |
-| Duplicate uid → `agent_identification.new_instance_uid` | ✅ | same | Only when the server may re-issue: a token is bound to the uid it was minted for (#94), so authenticated agents are detected and left alone |
+| Duplicate uid → `agent_identification.new_instance_uid` | ⚠️ deviation | same | Detected, logged and counted, but never renamed: handing an authenticated agent a new uid would get it refused on its next message (#94, #125) |
 | `instance_uid` is 16 bytes | ⚠️ deviation | `tests/test_protocol_validation.py` | Non-empty uids of any length are accepted; empty is refused. Unicode/ASCII ids are used by every harness and by this repo's own fixtures (#73) |
 | Mismatch between a header and the body | ⚠️ extension | `tests/test_instance_uid_identity.py` | `OpAMP-Instance-UID` is read and cross-checked (#76). Not in the spec: the body always wins unless `OPAMP_UID_HEADER_STRICT=true` |
 
@@ -61,9 +61,8 @@ agent interoperate?" is answerable without reading source (#79).
 
 | Clause | Status | Pinned by | Notes |
 |---|---|---|---|
-| `AgentToServerFlags_RequestInstanceUid` → reply carries a new uid | ✅ | `test_request_instance_uid_is_answered_with_a_new_uid` | UUIDv7, and the agent is keyed by the new uid; the temporary record is removed |
-| The flag may be sent with no uid at all | ⚠️ deviation | `test_a_message_without_an_instance_uid_is_a_bad_request` | Refused: an empty uid cannot be filed (it would share one registry row), so the flag is honoured for an agent that still names itself |
-| With agent authentication | ⚠️ deviation | `tests/test_protocol_validation.py` | Refused with `BAD_REQUEST` (#94, D1): a minted uid has no credential behind it |
+| `AgentToServerFlags_RequestInstanceUid` → reply carries a new uid | ⚠️ deviation | `tests/test_protocol_validation.py` | Refused with `BAD_REQUEST` (#94, #125): an agent must present a token for a uid it already has. A fleet token is minted before any agent exists, which is what removes the bootstrap deadlock without server-assigned identity |
+| The flag may be sent with no uid at all | ⚠️ deviation | `test_a_message_without_an_instance_uid_is_a_bad_request` | Refused: an empty uid cannot be filed (it would share one registry row) |
 
 ## §Agent Status Compression
 
@@ -154,7 +153,7 @@ makes, all of them tested:
 
 | Requirement | Pinned by | Notes |
 |---|---|---|
-| Agent → server authentication | `tests/test_agent_auth.py` | `OPAMP_AGENT_AUTH=token`; a token is bound to one uid (#94) |
+| Agent → server authentication | `tests/test_agent_auth.py` | Mandatory (#125). A fleet token authorises up to `max_agents`; a bound token is one uid (#94) |
 | Admin authentication and roles | `tests/test_auth.py` | viewer < operator < approver < admin; two-phase push needs approver (#95) |
 | Fail-closed posture | `tests/test_posture.py` | Push refuses to start without the prerequisites (#96) |
 | Config bodies encrypted at rest | `tests/test_crypto.py`, `tests/test_redaction.py` | AES-GCM bound to the row; one redaction filter everywhere (#98) |

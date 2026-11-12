@@ -43,19 +43,22 @@ import prometheus_client as prom_client
 from fastapi import HTTPException
 from loguru import logger
 
-from server import admin_auth, audit, auth, crypto
+from server import audit, auth, crypto
 
 # Detail used by every gated push route. 404, not 403: a server with config push
 # off should not confirm to a stranger that the surface exists at all.
 GATE_DETAIL = "config push is disabled"
 
-VALID_AGENT_AUTH_MODES = ("off", "token", "mtls")
+#: The only agent-auth mode (#125). A tokenless OpAMP endpoint believes whatever
+#: `instance_uid` a client puts in the body, so it is not a supported deployment at
+#: all: not the default, not an option, not reachable through an override.
+AGENT_AUTH_MODE = "token"
+VALID_AGENT_AUTH_MODES = (AGENT_AUTH_MODE,)
 
-# Agent auth modes this build actually *enforces*. #94 added token enforcement;
-# "mtls" is reported (and warned about at startup) but deliberately excluded, so
-# the gate cannot be opened by an env var that no code reads. mTLS belongs with
-# the CA work in #83.
-ENFORCED_AGENT_AUTH_MODES: frozenset = frozenset({"token"})
+#: Env vars that used to open the endpoint. They are refused at startup rather than
+#: ignored, because silently enforcing `token` on a deployment that asked for `off`
+#: takes the whole fleet offline with no explanation.
+REMOVED_AGENT_AUTH_ENVS = ("OPAMP_ALLOW_UNAUTHENTICATED_AGENTS",)
 
 TLS_URL_PREFIXES = ("https://", "wss://")
 
@@ -106,42 +109,63 @@ def allow_insecure_config_push() -> bool:
     return _env_flag("OPAMP_ALLOW_INSECURE_CONFIG_PUSH")
 
 
-def allow_unauthenticated_agents() -> bool:
-    """`OPAMP_ALLOW_UNAUTHENTICATED_AGENTS` — the explicit way back to the old default.
-
-    #126: agent auth is `token` unless `OPAMP_AGENT_AUTH` says otherwise, because a
-    tokenless OpAMP endpoint trusts whatever `instance_uid` a client puts in the body.
-    The old behaviour is still reachable, but only by saying so: the failure mode it
-    enables ("spin this up, bind to 0.0.0.0, whoops") is identical to
-    `OPAMP_ALLOW_INSECURE_CONFIG_PUSH`, so it gets the same shape — an override that is
-    logged at startup, reported in `/health` and shown as a banner in the UI.
-    """
-    return _env_flag("OPAMP_ALLOW_UNAUTHENTICATED_AGENTS")
-
-
 def agent_auth_mode() -> str:
-    """`OPAMP_AGENT_AUTH` normalised to `off|token|mtls`.
+    """The agent-auth mode. There is exactly one: `token` (#125).
 
-    **Unset means `token`** (#126). A tokenless OpAMP endpoint believes whatever
-    `instance_uid` a client puts in the body, so it must be an explicit decision rather
-    than the thing you get by not deciding.
+    Kept as a function because `/health`, the UI and the CLI all read it, and because
+    a future mode (mTLS, #83) must be a deliberate addition here rather than an env var
+    some code happens not to read.
+    """
+    return AGENT_AUTH_MODE
 
-    There are two ways to make that decision, and neither is silent: set
-    `OPAMP_AGENT_AUTH=off`, or set `OPAMP_ALLOW_UNAUTHENTICATED_AGENTS=true` and leave
-    the mode unset (for tooling that would otherwise have to know about this feature at
-    all — `docker-compose.yml` did exactly that). An unknown value is a typo, so it keeps
-    authentication **on** and says so, instead of quietly downgrading to open.
+
+def agent_auth_configuration_error() -> str | None:
+    """Why this process may not serve OpAMP, or `None` when the configuration is valid.
+
+    Unset and `token` are the only accepted states. `off` and `mtls` were both, in
+    practice, tokenless: `off` said so and `mtls` was never implemented, so accepting
+    either would leave the zero-auth hole #125 exists to close. A typo is refused for
+    the same reason it must not open the gate — the operator has to see the mistake.
     """
     raw = (os.environ.get("OPAMP_AGENT_AUTH") or "").strip().lower()
-    if not raw:
-        return "off" if allow_unauthenticated_agents() else "token"
-    if raw not in VALID_AGENT_AUTH_MODES:
-        logger.warning(
-            f"Unknown OPAMP_AGENT_AUTH={raw!r} (expected one of "
-            f"{', '.join(VALID_AGENT_AUTH_MODES)}); agent auth stays on (token)"
+    if raw and raw not in VALID_AGENT_AUTH_MODES:
+        if raw == "off":
+            return (
+                "OPAMP_AGENT_AUTH=off is no longer supported: a tokenless OpAMP "
+                "endpoint lets any client that can reach the port claim any agent "
+                "identity (#125). Agents need a token before they connect."
+            )
+        if raw == "mtls":
+            return (
+                "OPAMP_AGENT_AUTH=mtls is not enforced by this build: client "
+                "certificates are terminated by your proxy, so the endpoint would "
+                "still trust any client (#125). Use token until mTLS lands with #83."
+            )
+        return (
+            f"OPAMP_AGENT_AUTH={raw!r} is not a supported agent-auth mode; the only "
+            "mode is token (#125). Remove the variable (unset already means token) "
+            "or set it to token."
         )
-        return "off" if allow_unauthenticated_agents() else "token"
-    return raw
+    for name in REMOVED_AGENT_AUTH_ENVS:
+        if _env_flag(name):
+            return (
+                f"{name}=true is no longer supported: it opened the OpAMP endpoint to "
+                "tokenless clients, which #125 removed. Mint a fleet token "
+                "(`opampctl agent-tokens create`), put it in every agent's config, "
+                "then remove this variable and restart."
+            )
+    return None
+
+
+def assert_agent_auth_posture() -> None:
+    """Refuse to start when agent authentication is not the mandatory `token` mode."""
+    problem = agent_auth_configuration_error()
+    if problem is not None:
+        raise AgentAuthConfigError(problem)
+
+
+class AgentAuthConfigError(RuntimeError):
+    """Startup refusal: the agent-auth configuration asks for zero auth (#125)."""
 
 
 def public_url() -> str:
@@ -188,9 +212,6 @@ def posture() -> Dict[str, object]:
         "enabled": config_push_enabled(),
         "insecure": insecure(),
         "agent_auth": agent_auth,
-        # #126: `off` is only reachable through an override, and a surface that shows
-        # the mode must be able to show *why* it is off.
-        "agent_auth_override": allow_unauthenticated_agents(),
         "audit": audit_enabled(),
         "tls": tls_enabled(),
         "config_at_rest": config_at_rest_mode(),
@@ -216,7 +237,6 @@ def requirements() -> Dict[str, Dict[str, object]]:
     # gate asks "can we tell who is asking", not "which mechanism is in use".
     admin_ok = auth.configured()
     mode = agent_auth_mode()
-    agent_ok = mode in ENFORCED_AGENT_AUTH_MODES
     tls_ok = tls_enabled()
 
     return {
@@ -227,23 +247,18 @@ def requirements() -> Dict[str, Dict[str, object]]:
             "`opampctl auth principals create`) or set ADMIN_PASSWORD / "
             "ADMIN_PASSWORD_FILE / OPAMP_ADMIN_AUTOGENERATE_PASSWORD=true",
         },
+        # #125: there is no insecure variant to report. A process that reaches this
+        # point has already refused any other configuration (see
+        # `assert_agent_auth_posture`), so this requirement is always met.
         "agent_auth": {
             "label": "agents are not authenticated",
-            "met": agent_ok,
+            "met": True,
             "mode": mode,
             "detail": (
-                "set OPAMP_AGENT_AUTH=token and give each agent a credential "
-                "(`opampctl agents token create <agent-id>`; see README → "
-                "Agent authentication)"
-                if mode == "off"
-                else (
-                    "OPAMP_AGENT_AUTH=mtls is not enforced by this build: client "
-                    "certificates are terminated upstream and trusting a forwarded "
-                    "header would be forgeable. Use OPAMP_AGENT_AUTH=token until "
-                    "mTLS lands with #83"
-                    if mode == "mtls"
-                    else f"OPAMP_AGENT_AUTH={mode} is not enforced by this build"
-                )
+                "agents present `Authorization: Bearer <token>`; mint one with "
+                "`opampctl agent-tokens create` (fleet) or "
+                "`opampctl agents token create <agent-id>` (bound) — see README → "
+                "Agent tokens"
             ),
         },
         "tls": {
@@ -319,6 +334,10 @@ def push_allowed() -> bool:
     """
     if not config_push_enabled():
         return False
+    # An invalid agent-auth configuration is a startup refusal, but this is also read
+    # at request time (tests, a reloaded env): never let it open the gate.
+    if agent_auth_configuration_error() is not None:
+        return False
     return allow_insecure_config_push() or not unmet_requirements()
 
 
@@ -366,13 +385,12 @@ def posture_warning(push: Dict[str, object] | None = None) -> str | None:
     if not push.get("insecure"):
         return None
 
-    agent_auth = push.get("agent_auth", "off")
-    if agent_auth == "off":
-        agent_auth_label = "off — any client can claim any agent identity"
-    elif agent_auth in ENFORCED_AGENT_AUTH_MODES:
-        agent_auth_label = f"{agent_auth} (enforced)"
-    else:
-        agent_auth_label = f"{agent_auth} (configured, not enforced by this build)"
+    agent_auth = push.get("agent_auth", AGENT_AUTH_MODE)
+    agent_auth_label = (
+        f"{agent_auth} (enforced)"
+        if agent_auth in VALID_AGENT_AUTH_MODES
+        else f"{agent_auth} (not supported by this build)"
+    )
     tls_label = "yes" if push.get("tls") else "no — config travels in cleartext"
 
     return (
@@ -397,6 +415,11 @@ def assert_startup_posture() -> None:
     operator reliably sees (epic #93, D2). Called from the FastAPI lifespan and
     again from `__main__` for a clean non-zero exit under uvicorn.
     """
+    # #125: agent authentication is not a config-push prerequisite, it is a
+    # prerequisite for serving the OpAMP endpoint at all. Checked first so an
+    # `off`/`mtls` configuration fails with the reason an operator can act on.
+    assert_agent_auth_posture()
+
     if not config_push_enabled():
         logger.info(
             "config push disabled (OPAMP_CONFIG_PUSH_ENABLED=false): read-only mode, "

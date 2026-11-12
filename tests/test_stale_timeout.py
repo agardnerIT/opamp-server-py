@@ -15,6 +15,7 @@ import pytest
 
 import server.main as server_main
 import server.state as server_state
+from server import agent_auth
 from server.state import AGENT_REGISTRY, AgentState
 
 FLOOR = 180.0  # AGENT_TIMEOUT_SECONDS default
@@ -242,6 +243,11 @@ def test_real_messages_drive_the_cadence_end_to_end():
         return msg.SerializeToString()
 
     client = TestClient(server_main.app)
+    token, _ = agent_auth.issue_token(label="stale-timeout")
+    request_headers = {
+        "Content-Type": "application/x-protobuf",
+        "Authorization": f"Bearer {token}",
+    }
     alerts = _RecordingAlert()
     monkey = pytest.MonkeyPatch()
     try:
@@ -252,12 +258,12 @@ def test_real_messages_drive_the_cadence_end_to_end():
         clock = {"now": started}
         monkey.setattr(server_state, "utcnow", lambda: clock["now"])
 
-        client.post("/v1/opamp", content=message(), headers={"Content-Type": "application/x-protobuf"})
+        client.post("/v1/opamp", content=message(), headers=request_headers)
         agent_id = next(a.agent_id for a in AGENT_REGISTRY.list_all() if a.instance_uid == uid)
 
         for _ in range(4):  # four polls, 120s apart
             clock["now"] += timedelta(seconds=120)
-            client.post("/v1/opamp", content=message(), headers={"Content-Type": "application/x-protobuf"})
+            client.post("/v1/opamp", content=message(), headers=request_headers)
             assert server_main.cleanup_stale_agents(now=clock["now"]) == []
 
         state = AGENT_REGISTRY.get(agent_id)

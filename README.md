@@ -550,22 +550,18 @@ supervisor supports the same `headers` block.
 
 ## Agent tokens (agent → server)
 
-Agents authenticate with `Authorization: Bearer <token>`; the server refuses a
-connection without one. `OPAMP_AGENT_AUTH` is the switch, and **it defaults to
-`token`** — a tokenless OpAMP endpoint believes whatever `instance_uid` the message
-body claims, so being open is a decision rather than the thing you get by not
-deciding:
+Agents authenticate with `Authorization: Bearer <token>` **before** they connect;
+the server refuses a request without one. There is no tokenless mode (#125): a
+tokenless OpAMP endpoint believes whatever `instance_uid` the message body claims,
+so it is not a deployment this server supports.
 
-| Setting | Behaviour |
-|---|---|
-| *(unset)* | `token`: agents must present a token, or they get 401 / 1008 |
-| `token` | Same, stated explicitly |
-| `off` | Unauthenticated, as before #126: any client that can reach the port can claim any agent identity. Logs a startup warning |
-| `OPAMP_ALLOW_UNAUTHENTICATED_AGENTS=true` | The other way to reach `off`, for tooling that sets nothing. Reported in `/health` as `config_push.agent_auth_override` and shown as a banner in the UI |
-| `mtls` | Reported by the posture but **not enforced by this build** — certificates are terminated by your proxy, so the server would only be trusting a forgeable header. Use `token`; mTLS arrives with the CA work in #83 |
-
-An unrecognised value keeps authentication **on** and warns: a typo must not open
-the endpoint.
+`OPAMP_AGENT_AUTH` still exists so an old `.env` says something, but the only
+accepted value is `token` (unset means the same). Anything else refuses to start:
+`off`, `mtls` (never enforced by this build — certificates are terminated by your
+proxy) and any typo. The old `OPAMP_ALLOW_UNAUTHENTICATED_AGENTS=true` escape hatch
+is gone and is refused by name, rather than silently enforcing `token` on a fleet
+that was promised otherwise. To move an open deployment: mint a fleet token, put it
+in every agent's config, then restart.
 
 ### Two kinds of token
 
@@ -629,23 +625,21 @@ opampctl agents list --pretty
 opampctl agent-tokens list            # agents_used / max_agents, expires_at
 ```
 
-### Upgrading a fleet that is still `off`
+### Upgrading a fleet that is still open
 
-`OPAMP_AGENT_AUTH` now defaults to `token` (#126). An existing deployment that
-relied on the old default starts answering 401, so pick one path *before*
-upgrading:
+Agent auth is mandatory as of #125. An existing deployment that relied on a
+tokenless endpoint starts answering 401, and a server that still has
+`OPAMP_AGENT_AUTH=off`/`mtls` or `OPAMP_ALLOW_UNAUTHENTICATED_AGENTS=true` refuses
+to start with a message naming the variable. Do this before upgrading:
 
 ```bash
-# A. Stay open for now — the old behaviour, named out loud:
-OPAMP_ALLOW_UNAUTHENTICATED_AGENTS=true
-
-# B. Close it with no per-agent work: mint ONE fleet token, deploy it everywhere
+# Close it with no per-agent work: mint ONE fleet token, deploy it everywhere
 opampctl --password "$ADMIN_PASSWORD" agent-tokens create --label prod --max-agents 500
-#    ...then restart the server without the override.
+#    ...then remove OPAMP_AGENT_AUTH / OPAMP_ALLOW_UNAUTHENTICATED_AGENTS and restart.
 ```
 
-Path B is the point of the fleet token: the old runbook needed a token per agent,
-minted only after that agent had registered. Watch for stragglers with
+The fleet token is the point: the old runbook needed a token per agent, minted only
+after that agent had registered. Watch for stragglers with
 `curl --max-time 20 --connect-timeout 5 -s localhost:4320/metrics | grep opamp_agent_auth_failures_total` — the
 `reason` label distinguishes a config that has not reloaded (`missing`) from a
 token problem (`unknown`/`revoked`/`expired`/`agent_limit`).
@@ -714,19 +708,20 @@ If the variable is empty the box is hidden.
 
 This server ships **read-only by default** and is meant to be reachable by
 trusted agents on a trusted network until you finish the checklist below.
-Plain HTTP + no admin credential + agents that claim any `instance_uid` + a port
-published to the world is a fleet takeover, so the defaults are now closed:
+Plain HTTP + no admin credential + a tokenless agent that can claim any
+`instance_uid` + a port published to the world is a fleet takeover, so the defaults
+are now closed:
 
 | Thing | Default | What that means |
 |---|---|---|
 | `ADMIN_PASSWORD` | *none* | Read-only mode: reads are open, **every privileged write answers 403** (#95). Prefer named principals with roles — see [Roles](#roles). Docker generates a random password on first start and stores it in `data/admin_password`; nothing ships a placeholder |
 | Config push | **off** | Push routes return 404 (not 403 — a stranger does not get to learn the surface exists), the server does not advertise `OffersRemoteConfig`, and no `remote_config` field is ever sent |
-| Agent tokens | **required** | A tokenless agent gets 401. Mint one with `opampctl agent-tokens create` and put it in the agent's config — see [Agent tokens](#agent-tokens-agent--server). `OPAMP_ALLOW_UNAUTHENTICATED_AGENTS=true` is the deliberate opt-out, and it is reported everywhere |
+| Agent tokens | **required** | A tokenless agent gets 401, and there is no opt-out (#125). Mint one with `opampctl agent-tokens create` and put it in the agent's config — see [Agent tokens](#agent-tokens-agent--server) |
 | TLS | off | Credentials and configs travel in cleartext |
 | Config at rest | *no key* | Config bodies are not stored until `CONFIG_AT_REST_KEY` is set (or the plaintext opt-out is taken) — see [Config data and secrets](#config-data-and-secrets) |
 | Ports in `docker-compose.yml` | `127.0.0.1` | Reachable from the host only, not from the network — the UI (`:8501`) included: it is a server-side admin console with a live session token and no TLS of its own |
 
-**To expose it safely**, do all five:
+**To expose it safely**, do all of these:
 
 1. **Put TLS in front.** Use `docker/nginx.conf` or `docker/Caddyfile`, then set
    `PUBLIC_URL=https://opamp.example.com` (or `TLS_TERMINATED_UPSTREAM=true`).
@@ -738,9 +733,9 @@ published to the world is a fleet takeover, so the defaults are now closed:
    generated `data/admin_password` is a bootstrap credential, not a way to run a team:
    with one shared secret there is no `approver` distinct from `operator`, and no way
    to revoke one person without logging everyone out.
-3. **Authenticate your agents** (`OPAMP_AGENT_AUTH=token`) and mint a credential
-   per agent. The token travels in the agent's config, so TLS is not optional
-   once you turn this on.
+3. **Authenticate your agents.** Agent auth is mandatory (#125): mint a fleet or
+   bound token and put it in every agent's config. The token travels in the agent's
+   config, so TLS is not optional once you expose the port.
 4. **Set `CORS_ORIGINS`** to the origin the UI is served from instead of `*`.
 5. **Set `CONFIG_AT_REST_KEY`** so pushed configs are encrypted on disk. Losing
    the key loses *desired* config, not the fleet — see
@@ -753,7 +748,6 @@ published to the world is a fleet takeover, so the defaults are now closed:
 OPAMP_CONFIG_PUSH_ENABLED=true uvicorn server.main:app --port 4320
 # refusing to start: OPAMP_CONFIG_PUSH_ENABLED=true but the server posture is insecure:
 #   - admin auth is not configured: ...
-#   - agents are not authenticated: ...
 #   - the server is not served over TLS: ...
 #   - the audit log is not available: ...
 #   - config bodies would be stored unencrypted: ...
@@ -767,7 +761,7 @@ Check your posture at any time:
 
 ```bash
 curl -s localhost:4320/health | jq .config_push
-# {"enabled": false, "insecure": false, "agent_auth": "off", "audit": true, "tls": false,
+# {"enabled": false, "insecure": false, "agent_auth": "token", "audit": true, "tls": false,
 #  "config_at_rest": "unconfigured"}
 opampctl --password "$ADMIN_PASSWORD" health   # same, plus config_push
 curl -s -u ":$ADMIN_PASSWORD" localhost:4320/config/posture | jq .requirements
@@ -1519,10 +1513,10 @@ Counted in `opamp_duplicate_instance_uid_total{reason,action}`.
 
 Two limits, both deliberate:
 
-- **`OPAMP_AGENT_AUTH=token` cannot re-issue.** A token is bound to the uid it was
-  minted for (#94), so a server-minted uid would be refused as `uid_mismatch` on the
-  agent's very next message. In token mode the duplicate is detected, logged and
-  counted (`action="detected"`) but never renamed;
+- **An authenticated agent cannot be re-issued.** A bound token is tied to the uid it
+  was minted for (#94), and handing any authenticated agent a new uid would get it
+  refused on its next message. The duplicate is detected, logged and counted
+  (`action="detected"`) but never renamed;
 - detection is in-memory. A restart loses the streak and re-detects within two
   messages; the outcome (the new uid) is persisted.
 
@@ -1593,8 +1587,7 @@ is the app's own fallback, which is what applies when a line is absent from `.en
 | `CONFIG_PUSH_MAX_CONCURRENT` | `50` | Global cap on config frames queued but not yet written; over it, pushes degrade to `queued` |
 | `CONFIG_PUSH_WAIT_SECONDS` | `2` | How long a route waits to hand a push to a live connection's event loop before answering `queued` |
 | `OPAMP_CONFIG_PUSH_ENABLED` | `false` | Remote config push master switch. Off = push routes 404, no `remote_config` is ever sent. On = the server refuses to start unless the posture below is secure |
-| `OPAMP_AGENT_AUTH` | `token` | Agent authentication on `/v1/opamp`: `token` \| `off` \| `mtls`. `token` requires `Authorization: Bearer <token>` (see [Agent tokens](#agent-tokens-agent--server)); `mtls` is reported but not enforced by this build. An unknown value keeps authentication on; config push refuses to start without `token` |
-| `OPAMP_ALLOW_UNAUTHENTICATED_AGENTS` | `false` | The explicit way back to a tokenless endpoint (local development only). Logs a startup warning, is reported as `config_push.agent_auth_override` in `/health`, and shows a permanent UI banner |
+| `OPAMP_AGENT_AUTH` | `token` | The only supported agent-auth mode (#125). Unset means `token`; `off`, `mtls` and unknown values refuse to start, as does the removed `OPAMP_ALLOW_UNAUTHENTICATED_AGENTS`. Every agent must send `Authorization: Bearer <token>` — see [Agent tokens](#agent-tokens-agent--server) |
 | `PUBLIC_URL` | *(empty)* | Public URL agents/browsers use. `https://` or `wss://` counts as TLS for the posture check |
 | `TLS_TERMINATED_UPSTREAM` | `false` | Assert that a TLS terminator you control sits in front of the server (see `docker/`). Assertion only — keep the server on loopback |
 | `OPAMP_AUDIT_ENABLED` | `true` | Append-only, hash-chained audit log for privileged actions (#97). **On by default**: a privileged action that cannot be recorded is refused, so turning this off makes the server read-only for writes. Reported in `/health` as `config_push.audit` |
@@ -1713,7 +1706,7 @@ Two separate credential systems, deliberately:
 
 | Channel | Credential | Enabled by |
 |---|---|---|
-| **Agents** → `POST/WS /v1/opamp` | `Authorization: Bearer opamp_agent_…` | On by default (`OPAMP_AGENT_AUTH=token`) — see [Agent tokens](#agent-tokens-agent--server) |
+| **Agents** → `POST/WS /v1/opamp` | `Authorization: Bearer opamp_agent_…` | **Mandatory** (#125) — see [Agent tokens](#agent-tokens-agent--server) |
 | **Humans / tooling** → admin API | session token (`POST /auth/session`) or HTTP Basic | a principal, or the legacy `ADMIN_PASSWORD` |
 
 #### Roles
@@ -1848,7 +1841,7 @@ The UI signs in the same way the CLI does — `POST /auth/session` — and then 
 | POST | `/auth/principals` | admin | Create an identity: `{"name", "role", "password", "expires_at"}`. scrypt-hashed; 409 taken name, 422 bad role/short password |
 | DELETE | `/auth/principals/{id}` | admin | Revoke an identity and close its sessions (row kept, name stays reserved) |
 | GET | `/auth/verify` | viewer | Validate a credential — any role passes (200, 401, or 429 when locked out); failures feed the lockout |
-| POST | `/v1/opamp` | 🔑 | OpAMP protocol endpoint — agents connect here (protobuf). With `OPAMP_AGENT_AUTH=token` the agent must send `Authorization: Bearer <token>`: 401 without a valid one, 403 when the token is for another `instance_uid`. Malformed input (including an empty `instance_uid`) is 400 with a `BAD_REQUEST` error body; a body over `OPAMP_MAX_MESSAGE_BYTES` (after decompression) is 413; an unsupported `Content-Encoding` is 415; when the server is overloaded the request is 503 with `Retry-After` and no state change (#78). The `OpAMP-Instance-UID` header is read and cross-checked against the body (#76); a duplicate uid is answered with a server-generated replacement (#75) |
+| POST | `/v1/opamp` | 🔑 | OpAMP protocol endpoint — agents connect here (protobuf). The agent must send `Authorization: Bearer <token>`: 401 without a valid one, 403 when a bound token is for another `instance_uid`, 403 `agent_limit` when a fleet token is at its cap. Malformed input (including an empty `instance_uid`) is 400 with a `BAD_REQUEST` error body; a body over `OPAMP_MAX_MESSAGE_BYTES` (after decompression) is 413; an unsupported `Content-Encoding` is 415; when the server is overloaded the request is 503 with `Retry-After` and no state change (#78). The `OpAMP-Instance-UID` header is read and cross-checked against the body (#76); a duplicate uid is answered with a server-generated replacement (#75) |
 | WS | `/v1/opamp` | 🔑 | Same endpoint over WebSocket (`OPAMP_WS_ENABLED`, on by default); credential checked before `accept()`, refusals close `1008`. Malformed messages (including an empty `instance_uid`) get a `BAD_REQUEST` error frame then close `1002`; oversized frames close `1009`; an overloaded server refuses the upgrade with `503` + `Retry-After` (#78) |
 | POST | `/v1/metrics` | | OTLP/HTTP metrics ingestion (JSON or protobuf), keyed on `service.instance.id` then `service.name`. **Unauthenticated and OTLP-only** — one profile's telemetry, not a general metrics API (#122) |
 | GET | `/agents` | | List agents. Filters: `healthy=true\|false\|unknown`, `status=` (remote config status, or alias `remote_config_status=`), or any description attribute, e.g. `?environment=prod`. Repeated params are OR. Each agent carries a `credential` block |
@@ -2067,7 +2060,7 @@ opampctl agents manifest <agent-id> --raw   # OCB manifest.yaml for a slim build
 opampctl agents manifest <agent-id> --version 1.2.3
 opampctl agents compliance <agent-id>       # OPA evaluation (no-op if OPA disabled)
 
-# Agent credentials (admin; OPAMP_AGENT_AUTH=token)
+# Agent credentials (admin; mandatory)
 opampctl agents token create <agent-id> --label prod-1   # token (once) + collector snippet
 opampctl agents token create <agent-id> --raw            # just the token, for $(...)
 opampctl agents token create <agent-id> --retire-previous  # rotate with an immediate cutover

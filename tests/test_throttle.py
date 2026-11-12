@@ -33,6 +33,7 @@ from starlette.testclient import WebSocketDenialResponse
 from proto import opamp_pb2
 from server import throttle
 from server.framing import decode_message, encode_message
+from tests.support import anonymous
 from server.state import AGENT_REGISTRY, AgentState
 from tests.conformance.harness import opamp_send
 
@@ -179,8 +180,7 @@ def test_refusal_happens_before_the_body_is_read(client, throttling, monkeypatch
 
 def test_identity_is_checked_before_load(client, throttling, monkeypatch):
     """401 stays 401 under overload: a bad credential is not a capacity problem."""
-    monkeypatch.setenv("OPAMP_AGENT_AUTH", "token")
-    response = opamp_send(client, message())
+    response = opamp_send(client, message(), headers=anonymous())
     assert response.status_code == 401
     assert "Retry-After" not in response.headers
 

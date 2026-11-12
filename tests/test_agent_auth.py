@@ -8,7 +8,7 @@ Each acceptance criterion in the issue maps to a test here:
   the same credential reconnects cleanly
 - rotation without downtime, revocation blocks delivery but retains state
 - tokens never appear in logs, `/agents`, audit lines or error bodies
-- `off` still behaves exactly like before (#96/#89 suites cover that)
+- there is no `off` mode to fall back to (#125)
 """
 
 from __future__ import annotations
@@ -24,6 +24,7 @@ from starlette.websockets import WebSocketDisconnect
 from proto import opamp_pb2
 from server import admin_auth, agent_auth, crypto, posture
 from server.framing import decode_message, encode_message
+from server.main import app
 from server.state import AGENT_REGISTRY, SQLiteCredentialStore
 from server.ws import CLOSE_POLICY_VIOLATION, REGISTRY
 from tests.support import ADMIN, admin_headers, bearer
@@ -64,6 +65,12 @@ def isolated(monkeypatch, tmp_path):
     REGISTRY.reset()
     for agent in list(AGENT_REGISTRY._agents.values()):
         AGENT_REGISTRY.remove(agent.agent_id)
+
+
+@pytest.fixture
+def client():
+    """A bare client: this suite sends the exact credential it means to test."""
+    return TestClient(app)
 
 
 @pytest.fixture
@@ -191,10 +198,13 @@ class TestHttpEnforcement:
         # Revocation blocks delivery, it does not wipe the agent.
         assert AGENT_REGISTRY.get(VICTIM_UID.hex()) is not None
 
-    def test_off_mode_is_unchanged(self, client, monkeypatch):
+    def test_off_mode_is_no_longer_a_thing(self, client, monkeypatch):
+        """#125: the old zero-auth path is a startup refusal, not a mode."""
         monkeypatch.setenv("OPAMP_AGENT_AUTH", "off")
+        with pytest.raises(posture.AgentAuthConfigError, match="#125"):
+            posture.assert_agent_auth_posture()
         response = client.post("/v1/opamp", content=agent_message(VICTIM_UID))
-        assert response.status_code == 200
+        assert response.status_code == 401
 
     def test_binding_conflict_is_refused_over_http(self, client):
         """A uid bound to another credential may not be spoken for over HTTP either."""

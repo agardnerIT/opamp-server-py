@@ -122,9 +122,9 @@ class TestLiveOps:
         data = parse(run("--password", ADMIN_PW, "config", "posture"))
         assert data["config_push"]["enabled"] is False
         assert data["override"] is False
-        # admin auth is met (the fixture configures it); agent auth, TLS and the
-        # config encryption key (#98) are not.
-        assert "unmet" in data and len(data["unmet"]) == 3
+        # admin auth, agent auth and audit are met; TLS and the config encryption
+        # key (#98) are the two gaps.
+        assert "unmet" in data and len(data["unmet"]) == 2
 
     def test_agents_list_and_get(self, live):
         register_agent("1111111111111111")

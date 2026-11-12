@@ -177,7 +177,7 @@ def audit_export(format: str = "jsonl", since: Optional[str] = None, until: Opti
 
 @mcp.tool()
 def config_posture() -> str:
-    """Config push security posture: admin auth, agent auth, TLS, override state.
+    """Config push security posture: admin auth, mandatory agent auth, TLS, overrides.
 
     Safe to call any time (read-only). Requires ADMIN_PASSWORD when one is set.
     """

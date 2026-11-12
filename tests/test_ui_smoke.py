@@ -90,9 +90,9 @@ class FakeServer:
         self.login_status = 201
         self.login_headers = {}
         self.token_valid = True
-        # #124: what `/health` reports as `config_push.agent_auth`, which decides whether
-        # the connect snippet carries a credential.
-        self.agent_auth_mode = "off"
+        # #124/#125: what `/health` reports as `config_push.agent_auth`. The server
+        # only has one supported answer, and the snippet always carries a credential.
+        self.agent_auth_mode = "token"
         # #126: the token surface. `minted` is what POST /agent-tokens returns, so a
         # test can assert the page shows *that* token and not a placeholder.
         self.agent_tokens = []
@@ -907,16 +907,17 @@ def test_the_token_page_mints_a_replacement_after_a_revocation(server):
     ), "minting must go through the shared admin transport"
 
 
-def test_the_token_page_does_not_offer_minting_when_no_token_is_required(server):
-    """An open endpoint makes a token meaningless, and offering one would imply it is not."""
+def test_the_token_page_always_offers_minting(server):
+    """#125: every deployment requires a token, so the form is never conditional.
+
+    A stale `/health` answer that says `off` must not hide the one action this page
+    exists for.
+    """
     server.agent_auth_mode = "off"
     app = signed_in(AGENT_TOKENS_PAGE, role="admin").run()
     assert not app.exception, app.exception
 
-    assert not [
-        button for button in app.button if (button.label or "") == "Generate token"
-    ]
-    assert "OPAMP_AGENT_AUTH=token" in texts(app)
+    assert [button for button in app.button if (button.label or "") == "Generate token"]
 
 
 def test_a_non_admin_cannot_see_the_token_page(server):
@@ -1326,39 +1327,29 @@ def empty_agents_page(server):
     return app
 
 
-def test_an_empty_fleet_offers_a_copy_paste_config_for_the_bootstrap_profile(server):
-    """#116: the first screen a new user sees must contain the next step.
+def test_an_empty_fleet_asks_for_the_first_token_before_showing_a_config(server):
+    """#125: every deployment requires a credential, so minting comes first.
 
-    #121: the snippet and the filename are the *profile's*, so this asserts the page
-    agrees with the dictionary it is rendering from — not with a string a previous
-    release happened to ship. An empty fleet has no agent to resolve, so the answer
-    comes from `bootstrap_default`.
+    #116 made the empty fleet show a runnable config; #121 made it the profile's
+    text. #125 closed the last tokenless server, so the page cannot print a config
+    that would 401 — the operator mints the token, then gets the snippet.
     """
-    from server import profiles
-    from ui.shared import get_server_url
-
-    profile = profiles.bootstrap_default()
     app = empty_agents_page(server)
-    snippet = "\n".join(element.value for element in app.code)
-    assert "extensions:" in snippet and "opamp:" in snippet
-    assert "/v1/opamp" in snippet
-    assert "service:" in snippet and "extensions: [opamp]" in snippet
-    assert "No agents connected yet" in texts(app)
-    # Rebuilt from the profile, so the text is provably the dictionary's.
-    assert profile.onboarding_snippet(
-        f"{get_server_url()}/v1/opamp", "${env:OPAMP_AGENT_TOKEN}", auth=False,
-        agent_name="my-agent",
-    # Streamlit hands the rendered block back without the template's trailing newline.
-    ).rstrip() == "".join(element.value for element in app.code).rstrip()
-    # A download button means the file never has to be retyped from a screenshot, and
-    # the name is the profile's format, not a collector's filename.
-    assert any(
-        button.label == f"Download {profile.filename_for()}" for button in app.download_button
-    ), [button.label for button in app.download_button]
+    body = texts(app)
+    assert "No agents connected yet" in body
+    assert "Generate a token for this fleet" in body
+    assert not [code for code in app.code if "/v1/opamp" in code.value]
 
 
 def test_the_docker_toggle_rewrites_the_endpoint_for_a_containerised_collector(server):
-    app = empty_agents_page(server)
+    server.agents = []
+    app = signed_in(REPO / "ui/pages/1_Agents.py", role="admin")
+    app.run()
+    assert not app.exception, app.exception
+    submit = next(button for button in app.button if button.label == "Generate token")
+    submit.click().run()
+    assert not app.exception, app.exception
+
     assert "localhost" in "\n".join(element.value for element in app.code)
     app.toggle(key="empty_fleet_in_container").set_value(True).run()
     assert not app.exception, app.exception
@@ -1441,13 +1432,13 @@ def test_minting_shows_the_token_once_and_a_runnable_snippet(server):
     assert any(method == "POST" and url.endswith("/agent-tokens") for method, url in server.calls)
 
 
-def test_the_empty_fleet_snippet_claims_no_credential_on_an_open_server(server):
+def test_the_empty_fleet_mints_a_token_even_when_health_reports_a_legacy_mode(server):
+    """#125: there is no open server to print a tokenless snippet for."""
     server.agent_auth_mode = "off"
     app = empty_agents_page(server)
-    snippet = "\n".join(element.value for element in app.code)
-    assert "headers" not in snippet and "Authorization" not in snippet
-    # Open is stated, not implied: the operator cannot accept a risk nobody named.
-    assert "OPAMP_AGENT_AUTH=off" in texts(app)
+    body = texts(app)
+    assert "Generate a token for this fleet" in body
+    assert not [code for code in app.code if "Authorization" in code.value]
 
 
 def test_the_help_page_documents_the_same_credential_block(server):

@@ -39,7 +39,6 @@ def _secure_env(monkeypatch, tmp_path, agent_auth="token"):
     # #98: a config encryption key is now part of the posture.
     monkeypatch.setenv("CONFIG_AT_REST_KEY", crypto.generate_key())
     crypto.reset_key_cache()
-    monkeypatch.setattr(posture, "ENFORCED_AGENT_AUTH_MODES", frozenset({"token", "mtls"}))
 
 
 @pytest.fixture(autouse=True)
@@ -74,11 +73,9 @@ def test_defaults_are_closed():
     assert posture.config_push_enabled() is False
     assert posture.push_allowed() is False
     assert posture.insecure() is False
-    # #126: agent auth is ON by default. This is the whole point of the issue — a
-    # tokenless OpAMP endpoint believes whatever uid the body claims, so being open
-    # has to be a decision rather than the thing you get by not deciding.
+    # #125: there is exactly one agent-auth mode, and it is not configurable.
     assert posture.agent_auth_mode() == "token"
-    assert posture.allow_unauthenticated_agents() is False
+    assert posture.agent_auth_configuration_error() is None
     assert posture.tls_enabled() is False
     # #97: the audit log is real now and on by default — an audit log an operator
     # has to remember to enable is off during every incident that matters.
@@ -87,20 +84,44 @@ def test_defaults_are_closed():
         "enabled": False,
         "insecure": False,
         "agent_auth": "token",
-        "agent_auth_override": False,
         "audit": True,
         "tls": False,
         "config_at_rest": "unconfigured",
     }
 
 
-def test_the_override_is_the_documented_way_back_to_open(monkeypatch):
-    monkeypatch.setenv("OPAMP_ALLOW_UNAUTHENTICATED_AGENTS", "true")
-    assert posture.agent_auth_mode() == "off"
-    assert posture.posture()["agent_auth_override"] is True
-    # ...and an explicit `off` still means off: the decision is honoured either way.
+def test_off_is_not_a_supported_mode(monkeypatch):
+    """#125: zero auth is gone. `off` is refused at startup, not honoured."""
     monkeypatch.setenv("OPAMP_AGENT_AUTH", "off")
-    assert posture.agent_auth_mode() == "off"
+    problem = posture.agent_auth_configuration_error()
+    assert problem is not None and "#125" in problem
+    with pytest.raises(posture.AgentAuthConfigError):
+        posture.assert_agent_auth_posture()
+    # Reported as the only supported mode regardless of what the env says.
+    assert posture.agent_auth_mode() == "token"
+
+
+def test_mtls_is_refused_because_this_build_does_not_enforce_it(monkeypatch):
+    monkeypatch.setenv("OPAMP_AGENT_AUTH", "mtls")
+    problem = posture.agent_auth_configuration_error()
+    assert problem is not None and "not enforced" in problem
+    with pytest.raises(posture.AgentAuthConfigError):
+        posture.assert_agent_auth_posture()
+
+
+def test_the_removed_override_is_refused_by_name(monkeypatch):
+    monkeypatch.setenv("OPAMP_ALLOW_UNAUTHENTICATED_AGENTS", "true")
+    problem = posture.agent_auth_configuration_error()
+    assert problem is not None and "OPAMP_ALLOW_UNAUTHENTICATED_AGENTS" in problem
+    assert "agent-tokens create" in problem
+
+
+def test_unset_and_explicit_token_are_the_only_accepted_configurations(monkeypatch):
+    assert posture.agent_auth_configuration_error() is None
+    monkeypatch.setenv("OPAMP_AGENT_AUTH", "token")
+    assert posture.agent_auth_configuration_error() is None
+    monkeypatch.setenv("OPAMP_AGENT_AUTH", " TOKEN ")
+    assert posture.agent_auth_configuration_error() is None
 
 
 def test_flag_parsing_accepts_truthy_spellings(monkeypatch):
@@ -112,12 +133,13 @@ def test_flag_parsing_accepts_truthy_spellings(monkeypatch):
         assert posture.config_push_enabled() is False, raw
 
 
-def test_unknown_agent_auth_mode_stays_closed(monkeypatch):
-    """A typo must not open the endpoint (#126): unknown = the secure reading."""
+def test_unknown_agent_auth_mode_refuses_to_start(monkeypatch):
+    """A typo is a typo (#125), not a silent downgrade to token."""
     monkeypatch.setenv("OPAMP_AGENT_AUTH", "oauth-ish")
-    assert posture.agent_auth_mode() == "token"
-    monkeypatch.setenv("OPAMP_ALLOW_UNAUTHENTICATED_AGENTS", "true")
-    assert posture.agent_auth_mode() == "off"
+    problem = posture.agent_auth_configuration_error()
+    assert problem is not None and "not a supported agent-auth mode" in problem
+    with pytest.raises(posture.AgentAuthConfigError):
+        posture.assert_agent_auth_posture()
 
 
 def test_tls_from_public_url_or_upstream_terminator(monkeypatch):
@@ -133,7 +155,7 @@ def test_tls_from_public_url_or_upstream_terminator(monkeypatch):
 
 def test_unmet_requirements_names_every_missing_item_at_once():
     missing = posture.unmet_requirements()
-    # #126: agent auth is on by default, so it is no longer one of the misses — the
+    # #125: agent auth is mandatory, so it is no longer one of the misses — the
     # remaining three are what a default install actually lacks.
     assert len(missing) == 3
     assert "admin auth" in missing[0]
@@ -142,12 +164,13 @@ def test_unmet_requirements_names_every_missing_item_at_once():
     assert "unencrypted" in missing[2]
 
 
-def test_an_open_endpoint_is_named_as_an_unmet_requirement(monkeypatch):
-    """Turning the override on must put agent auth back on the list (#126)."""
-    monkeypatch.setenv("OPAMP_ALLOW_UNAUTHENTICATED_AGENTS", "true")
-    assert any(
-        "agents are not authenticated" in item for item in posture.unmet_requirements()
-    )
+def test_agent_auth_is_always_met_and_never_a_push_prerequisite_to_fix(monkeypatch):
+    """There is no insecure agent-auth state left to report (#125)."""
+    monkeypatch.setenv("OPAMP_AGENT_AUTH", "off")
+    # Even while the process would refuse to start, the requirement describes the
+    # only mode this build enforces rather than inventing an "open" state.
+    assert posture.requirements()["agent_auth"]["met"] is True
+    assert posture.requirements()["agent_auth"]["mode"] == "token"
 
 
 def test_requirements_met_gives_empty_list(monkeypatch, tmp_path):
@@ -157,27 +180,8 @@ def test_requirements_met_gives_empty_list(monkeypatch, tmp_path):
     assert posture.insecure() is False
 
 
-def test_configured_but_unenforced_agent_auth_does_not_count(monkeypatch, tmp_path):
-    """Setting an env var no code reads must not open the gate."""
-    _secure_env(monkeypatch, tmp_path)
-    monkeypatch.setattr(posture, "ENFORCED_AGENT_AUTH_MODES", frozenset())
-    assert posture.push_allowed() is False
-    assert any("not enforced by this build" in m for m in posture.unmet_requirements())
-
-
-def test_token_mode_is_enforced_and_mtls_is_not():
-    """#94: only the mode this build actually implements may open the gate."""
-    assert "token" in posture.ENFORCED_AGENT_AUTH_MODES
-    assert "mtls" not in posture.ENFORCED_AGENT_AUTH_MODES
-    assert "off" not in posture.ENFORCED_AGENT_AUTH_MODES
-
-
-def test_mtls_mode_is_reported_but_refused(monkeypatch, tmp_path):
-    _secure_env(monkeypatch, tmp_path, agent_auth="mtls")
-    monkeypatch.setattr(posture, "ENFORCED_AGENT_AUTH_MODES", frozenset({"token"}))
-    assert posture.push_allowed() is False
-    unmet = "\n".join(posture.unmet_requirements())
-    assert "not enforced by this build" in unmet and "#83" in unmet
+def test_there_is_exactly_one_agent_auth_mode():
+    assert posture.VALID_AGENT_AUTH_MODES == ("token",)
 
 
 def test_override_allows_push_but_reports_insecure(monkeypatch):
@@ -193,6 +197,13 @@ def test_override_allows_push_but_reports_insecure(monkeypatch):
 
 def test_startup_is_quiet_when_push_is_disabled():
     posture.assert_startup_posture()  # must not raise
+
+
+def test_startup_refuses_zero_auth_even_with_push_disabled(monkeypatch):
+    monkeypatch.delenv("OPAMP_CONFIG_PUSH_ENABLED", raising=False)
+    monkeypatch.setenv("OPAMP_AGENT_AUTH", "off")
+    with pytest.raises(posture.AgentAuthConfigError, match="#125"):
+        posture.assert_startup_posture()
 
 
 def test_startup_refuses_naming_every_requirement(monkeypatch):
@@ -357,7 +368,6 @@ def test_health_reports_posture(client):
         # #126: on by default, and the override is reported so a UI can tell
         # "enforced" from "enforced unless someone set the escape hatch".
         "agent_auth": "token",
-        "agent_auth_override": False,
         "audit": True,
         "tls": False,
         "config_at_rest": "unconfigured",

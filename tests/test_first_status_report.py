@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from google.protobuf.json_format import MessageToDict, ParseDict
 
 from proto import opamp_pb2
-from server import main
+from server import agent_auth, main
 from server.state import AgentRegistry, SQLiteAgentStore
 from tests.conformance.harness import expect_reply, opamp_send
 from tests.uids import uid
@@ -24,7 +24,10 @@ def isolated_server(monkeypatch, tmp_path):
     alert = Mock()
     monkeypatch.setattr(main, "AGENT_REGISTRY", registry)
     monkeypatch.setattr(main, "send_new_agent_alert", alert)
-    return TestClient(main.app), registry, alert
+    token, _ = agent_auth.issue_token(label="first-report")
+    client = TestClient(main.app)
+    client.headers["Authorization"] = f"Bearer {token}"
+    return client, registry, alert
 
 
 def full_report(healthy=True):

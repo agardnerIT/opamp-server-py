@@ -65,10 +65,10 @@ def get_server_url():
 #: it out of the agent's own effective-config report, which this server stores.
 AGENT_TOKEN_ENV = "OPAMP_AGENT_TOKEN"
 
-#: The modes `OPAMP_AGENT_AUTH` can take. `unknown` is not one of them — it is what this
-#: module reports when the server cannot be asked, so the UI never claims "open" by
-#: default (#124).
-AGENT_AUTH_MODES = ("off", "token", "mtls")
+#: The only mode the server accepts (#125). `unknown` is not one of them — it is what
+#: this module reports when the server cannot be asked or answers with a mode this UI
+#: does not support, so the UI never claims "no token needed" (#124).
+AGENT_AUTH_MODES = ("token",)
 AGENT_AUTH_UNKNOWN = "unknown"
 
 
@@ -121,7 +121,7 @@ def connect_snippet(
     profile=None,
     agent_name="my-agent",
     in_container=False,
-    agent_auth="off",
+    agent_auth="token",
     token_literal=None,
 ):
     """#116/#121: the copy-paste config for a *new* agent, in the profile's own shape.
@@ -143,12 +143,11 @@ def connect_snippet(
     resolves inside its own network namespace), so `in_container` swaps in the host
     alias Docker Desktop provides and Linux can be told about.
 
-    `agent_auth` is the server's mode (#124). With `token` the snippet carries the
-    credential block the endpoint demands; without it the config is exactly what an
-    `off` server always showed. `token_literal` (#126) is a token that was *just minted
-    on this page*: the operator is pasting it into a file they own, and a snippet they
-    cannot run without editing is not a snippet. The `${env:…}` form stays the
-    documented practice, and is what the snippet shows whenever no token is passed.
+    Agent authentication is mandatory (#125), so the snippet always carries the
+    credential block. `token_literal` (#126) is a token that was *just minted on this
+    page*: the operator is pasting it into a file they own, and a snippet they cannot
+    run without editing is not a snippet. The `${env:…}` form stays the documented
+    practice, and is what the snippet shows whenever no token is passed.
     """
     profile = profile or profiles.bootstrap_default()
     base = (server_url or SERVER_URL).rstrip("/")
@@ -171,41 +170,27 @@ def agent_auth_note(mode):
     """The sentence under the snippet, or `None` when there is nothing to say (#124).
 
     Wording lives here, not in the two pages that render it, for the same reason the
-    snippet does: Help and the empty fleet must not drift. Every mode gets an honest
-    answer, including `off` — "no token needed" is a fact about this server, not about
-    the protocol, and a user who is not told cannot decide whether it is acceptable.
+    snippet does: Help and the empty fleet must not drift. There is no "no token
+    needed" answer any more (#125): if the server cannot be asked, or reports a mode
+    this UI does not know, the operator is told to add the token rather than handed a
+    config that 401s forever.
     """
     if mode == "token":
         return (
-            "**This server requires an agent credential** (`OPAMP_AGENT_AUTH=token`), so "
-            f"the snippet reads `{AGENT_TOKEN_ENV}` from the agent's environment. A "
-            "token is bound to one `instance_uid` and an agent only reveals that by "
-            "connecting, so the order matters: let the agent register while the server "
-            "is `off`, mint the token with `opampctl agents token create <agent-id>` "
-            "(the response carries a paste-ready block), put it in "
-            f"`{AGENT_TOKEN_ENV}`, then set `OPAMP_AGENT_AUTH=token` and restart. On a "
-            "server that is already in `token` mode, nothing can connect until that is "
-            "done — README → Cutover runbook."
-        )
-    if mode == "mtls":
-        return (
-            "`OPAMP_AGENT_AUTH=mtls` is reported by this build but not enforced: client "
-            "certificates are terminated by your proxy, so this agent needs no "
-            "credential header — the transport identifies it instead."
+            "**This server requires an agent credential**, so the snippet reads "
+            f"`{AGENT_TOKEN_ENV}` from the agent's environment. Mint a fleet token "
+            "with `opampctl agent-tokens create` — it is not tied to an agent id, so it "
+            "works before any agent has connected — and paste it into "
+            f"`{AGENT_TOKEN_ENV}` (or the `headers:` block in the snippet). A token can "
+            "expire and can cap the number of agents it admits; see README → Agent "
+            "tokens."
         )
     if mode == AGENT_AUTH_UNKNOWN:
         return (
-            "Could not read this server's agent-auth mode from `GET /health`, so this "
-            "config claims no credential. If the server runs with "
-            "`OPAMP_AGENT_AUTH=token`, the endpoint answers 401 — add the `headers:` "
-            "block from README → Agent authentication."
-        )
-    if mode == "off":
-        return (
-            "`OPAMP_AGENT_AUTH=off` (the default): this endpoint accepts any client that "
-            "can reach it, and believes whatever `instance_uid` the message body claims. "
-            "That is fine on a trusted network; see README → Agent authentication before "
-            "exposing it."
+            "Could not read this server's agent-auth mode from `GET /health`, or it "
+            "reported a mode this UI does not support. Agent authentication is "
+            "mandatory, so this config still carries a credential: if the endpoint "
+            "answers 401, add the `headers:` block from README → Agent tokens."
         )
     return None
 

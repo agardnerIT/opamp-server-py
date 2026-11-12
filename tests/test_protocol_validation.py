@@ -4,7 +4,8 @@ Acceptance criteria pinned here:
 
 * an empty uid is refused with `BAD_REQUEST` and registers nothing;
 * an unparseable body is refused with a human-readable `error_message`;
-* `RequestInstanceUid` mints a 16-byte UUIDv7, and the agent is seen under it;
+* `RequestInstanceUid` is refused: agent auth is mandatory (#125), so an agent must
+  present a token for a uid it already has;
 * non-16-byte but non-empty uids stay accepted (deliberate compatibility choice);
 * with agent authentication the server refuses to mint an identity (D1);
 * WebSocket gets the same answer: readable BAD_REQUEST, then close 1002.
@@ -21,6 +22,7 @@ from server.framing import decode_message, encode_message
 from server.main import _handle_agent_message
 from server.state import AGENT_REGISTRY
 from tests.conformance.harness import opamp_send, parse_reply
+from tests.support import anonymous
 from server.ws import CLOSE_PROTOCOL_ERROR, REGISTRY
 
 BAD_REQUEST = opamp_pb2.ServerErrorResponseType_BadRequest
@@ -100,49 +102,16 @@ class TestBadRequest:
 
 
 class TestRequestInstanceUid:
-    def test_mints_a_uuid7_and_registers_under_it(self, client):
-        temporary = b"temporary-uid-01"
-        response = opamp_send(
-            client, message(temporary, flags=REQUEST_UID).SerializeToString()
-        )
+    """#125: an authenticated agent must use a uid it already has.
 
-        assert response.status_code == 200
-        reply = parse_reply(response)
-        new_uid = reply.agent_identification.new_instance_uid
-        assert len(new_uid) == 16
-        assert new_uid[6] >> 4 == 7  # version nibble
-        assert new_uid[8] >> 6 == 0b10  # RFC 4122 variant
-        # The reply is addressed to the temporary uid the agent used in this message.
-        assert reply.instance_uid == temporary
-        # State lives under the minted id, not the throwaway.
-        assert AGENT_REGISTRY.get(new_uid.hex()) is not None
-        assert AGENT_REGISTRY.get(temporary.hex()) is None
+    A fleet token removes the reason this existed — it can be minted before any agent
+    exists — so a server-assigned identity would only be an identity nobody
+    authenticated.
+    """
 
-    def test_minted_uid_is_usable_on_the_next_message(self, client):
-        temporary = b"temporary-uid-02"
-        first = opamp_send(client, message(temporary, flags=REQUEST_UID).SerializeToString())
-        new_uid = parse_reply(first).agent_identification.new_instance_uid
-
-        second = opamp_send(client, message(new_uid).SerializeToString())
-        assert second.status_code == 200
-        assert AGENT_REGISTRY.get(new_uid.hex()) is not None
-
-    def test_temporary_record_is_cleaned_up(self, client):
-        temporary = bytes.fromhex("cd" * 16)
-        assert opamp_send(client, message(temporary).SerializeToString()).status_code == 200
-        assert AGENT_REGISTRY.get(temporary.hex()) is not None
-
-        response = opamp_send(client, message(temporary, flags=REQUEST_UID).SerializeToString())
-        new_uid = parse_reply(response).agent_identification.new_instance_uid
-
-        assert AGENT_REGISTRY.get(temporary.hex()) is None
-        assert AGENT_REGISTRY.get(new_uid.hex()) is not None
-
-    def test_refused_when_agent_auth_is_on(self, client, monkeypatch):
-        monkeypatch.setenv("OPAMP_AGENT_AUTH", "token")
+    def test_refused_even_with_a_valid_fleet_token(self, client):
         uid = bytes.fromhex("33" * 16)
         token, _ = agent_auth.issue_token(uid.hex())
-
         response = opamp_send(
             client,
             message(uid, flags=REQUEST_UID).SerializeToString(),
@@ -150,6 +119,16 @@ class TestRequestInstanceUid:
         )
 
         assert_bad_request(response, contains="RequestInstanceUid")
+        assert AGENT_REGISTRY.get(uid.hex()) is None
+
+    def test_a_tokenless_request_is_refused_before_it_is_parsed(self, client):
+        uid = bytes.fromhex("34" * 16)
+        response = opamp_send(
+            client,
+            message(uid, flags=REQUEST_UID).SerializeToString(),
+            headers=anonymous(),
+        )
+        assert response.status_code == 401
         assert AGENT_REGISTRY.get(uid.hex()) is None
 
     def test_direct_handler_refusal_uses_the_same_exception(self):
@@ -175,14 +154,12 @@ class TestWebSocketBadRequest:
         assert exc.value.code == CLOSE_PROTOCOL_ERROR
         assert AGENT_REGISTRY.count == 0
 
-    def test_request_uid_binds_the_minted_identity(self, client, ws_on):
+    def test_request_uid_is_refused_on_the_socket_too(self, client, ws_on):
         temporary = b"temporary-ws-001"
         with client.websocket_connect("/v1/opamp") as ws:
             ws.send_bytes(frame(message(temporary, flags=REQUEST_UID)))
             reply = opamp_pb2.ServerToAgent()
             reply.ParseFromString(decode_message(ws.receive_bytes()))
-
-            new_uid = reply.agent_identification.new_instance_uid
-            assert len(new_uid) == 16
-            assert REGISTRY.connection_for(new_uid) is not None
+            assert reply.error_response.type == BAD_REQUEST
+            assert "RequestInstanceUid" in reply.error_response.error_message
             assert REGISTRY.connection_for(temporary) is None

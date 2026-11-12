@@ -59,13 +59,30 @@ DEFAULT_ALERT_CONFIG = copy.deepcopy(alerts.ALERT_CONFIG)
 
 
 @pytest.fixture
-def client():
+def agent_token():
+    """A fleet token minted into this test's throwaway credential store (#125).
+
+    Agent auth is mandatory, so there is no tokenless baseline any more. Protocol
+    suites that do not care about credentials get a real one from the same store the
+    server checks, rather than a bypass: the auth path is exercised on every request.
+    """
+    token, _ = agent_auth.issue_token(label="pytest fleet")
+    return token
+
+
+@pytest.fixture
+def client(agent_token):
     """The shared app object, in-process (no lifespan, so the test's env is what counts).
 
-    Suites that need extra posture (a WebSocket-enabled server, a push-enabled one)
-    add their own autouse fixture rather than another copy of this.
+    The default `Authorization` header is a real fleet token, because every agent
+    request needs one. A test that is *about* a missing credential passes
+    `tests.support.anonymous()` explicitly; a test that mints its own token overrides
+    the header per request. Suites that need extra posture (a WebSocket-enabled
+    server, a push-enabled one) add their own autouse fixture rather than another copy.
     """
-    return TestClient(app)
+    test_client = TestClient(app)
+    test_client.headers["Authorization"] = f"Bearer {agent_token}"
+    return test_client
 
 
 @pytest.fixture
@@ -124,12 +141,11 @@ def isolated_global_stores(monkeypatch, tmp_path):
     # #46: the update loop must never reach GitHub from a test. Individual update
     # tests opt back in with their own fixture and a fake client.
     monkeypatch.setenv("UPDATE_CHECK", "off")
-    # #126: agent auth is now `token` unless the server is told otherwise. Most suites
-    # here are protocol tests that post AgentToServer messages without a credential, so
-    # the baseline is the explicit override rather than an implicit default; the auth
-    # suites set OPAMP_AGENT_AUTH themselves and keep testing the real gate.
-    monkeypatch.setenv("OPAMP_ALLOW_UNAUTHENTICATED_AGENTS", "true")
-    monkeypatch.delenv("OPAMP_AGENT_AUTH", raising=False)
+    # #125: agent auth is mandatory. The baseline is a real fleet token (see the
+    # `client` fixture), not a bypass; the auth suites replace this store and mint
+    # their own credentials.
+    monkeypatch.setenv("OPAMP_AGENT_AUTH", "token")
+    monkeypatch.delenv("OPAMP_ALLOW_UNAUTHENTICATED_AGENTS", raising=False)
     monkeypatch.setattr(updates, "STATE_PATH", tmp_path / "update-check.json")
     monkeypatch.setattr(updates, "SETTINGS_PATH", tmp_path / "update-settings.json")
     auth.reset_lockouts()

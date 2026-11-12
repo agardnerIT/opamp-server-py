@@ -197,9 +197,9 @@ class TestOpsAndAuth:
         }
         assert data["requirements"]["admin_auth"]["met"] is True
         assert data["requirements"]["audit"]["met"] is True
-        # admin auth and audit are met here; agent auth, TLS and the config
-        # encryption key are the three gaps.
-        assert len(data["unmet"]) == 3
+        # admin auth, agent auth and audit are met here; TLS and the config
+        # encryption key are the two gaps.
+        assert len(data["unmet"]) == 2
 
     def test_auth_verify_ok_and_bad(self, monkeypatch):
         monkeypatch.setattr("server.admin_auth.ADMIN_PASSWORD", "pw123")

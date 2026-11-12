@@ -16,7 +16,7 @@ from google.protobuf.json_format import ParseDict
 from unittest.mock import Mock
 
 from proto import opamp_pb2
-from server import main
+from server import agent_auth, main
 from server.state import AgentRegistry, SQLiteAgentStore
 from tests.conformance.harness import expect_status, opamp_send
 from tests.uids import uid
@@ -48,7 +48,10 @@ def isolated_server(monkeypatch, tmp_path):
     registry._agents = {}
     monkeypatch.setattr(main, "AGENT_REGISTRY", registry)
     monkeypatch.setattr(main, "send_new_agent_alert", Mock())
-    return TestClient(main.app), registry, db_path
+    token, _ = agent_auth.issue_token(label="write-batching")
+    client = TestClient(main.app)
+    client.headers["Authorization"] = f"Bearer {token}"
+    return client, registry, db_path
 
 
 def full_report(healthy=True, version="1.0.0"):

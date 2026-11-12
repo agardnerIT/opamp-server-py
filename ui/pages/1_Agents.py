@@ -15,17 +15,10 @@ from ui.config_view import (
     is_redacted,
 )
 from ui.shared import (
-    AGENT_TOKEN_ENV,
-    EXPIRY_CHOICES,
-    MINTED_TOKEN_KEY,
-    ROLE_ADMIN,
     ROLE_OPERATOR,
     SERVER_URL,
-    agent_auth_mode,
-    agent_auth_note,
     agent_type_badge,
     config_push_state,
-    connect_snippet,
     format_local_time,
     get_agents,
     get_agent,
@@ -325,7 +318,6 @@ def _empty_fleet():
         return
     profile = profiles.bootstrap_default()
     filename = profile.filename_for()
-    language = "yaml" if filename.endswith((".yaml", ".yml")) else "text"
     st.markdown(
         f"Copy this into `{filename}`, start a **{profile.display_name}**, "
         "and this page fills in within a poll interval:"
@@ -335,44 +327,16 @@ def _empty_fleet():
         key="empty_fleet_in_container",
         help="Rewrites the endpoint to host.docker.internal, the host as seen from a container.",
     )
-    # #124: the server's own mode decides whether the snippet carries a credential. The
-    # page used to print the unauthenticated shape on every server, which 401s on any
-    # deployment that requires a token — including every one that can push config.
-    auth_mode = agent_auth_mode()
-
-    # #126: on a `token` server the snippet is useless without a token, and the operator
-    # has none — so the page mints one instead of printing a placeholder they cannot
-    # fill in. This is the flow the whole issue exists for: an empty fleet on a fresh
-    # install, where nothing has registered yet and the token is minted *first*.
-    if auth_mode == "token":
-        _mint_token_and_snippet(in_container)
-        st.caption(_why_no_agents(profile))
-        return
-
-    snippet = connect_snippet(
-        get_server_url(),
-        profile=profile,
-        in_container=in_container,
-        agent_auth=auth_mode,
-    )
-    st.code(snippet, language=language)
-    st.download_button(
-        f"Download {filename}",
-        snippet,
-        file_name=filename,
-        mime="text/yaml" if language == "yaml" else "text/plain",
-        key="empty_fleet_download",
-    )
+    # #125: every deployment requires an agent credential, so the snippet is useless
+    # without a token and the operator has none. Mint one here instead of printing a
+    # placeholder they cannot fill in — this is the flow an empty fleet on a fresh
+    # install needs, where nothing has registered yet and the token comes *first*.
+    _mint_token_and_snippet(in_container)
     if in_container:
         st.caption(
             "On Linux, start the container with "
             "`--add-host=host.docker.internal:host-gateway` so that name resolves."
         )
-    # A required credential is an instruction, not a footnote: it changes the order the
-    # operator has to do things in.
-    note = agent_auth_note(auth_mode)
-    if note:
-        (st.warning if auth_mode == "token" else st.caption)(note)
     st.caption(_why_no_agents(profile))
 
 

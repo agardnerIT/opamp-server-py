@@ -216,7 +216,11 @@ under an OSS license together with a written explanation of why it is needed —
 none is required today.
 
 `collector/e2e.yaml` is the known-good config that CI runs against a real
-`otelcol-contrib` on every PR (`.github/workflows/collector-e2e.yml`, #113).
+`otelcol-contrib` on every PR (`.github/workflows/collector-e2e.yml`, #113). It
+includes the `headers:` block below, because an agent token is mandatory (#125) — a
+config without one is not "known good", it is a 401. CI mints a fleet token and
+passes it to the container as `OPAMP_AGENT_TOKEN`, which is why the committed YAML
+carries the header but not the secret.
 
 **HTTP transport** — add the extension and name it in `service.extensions`:
 
@@ -227,6 +231,8 @@ extensions:
       http:
         endpoint: http://127.0.0.1:4320/v1/opamp
         polling_interval: 5s
+        headers:                          # required: see "Agent token" below
+          Authorization: "Bearer ${env:OPAMP_AGENT_TOKEN}"
     agent_description:
       non_identifying_attributes:
         "agent.name": "collector-1"      # your label; `GET /agents` shows it
@@ -258,6 +264,8 @@ extensions:
     server:
       ws:
         endpoint: ws://127.0.0.1:4320/v1/opamp
+        headers:                          # same bearer token, same reason
+          Authorization: "Bearer ${env:OPAMP_AGENT_TOKEN}"
 ```
 
 `server.ws` takes `endpoint` and `headers` only — `polling_interval` is an HTTP
@@ -267,7 +275,8 @@ heartbeats. Both transports carry the identical message handler, so the state in
 `/agents` is the same either way (`tests/test_ws_parity.py` asserts it).
 
 **Agent token** (required by default) — the credential rides in a header, because
-that is what `opampextension` supports:
+that is what `opampextension` supports, and it is the one line you have to supply
+yourself in every config above:
 
 ```yaml
 extensions:
@@ -288,9 +297,9 @@ agent's own effective-config report redacts it. See [Agent tokens](#agent-tokens
 and the [first-run runbook](#first-run-nothing-to-migrate).
 
 The UI's connect snippet (Help page and the Agents empty state) is not hardcoded: it
-reads `config_push.agent_auth` from `GET /health` and renders the `headers:` block
-whenever the server reports `token`, so copy-paste cannot hand you a config that
-401s. When it cannot read the mode it claims no credential and says so (#124).
+reads `config_push.agent_auth` from `GET /health` and renders the `headers:` block.
+Agent auth is mandatory (#125), so the snippet always carries a credential and the
+empty fleet mints one rather than printing a placeholder that would 401 (#124).
 
 **TLS** — terminate it in front of the server rather than in it: set
 `TLS_TERMINATED_UPSTREAM=true` (this asserts the posture; see
@@ -2247,9 +2256,17 @@ pip install -e ".[dev,observability]" && OPAMP_TRACING_ENABLED=true pytest tests
 Every other test asserts the server is self-consistent; this one runs the upstream
 `opamp` extension against it. Needs Docker.
 
+The config carries a bearer header (#125), so the runbook is the mint + inject pair
+from [Agent tokens](#agent-tokens-agent--server) — the same two steps the workflow
+does:
+
 ```bash
-python -m uvicorn server.main:app --host 0.0.0.0 --port 4320 &
+ADMIN_PASSWORD=… python -m uvicorn server.main:app --host 0.0.0.0 --port 4320 &
+TOKEN=$(curl -sf -u "admin:$ADMIN_PASSWORD" -H 'Content-Type: application/json' \
+  -d '{"label":"e2e","max_agents":5}' localhost:4320/agent-tokens \
+  | python -c 'import json,sys; print(json.load(sys.stdin)["token"])')
 docker run -d --name opamp-e2e \
+  -e OPAMP_AGENT_TOKEN="$TOKEN" \
   -v "$PWD/collector/e2e.yaml:/etc/otelcol-contrib/config.yaml" \
   otel/opentelemetry-collector-contrib:0.140.0
 python scripts/collector_e2e.py --server http://localhost:4320
@@ -2260,7 +2277,10 @@ feature depends on: registered, healthy, a component list rather than just a has
 (the #77 handshake), and a `POST /agent/{id}/manifest` containing exactly the
 components the pipeline uses, at the versions the collector reported. On Linux add
 `--add-host=host.docker.internal:host-gateway` to the `docker run`; Docker Desktop
-provides that name already. The same steps run on every PR in
+provides that name already.
+
+Minting needs an admin credential: with no `ADMIN_PASSWORD` the server is read-only
+and `POST /agent-tokens` answers 403. The same steps run on every PR in
 [`.github/workflows/collector-e2e.yml`](.github/workflows/collector-e2e.yml), marked
 non-blocking while it stabilises.
 

@@ -7,10 +7,16 @@ extensions:
   #
   # Deliberately no `polling_interval`: a socket is server-push, and the extension
   # treats the key as an unknown field.
+  #
+  # The token header is the same one `collector/e2e.yaml` uses: `server.ws` accepts
+  # `endpoint` and `headers`, and the server refuses a tokenless handshake with 1008
+  # (#125), so this is required too.
   opamp:
     server:
       ws:
         endpoint: ws://host.docker.internal:4320/v1/opamp
+        headers:
+          Authorization: "Bearer ${env:OPAMP_AGENT_TOKEN}"
     agent_description:
       non_identifying_attributes:
         "agent.name": "e2e-collector-ws"

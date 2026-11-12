@@ -4,11 +4,19 @@ extensions:
   # playground configs. `host.docker.internal` is the host as seen from the container:
   # it exists by default on Docker Desktop and is mapped on Linux by
   # `--add-host=host.docker.internal:host-gateway` (the workflow does both).
+  #
+  # Agent token (#125, #126): a tokenless agent gets 401, so the `headers` block below
+  # is part of "known good", not an optional extra. The workflow mints a fleet token
+  # (`POST /agent-tokens`) and passes it to the container as `-e OPAMP_AGENT_TOKEN=...`;
+  # reading it from the environment keeps the secret out of this file and out of the
+  # agent's own effective-config report (configopaque drops `${env:...}` values).
   opamp:
     server:
       http:
         endpoint: http://host.docker.internal:4320/v1/opamp
         polling_interval: 2s
+        headers:
+          Authorization: "Bearer ${env:OPAMP_AGENT_TOKEN}"
     agent_description:
       non_identifying_attributes:
         "agent.name": "e2e-collector"

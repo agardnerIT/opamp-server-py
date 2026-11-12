@@ -38,6 +38,10 @@ jobs:
       # interoperate with, so a silent floating tag would hide the thing being tested.
       COLLECTOR_IMAGE: otel/opentelemetry-collector-contrib:0.140.0
       SERVER_URL: http://localhost:4320
+      # Agent tokens are mandatory (#125) and minting one is an admin write, so the
+      # server needs a credential; without one it runs read-only and `POST
+      # /agent-tokens` answers 403. This is a throwaway value in a hermetic job.
+      ADMIN_PASSWORD: e2e-admin-password
 
     steps:
       - uses: actions/checkout@v4
@@ -70,6 +74,21 @@ jobs:
           done
           curl -sf "$SERVER_URL/health" | python -m json.tool
 
+      - name: Mint the fleet agent token
+        # The bootstrap the README documents, run for real: mint one fleet token, hand
+        # it to the collectors as an environment variable, and let each config's
+        # `Authorization: "Bearer ${env:OPAMP_AGENT_TOKEN}"` pick it up. Kept out of
+        # the YAML files on purpose — they are committed.
+        run: |
+          TOKEN=$(curl -sf -u "admin:$ADMIN_PASSWORD" \
+            -H 'Content-Type: application/json' \
+            -d '{"label":"ci-e2e","max_agents":5}' \
+            "$SERVER_URL/agent-tokens" \
+            | python -c 'import json, sys; print(json.load(sys.stdin)["token"])')
+          test -n "$TOKEN"
+          echo "::add-mask::$TOKEN"
+          echo "OPAMP_AGENT_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+
       - name: Start the collector
         # `host-gateway` is what makes `host.docker.internal` resolve on a Linux
         # runner; Docker Desktop provides it without the flag, which is why the
@@ -77,6 +96,7 @@ jobs:
         run: |
           docker run -d --name opamp-e2e \
             --add-host=host.docker.internal:host-gateway \
+            -e OPAMP_AGENT_TOKEN="$OPAMP_AGENT_TOKEN" \
             -v "$PWD/collector/e2e.yaml:/etc/otelcol-contrib/config.yaml" \
             "$COLLECTOR_IMAGE"
 
@@ -95,6 +115,7 @@ jobs:
         run: |
           docker run -d --name opamp-e2e-ws \
             --add-host=host.docker.internal:host-gateway \
+            -e OPAMP_AGENT_TOKEN="$OPAMP_AGENT_TOKEN" \
             -v "$PWD/collector/e2e-ws.yaml:/etc/otelcol-contrib/config.yaml" \
             "$COLLECTOR_IMAGE"
 

@@ -117,6 +117,55 @@ with `docker compose cp server:/app/data/admin_password .`. Set `ADMIN_PASSWORD`
 `.env` to choose your own. Both ports bind to `127.0.0.1` on purpose — see [Before
 you expose this server](#before-you-expose-this-server).
 
+#### See your first agent
+
+`collector/e2e.yaml` is the config CI runs against a real `otelcol-contrib` (see
+[Connect a collector](#connect-a-collector)), so it is also the shortest path to a
+connected agent. Agents authenticate (#125), so mint a fleet token first and hand it
+to the collector as an environment variable — the config reads
+`Authorization: "Bearer ${env:OPAMP_AGENT_TOKEN}"`:
+
+```bash
+# stack must be up: docker compose up -d --wait
+TOKEN=$(curl -sf -u "admin:$(docker compose exec -T server cat /app/data/admin_password)" \
+  -H 'Content-Type: application/json' -d '{"label":"quickstart","max_agents":5}' \
+  localhost:4320/agent-tokens | jq -r .token)
+
+docker run --rm -e OPAMP_AGENT_TOKEN="$TOKEN" \
+  -v "$PWD/collector/e2e.yaml:/etc/otelcol-contrib/config.yaml" \
+  otel/opentelemetry-collector-contrib:0.140.0
+```
+
+Within a couple of seconds (the config polls every 2 s):
+
+```bash
+curl -s localhost:4320/agents | jq '.count, .agents[].id'   # → 1, then the id
+```
+
+…and the UI at http://localhost:8501 lists `e2e-collector` with its component list.
+Stop the collector with Ctrl-C (`--rm` removes the container). Run it again and it
+reconnects as the same agent: `agent.name` identifies it, not the container.
+
+Two things to adjust if your setup differs:
+
+- **`ADMIN_PASSWORD` set in `.env`**: use it instead of the `docker exec … cat`, which
+  only exists when the password was generated on first boot:
+  `-u "admin:$ADMIN_PASSWORD"`.
+- **Linux**: compose publishes on `127.0.0.1`, which a bridge-networked container
+  cannot reach, and `host.docker.internal` is not defined. Use host networking and
+  point the name at loopback:
+
+  ```bash
+  docker run --rm --network host --add-host=host.docker.internal:127.0.0.1 \
+    -e OPAMP_AGENT_TOKEN="$TOKEN" \
+    -v "$PWD/collector/e2e.yaml:/etc/otelcol-contrib/config.yaml" \
+    otel/opentelemetry-collector-contrib:0.140.0
+  ```
+
+For a collector that stays up, add it to `docker-compose.yml` (same `-e` and volume,
+`endpoint: http://server:4320/v1/opamp` inside the compose network) or follow
+[Connect a collector](#connect-a-collector) for your own config.
+
 ### Developing with Docker (local source, hot reload)
 
 `docker-compose.yml` references **published images** (`ghcr.io/…:0.0.6`). Those

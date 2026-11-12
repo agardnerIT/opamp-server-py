@@ -159,6 +159,18 @@ def connect_section() -> str:
     return text[start:end]
 
 
+def quickstart_section() -> str:
+    """The `docker compose up` + one collector command a new reader runs first."""
+    text = README.read_text(encoding="utf-8")
+    start = text.index("#### See your first agent")
+    end = text.index("\n### ", start)  # next top section; "####x" also contains "### "
+    return text[start:end]
+
+
+def bash_blocks(section: str) -> list[str]:
+    return re.findall(r"```bash\n(.*?)```", section, re.DOTALL)
+
+
 def test_readme_connect_blocks_show_the_token_header():
     """Every opamp config in the README's connect section must be paste-and-connect.
 
@@ -180,3 +192,42 @@ def test_readme_says_the_e2e_config_includes_the_token():
     section = connect_section()
     assert "collector/e2e.yaml" in section
     assert "headers:" in section.split("collector/e2e.yaml", 1)[1].split("\n\n", 1)[0]
+
+
+def test_quickstart_snippets_can_actually_connect():
+    """The get-an-agent-fastest path must be complete, not illustrative.
+
+    A `docker run` for `collector/e2e.yaml` without `-e <token>` is a 401, and the
+    README is the only place a reader sees that pair together before they have a
+    token of their own. So: every collector command in the quickstart mounts the e2e
+    config and injects the variable that config reads, and the section mints one.
+    """
+    section = quickstart_section()
+    token_vars = {token_env_var(E2E_HTTP, "http"), token_env_var(E2E_WS, "ws")}
+
+    runs = [run for block in bash_blocks(section) for run in docker_runs(block)]
+    assert runs, "the quickstart no longer shows a docker run command"
+    assert any("collector/e2e.yaml" in run for run in runs), (
+        "the quickstart must mount collector/e2e.yaml, the config verified against a "
+        "real collector"
+    )
+    for run in runs:
+        assert "collector/e2e.yaml" in run, f"stray collector command in the quickstart:\n{run}"
+        assert any(f"-e {name}=" in run for name in token_vars), (
+            f"quickstart collector command has no token and would 401:\n{run}"
+        )
+        assert "--rm" in run, "a copy-paste quickstart should not leave containers behind"
+
+    assert "/agent-tokens" in section, "quickstart shows a collector but never mints a token"
+
+
+def test_quickstart_linux_variant_covers_the_loopback_port():
+    """Linux needs both halves: host networking *and* the alias, since compose binds
+    127.0.0.1 (`host-gateway` is the bridge IP there and would refuse)."""
+    section = quickstart_section()
+    linux = [run for block in bash_blocks(section) for run in docker_runs(block) if "--network host" in run]
+    assert linux, "the quickstart no longer documents the Linux variant"
+    for run in linux:
+        assert "--add-host=host.docker.internal:127.0.0.1" in run, (
+            "`--network host` alone leaves host.docker.internal unresolved on Linux"
+        )

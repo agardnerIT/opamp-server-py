@@ -2233,6 +2233,10 @@ def list_agents(
     The schema and live values for writing a query are at ``GET /agents/query/schema``.
 
     Unauthenticated. Returns `{"agents": [...], "count": n, "filters": {...}}`.
+    Every entry carries `name` (#137) — the `agent.name` the agent declared in its
+    description, or `null` when it declared none. It is a **display label, not an
+    identity**: it is not unique and it can change on restart, so keep addressing an
+    agent by `id`.
     Each entry carries a `credential` block (#94) — `enrolled`, `active`,
     `last_seen_at`, `revoked_at` — so an operator can watch a fleet finish the
     token cutover. It never contains a token or a token hash.

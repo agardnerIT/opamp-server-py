@@ -484,15 +484,20 @@ class FakeServer:
         return FakeResponse(200, {"logged_out": True})
 
 
-def fake_agent(agent_id=None, healthy=True, capabilities=0x2):
+def fake_agent(agent_id=None, healthy=True, capabilities=0x2, name=None):
     """One `GET /agents` row in the shape the **server** actually serialises.
 
     The description is camelCase lists of `{key, value: {stringValue}}` (#75), not a
     plain mapping: the mapping shape is what let the blast radius read "3 × unknown"
     against the real API while this fixture said "1 × production" (#104).
+
+    `name` is the server's own field (#137), derived from `agent.name`, not something
+    the page parses out of the description — so a fixture that wants a named agent sets
+    the field, exactly as `GET /agents` would answer.
     """
     return {
         "id": agent_id or ("ab" * 16),
+        "name": name,
         "healthy": healthy,
         "capabilities": capabilities,
         "remote_config_status": "APPLIED",
@@ -2131,3 +2136,86 @@ def test_a_generic_fleet_is_not_offered_a_collector_config_to_push(server):
     rendered = _contains_collector(app)
     assert "service.extensions" not in rendered
     assert "opaque" in rendered
+
+
+# ------------------------------------------------ the agent's own name (#137)
+
+
+def table_html(app):
+    """The fleet table is one `st.markdown` of raw HTML (`df.to_html`)."""
+    return "\n".join(str(element.value) for element in app.markdown)
+
+
+def test_the_fleet_table_shows_the_name_the_agent_declared(server):
+    """An operator calls a collector by its name; the table has to as well."""
+    server.agents = [fake_agent("ab" * 16, name="e2e-collector")]
+    app = run(AGENTS_PAGE, server)
+    assert not app.exception, app.exception
+
+    html = table_html(app)
+    assert "e2e-collector" in html
+    # ...and the link still addresses the agent by id: a name is not an address.
+    assert f'href="?agent_id={"ab" * 16}"' in html
+    # The id stays reachable on hover, so a name never hides what to paste into opampctl.
+    assert f'title="{"ab" * 16}"' in html
+
+
+def test_an_agent_without_a_name_still_shows_its_id(server):
+    """No name is not "no row": the pre-#137 label is the fallback, unchanged."""
+    server.agents = [fake_agent("cd" * 16)]
+    app = run(AGENTS_PAGE, server)
+    assert not app.exception, app.exception
+
+    assert ("cd" * 16)[:32] in table_html(app)
+
+
+def test_two_agents_with_the_same_name_are_told_apart(server):
+    """Names are not unique, and a table of two identical links is unusable.
+
+    The server does not enforce uniqueness (`agent.name` is the agent's own config), so
+    the disambiguation has to happen where the two rows meet.
+    """
+    server.agents = [
+        fake_agent("ab" * 16, name="collector"),
+        fake_agent("cd" * 16, name="collector"),
+    ]
+    app = run(AGENTS_PAGE, server)
+    assert not app.exception, app.exception
+
+    html = table_html(app)
+    assert "collector #abababab" in html
+    assert "collector #cdcdcdcd" in html
+
+
+def test_an_agent_name_cannot_inject_html_into_the_table(server):
+    """The name is agent-controlled bytes and the cell is raw HTML (`escape=False`).
+
+    A name is attacker-adjacent input in the only place the UI renders agent data as
+    HTML, so it is escaped — the tooltip and href carry the id, not the name.
+    """
+    server.agents = [fake_agent("ab" * 16, name='<img src=x onerror="alert(1)">')]
+    app = run(AGENTS_PAGE, server)
+    assert not app.exception, app.exception
+
+    html = table_html(app)
+    assert "<img src=x" not in html
+    assert "&lt;img src=x" in html
+
+
+def test_the_agent_detail_is_headed_with_the_name_and_keeps_the_id_visible(server):
+    """The page an operator lands on is titled with the name they clicked.
+
+    The full id has to stay on the page (not truncated behind an ellipsis): it is what
+    every `opampctl` command and config route takes.
+    """
+    agent = fake_agent("ab" * 16, name="e2e-collector")
+    server.agents = [agent]
+    app = AppTest.from_file(str(AGENTS_PAGE), default_timeout=30)
+    app.query_params["agent_id"] = agent["id"]
+    app.run()
+    assert not app.exception, app.exception
+
+    assert "e2e-collector" in texts(app)
+    assert any(element.value == agent["id"] for element in app.code), [
+        element.value for element in app.code
+    ]

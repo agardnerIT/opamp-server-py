@@ -910,6 +910,54 @@ def _compliance_badge(compliance):
     return "⚪"
 
 
+#: How much of an agent id this dashboard shows when the agent declared no name (#137).
+#: Unchanged from the pre-#137 fleet table, so an unnamed agent does not become *less*
+#: identifiable because a named one became readable.
+AGENT_ID_LABEL_LENGTH = 32
+
+
+def agent_display_name(agent, id_length=AGENT_ID_LABEL_LENGTH):
+    """The label for one agent: its declared `agent.name`, else an abbreviated id (#137).
+
+    `name` is the server's field (`GET /agents`, derived from `agent.name`) and is
+    `None` when the agent declared none. A label and only a label: every link, selector
+    and API call still addresses `id`, because a name is a string the agent wrote in its
+    own config — two agents may choose the same one, and a restart may change it.
+    """
+    agent = agent or {}
+    name = str(agent.get("name") or "").strip()
+    if name:
+        return name
+    agent_id = str(agent.get("id") or "")
+    return agent_id[:id_length] + ("..." if len(agent_id) > id_length else "")
+
+
+def agent_labels(agents, id_length=AGENT_ID_LABEL_LENGTH):
+    """`{id: label}` for a fleet, with colliding names disambiguated (#137).
+
+    The server does not enforce unique names: `agent.name` is a label an agent wrote in
+    its own config, and refusing a second collector called `collector` would be a fleet
+    constraint the agent cannot see. So two rows may share a name — and a table showing
+    "collector" twice with two different link targets is one an operator has to click to
+    tell apart. A repeated name gets `#` plus the first 8 characters of the id, which is
+    what the id looks like everywhere else.
+    """
+    agents = list(agents or [])
+    counts = {}
+    for agent in agents:
+        name = str((agent or {}).get("name") or "").strip()
+        if name:
+            counts[name] = counts.get(name, 0) + 1
+    labels = {}
+    for agent in agents:
+        agent = agent or {}
+        label = agent_display_name(agent, id_length=id_length)
+        if str(agent.get("name") or "").strip() and counts.get(label, 0) > 1:
+            label = f"{label} #{str(agent.get('id') or '')[:8]}"
+        labels[str(agent.get("id") or "")] = label
+    return labels
+
+
 def agent_type_badge(agent):
     """How the server reads an agent's type, and how sure it is (#118).
 

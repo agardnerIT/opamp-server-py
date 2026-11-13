@@ -403,6 +403,9 @@ with st.expander(f"Agents in scope ({len(target_ids)})", expanded=False):
     st.dataframe(
         [
             {
+                # #137: a name column next to the id, never instead of it: a rollout
+                # resolves to ids, and two agents may declare the same name.
+                "name": agent.get("name") or "",
                 "agent": agent.get("id"),
                 "healthy": agent.get("healthy"),
                 "config": agent.get("remote_config_status"),

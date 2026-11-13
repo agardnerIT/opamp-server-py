@@ -501,6 +501,13 @@ certificate or a routing table).
 ## Gotchas
 
 - **Agent IDs are hex instance UIDs** from `list_agents` — not hostnames.
+- **`name` is a label, not an address** (#137). `list_agents` / `GET /agents` return
+  `name` (the `agent.name` the agent declared, `null` when it declared none), and the
+  UI shows it instead of the id. It is **not unique and not stable** — two agents may
+  declare the same one, it can change on restart, and the server does not enforce
+  uniqueness — so keep passing the agent's `id` to `get_agent`, config routes,
+  `opampctl` commands and `query_agents`. In SQL, `name` / `agent_name` are core
+  columns; a raw attribute keyed `name` is reachable as `attr('name')`.
 - **409 on manifest generation** means the agent reported no components *in use* (nothing to slim-build). Check `agents get <id>` → `components[].used`.
 - **Version strings must be semver** (`1.0.0`, optionally `-prerelease`) for manifests and the outdated report — anything else is a 422.
 - **Metrics persist in SQLite** (`DATA_DIR/opamp.db`), so they survive server restarts; but only the **latest snapshot per agent** is kept — no time series.

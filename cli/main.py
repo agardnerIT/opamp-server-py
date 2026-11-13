@@ -1520,7 +1520,11 @@ def agents_list(
         "Wins over --healthy/--status/--attr. See `agents query-schema`.",
     ),
 ) -> None:
-    """List agents with optional health/status/metadata filters, or a SQL selection."""
+    """List agents with optional health/status/metadata filters, or a SQL selection.
+
+    Each entry carries `name` (#137): the `agent.name` the agent declared, or null.
+    It is a label, not an identity — pass the agent's `id` to every other command.
+    """
     if _settings.offline:
         from server import agent_query
         from server.agent_auth import credential_summaries

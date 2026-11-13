@@ -214,6 +214,10 @@ def list_agents(
 ) -> str:
     """List connected agents, optionally filtered.
 
+    Every entry carries `name` (#137): the `agent.name` the agent declared in its
+    description, or null when it declared none. It is a display label — not unique and
+    not stable — so address an agent by `id` in every follow-up call.
+
     Args:
         healthy: "true", "false" or "unknown" — health filter.
         status: Remote config status filter (UNSET/APPLIED/APPLYING/FAILED).

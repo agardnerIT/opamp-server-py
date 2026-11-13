@@ -400,3 +400,67 @@ def test_the_profile_shape_reaches_mcp(monkeypatch):
     # instead of inventing its own.
     assert types["otelcol"]["telemetry"]["metric_prefix"] == "otelcol_"
     assert types["otelcol"]["telemetry"]["title"] == "Collector Telemetry"
+
+
+# ------------------------------------------------- #137: a declared agent name
+
+
+def _register_named_agent(name="e2e-collector", agent_id="dd" * 16) -> str:
+    """One agent that declared `agent.name`, registered in this test's registry."""
+    from server.state import AGENT_REGISTRY, AgentState
+
+    AGENT_REGISTRY.register(
+        agent_id,
+        AgentState(
+            instance_uid=bytes.fromhex(agent_id),
+            agent_id=agent_id,
+            description={
+                "identifyingAttributes": [],
+                "nonIdentifyingAttributes": [
+                    {"key": "agent.name", "value": {"stringValue": name}},
+                ],
+            },
+        ),
+        persist=False,
+    )
+    return agent_id
+
+
+def _agents_by_id(payload) -> dict:
+    entries = payload["agents"] if isinstance(payload, dict) else payload
+    return {entry["id"]: entry for entry in entries}
+
+
+def test_the_declared_agent_name_reaches_every_layer(monkeypatch):
+    """#137: a display field is only real if a client can read it.
+
+    The name is not a new route, so this is the field-level version of the parity rule:
+    the API adds `name`, and `opampctl agents list` / the MCP `list_agents` tool have to
+    proxy it unchanged rather than reformatting it into their own label.
+    """
+    import cli.main as cli_main
+    from client.opamp_client import OpampClient
+    from typer.testing import CliRunner
+
+    agent_id = _register_named_agent()
+    transport = InProcessASGITransport(app)
+
+    api = OpampClient(base_url="http://opamp.test", transport=transport)
+    assert _agents_by_id(api.list_agents())[agent_id]["name"] == "e2e-collector"
+
+    monkeypatch.setattr(
+        cli_main,
+        "_client",
+        lambda: OpampClient(base_url="http://opamp.test", transport=transport),
+    )
+    result = CliRunner().invoke(cli_app, ["agents", "list"])
+    assert result.exit_code == 0, result.output
+    assert _agents_by_id(json.loads(result.output))[agent_id]["name"] == "e2e-collector"
+
+    monkeypatch.setattr(
+        mcp_server,
+        "_client",
+        lambda: OpampClient(base_url="http://opamp.test", transport=transport),
+    )
+    tools = json.loads(mcp_server.list_agents())
+    assert _agents_by_id(tools)[agent_id]["name"] == "e2e-collector"

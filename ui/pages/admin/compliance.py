@@ -16,6 +16,7 @@ from ui.shared import (  # noqa: E402 - after the sys.path fix-up
     ROLE_OPERATOR,
     SERVER_URL,
     admin_request,
+    agent_labels,
     get_agents,
     pd,
     requests,
@@ -77,10 +78,14 @@ st.markdown("**Check Agent Compliance**")
 data = get_agents()
 agents = data.get("agents", [])
 if agents:
+    # #137: pick agents by the name they declared, not by an id prefix nobody can
+    # recognise. The value sent to the API is still the id — `agent_labels` is an
+    # `{id: label}` map precisely so the picker cannot start addressing agents by name.
+    labels = agent_labels(agents)
     selected_ids = st.multiselect(
         "Select agents",
         options=[a["id"] for a in agents],
-        format_func=lambda x: x[:16] + "...",
+        format_func=lambda agent_id: labels.get(agent_id, agent_id[:16] + "..."),
         label_visibility="collapsed",
         key="admin_compliance_select"
     )
@@ -99,13 +104,14 @@ if agents:
 
             if results:
                 for agent_id, result in results:
+                    label = labels.get(agent_id, agent_id[:16])
                     if "error" in result:
-                        st.error(f"**{agent_id[:16]}**: {result['error']}")
+                        st.error(f"**{label}**: {result['error']}")
                     elif result.get("compliant"):
-                        st.success(f"**{agent_id[:16]}**: ✅ Compliant")
+                        st.success(f"**{label}**: ✅ Compliant")
                     else:
                         violations = result.get("violations", [])
-                        st.error(f"**{agent_id[:16]}**: ❌ {len(violations)} violation(s)")
+                        st.error(f"**{label}**: ❌ {len(violations)} violation(s)")
                         for v in violations:
                             st.caption(f"  • {v}")
                 st.session_state["last_compliance_check"] = results

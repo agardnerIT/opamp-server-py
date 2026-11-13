@@ -175,6 +175,7 @@
       "last_remote_config_hash": null,
       "last_requested_components_hash": null,
       "last_sequence_num": null,
+      "name": null,
       "package_statuses": {
         "packages": {
           "collector": {
@@ -247,6 +248,7 @@
       "last_remote_config_hash": null,
       "last_requested_components_hash": null,
       "last_sequence_num": null,
+      "name": null,
       "package_statuses": {},
       "pending_command": null,
       "pending_custom_message": null,
@@ -281,6 +283,7 @@
       "last_remote_config_hash": null,
       "last_requested_components_hash": null,
       "last_sequence_num": null,
+      "name": null,
       "package_statuses": {},
       "pending_command": null,
       "pending_custom_message": null,

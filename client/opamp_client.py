@@ -402,6 +402,10 @@ class OpampClient:
     ) -> Dict[str, Any]:
         """``GET /agents`` — list agents, optionally filtered.
 
+        Every entry carries ``name`` (#137) — the ``agent.name`` the agent declared,
+        or ``None`` when it declared none. It is a display label, so keep using
+        ``id`` for :meth:`get_agent` and every other call.
+
         Args:
             healthy: ``"true"``, ``"false"`` or ``"unknown"``.
             status: Remote config status filter (UNSET/APPLIED/APPLYING/FAILED).

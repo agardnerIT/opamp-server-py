@@ -1,3 +1,4 @@
+import html
 import json
 import os
 import re
@@ -17,6 +18,7 @@ from ui.config_view import (
 from ui.shared import (
     ROLE_OPERATOR,
     SERVER_URL,
+    agent_labels,
     agent_type_badge,
     config_push_state,
     format_local_time,
@@ -53,6 +55,22 @@ render_sidebar()
 # that agent can do* — panels, metric labels, telemetry wording, the config download
 # filename — comes from the profile dictionary (`server/profiles/data/*.yaml`). Adding
 # an agent type is a file drop and a restart, not a UI release.
+
+
+def _markdown_link_text(text):
+    """Escape the characters that would end a markdown link label early (#137).
+
+    A name is the agent's own string, and `collector [prod]` used to close the label
+    and leave the rest as prose pointing at a different target. Streamlit renders the
+    link text as markdown, so the backslash escapes are its own (``unsafe_allow_html``
+    stays off here; the fleet table, which does render HTML, escapes with `html.escape`).
+    """
+    return (
+        str(text or "")
+        .replace("\\", "\\\\")
+        .replace("[", "\\[")
+        .replace("]", "\\]")
+    )
 
 
 def _metric_value(value, fmt):
@@ -538,7 +556,18 @@ if agent_id_param:
     health_text = "Healthy" if health else "Unhealthy" if health is False else "Unknown"
     health_icon = "✅" if health else "❌" if health is False else "⚪"
     
-    st.markdown("### Agent Details")
+    # #137: the page is headed with the name the agent declared, because that is what
+    # an operator calls it — and the id stays on the page, because that is what every
+    # link, selector and `opampctl` argument actually takes. Two collectors may share a
+    # name, so the id is never hidden behind it. An agent that declared no name keeps
+    # the neutral heading it always had: there is nothing to show instead of it.
+    named_agent = (detailed_agent if "error" not in detailed_agent else fleet_agent) or {}
+    declared_name = str(named_agent.get("name") or "").strip()
+    if declared_name:
+        st.subheader(declared_name)
+        st.caption(f"Agent ID `{selected_id}`")
+    else:
+        st.markdown("### Agent Details")
 
     # #75: two agents presented one instance_uid, so the server moved this one to a
     # uid of its own. Worth a banner: an id change is a fleet anomaly an operator has
@@ -553,7 +582,9 @@ if agent_id_param:
         st.metric("Status", health_text)
         st.divider()
         st.markdown("**Agent ID**")
-        st.code(selected_id[:32] + "..." if len(selected_id) > 32 else selected_id, height=60)
+        # #137: the whole id, not an ellipsis — this block is what an operator copies
+        # into `opampctl`, and the name above it is not an address.
+        st.code(selected_id, height=60)
         st.markdown("**Last Heartbeat**")
         st.caption(format_local_time(last_heartbeat))
     
@@ -983,6 +1014,9 @@ else:
         st.query_params["view_mode"] = view_mode
     
     if view_mode == "Table":
+        # #137: `agent.name` when the agent declared one. Labels are computed for the
+        # whole selection so a name two agents share is visibly shared.
+        labels = agent_labels(agents)
         rows = []
         for a in agents:
             # A query-only link stays on the current page. The old href hardcoded
@@ -990,7 +1024,17 @@ else:
             # matches paths case-sensitively: the router did not find the page and
             # raised "Page not found" over the agent detail that *had* rendered
             # (the query param was already applied to the page underneath).
-            link = f'<a href="?agent_id={a["id"]}" target="_self" style="color:#0066cc;text-decoration:underline;cursor:pointer">{a["id"][:32]}{"..." if len(a["id"]) > 32 else ""}</a>'
+            #
+            # #137: the label is the agent's own `agent.name`, i.e. agent-controlled
+            # bytes rendered into raw HTML (`escape=False` + `unsafe_allow_html=True`),
+            # so it and the id in the href are escaped. The `title` keeps the full id
+            # reachable on hover: the name is a label, the id is the address.
+            agent_id = html.escape(str(a.get("id") or ""), quote=True)
+            label = html.escape(labels.get(a.get("id")) or str(a.get("id") or ""), quote=True)
+            link = (
+                f'<a href="?agent_id={agent_id}" target="_self" title="{agent_id}" '
+                f'style="color:#0066cc;text-decoration:underline;cursor:pointer">{label}</a>'
+            )
             rows.append({
                 "Agent": link,
                 "Healthy": "✅" if a.get("healthy") else "❌" if a.get("healthy") is False else "⚪",
@@ -1040,6 +1084,7 @@ else:
         )
         
         groups = {}
+        labels = agent_labels(agents)
         for agent in agents:
             if group_by == "Healthy":
                 key = "Healthy" if agent.get("healthy") else "Unhealthy" if agent.get("healthy") is False else "Unknown"
@@ -1080,7 +1125,12 @@ else:
             st.subheader(f"{group_name} ({len(group_agents)})")
             for agent in group_agents:
                 health_icon = "✅" if agent.get("healthy") else "❌" if agent.get("healthy") is False else "⚪"
+                # #137: markdown link text, so the characters that would close the
+                # label early are escaped — the name is the agent's own string.
+                label = _markdown_link_text(
+                    labels.get(agent.get("id")) or agent.get("id") or ""
+                )
                 st.markdown(
-                    f"**{health_icon}** [{agent['id'][:16]}...](?agent_id={agent['id']})"
+                    f"**{health_icon}** [{label}](?agent_id={agent['id']})"
                     f" — {agent_type_badge(agent)}"
                 )

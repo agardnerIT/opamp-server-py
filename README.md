@@ -303,6 +303,23 @@ curl --max-time 20 --connect-timeout 5 -s localhost:4320/agents | jq '.count, .a
 opampctl agents list --pretty            # same data with names and capability tags
 ```
 
+#### Naming an agent
+
+`agent.name` is not an OpenTelemetry semantic convention — it is a label you declare,
+and this server treats it as exactly that:
+
+- **Shown, never addressed.** The Agents table, its detail view, the compliance picker
+  and the remote-config scope show the name; `GET /agents` returns it as `name`, and
+  the SQL selection layer exposes `name` / `agent_name` columns (#137). Every link,
+  selector, revision and `opampctl` argument still takes the `id`: a name is not unique
+  and can change when the agent restarts, so nothing that has to keep pointing at
+  *this* agent is keyed on it.
+- **No name, no invention.** An agent that declares none is shown by an abbreviated id,
+  and its `name` is `null` in the API.
+- **Duplicates are disambiguated, not rejected.** Two collectors called `collector`
+  render as `collector #97c3cacf` and `collector #1a2b3c4d`. The server does not enforce
+  uniqueness — that would be a fleet constraint the agent's own config cannot see.
+
 **WebSocket transport** — replace the `http` block with `ws`. One block, not
 both: the extension uses whichever is present. The server accepts the upgrade by
 default; set `OPAMP_WS_ENABLED=false` to refuse it.
@@ -1844,7 +1861,7 @@ The UI signs in the same way the CLI does — `POST /auth/session` — and then 
 | POST | `/v1/opamp` | 🔑 | OpAMP protocol endpoint — agents connect here (protobuf). The agent must send `Authorization: Bearer <token>`: 401 without a valid one, 403 when a bound token is for another `instance_uid`, 403 `agent_limit` when a fleet token is at its cap. Malformed input (including an empty `instance_uid`) is 400 with a `BAD_REQUEST` error body; a body over `OPAMP_MAX_MESSAGE_BYTES` (after decompression) is 413; an unsupported `Content-Encoding` is 415; when the server is overloaded the request is 503 with `Retry-After` and no state change (#78). The `OpAMP-Instance-UID` header is read and cross-checked against the body (#76); a duplicate uid is answered with a server-generated replacement (#75) |
 | WS | `/v1/opamp` | 🔑 | Same endpoint over WebSocket (`OPAMP_WS_ENABLED`, on by default); credential checked before `accept()`, refusals close `1008`. Malformed messages (including an empty `instance_uid`) get a `BAD_REQUEST` error frame then close `1002`; oversized frames close `1009`; an overloaded server refuses the upgrade with `503` + `Retry-After` (#78) |
 | POST | `/v1/metrics` | | OTLP/HTTP metrics ingestion (JSON or protobuf), keyed on `service.instance.id` then `service.name`. **Unauthenticated and OTLP-only** — one profile's telemetry, not a general metrics API (#122) |
-| GET | `/agents` | | List agents. Filters: `healthy=true\|false\|unknown`, `status=` (remote config status, or alias `remote_config_status=`), or any description attribute, e.g. `?environment=prod`. Repeated params are OR. Each agent carries a `credential` block |
+| GET | `/agents` | | List agents. Filters: `healthy=true\|false\|unknown`, `status=` (remote config status, or alias `remote_config_status=`), or any description attribute, e.g. `?environment=prod` or `?agent.name=e2e-collector`. Repeated params are OR. Each agent carries `name` (#137 — the declared `agent.name`, `null` when it declared none; a display label, **not** an identity) and a `credential` block |
 | GET | `/agent/types` | | The agent types (profiles) this build recognises, in match order: `name`, `display_name`, `icon`, `priority`, `summary`, `validates_structure`, `content_types`, `default_filename`, `reports`, `reports_telemetry`, `telemetry`, `detectable`, `identity` (`match_any` rules + `sniff`), `panels`, `components`, `bootstrap_default`. `otelcol` is an OpenTelemetry Collector, `fluentbit` a Fluent Bit supervised by
 `opamp-observe/opamp-core`, and `generic` any other OpAMP agent, whose config is stored
 and relayed **without being interpreted**. The list comes from the profile dictionary — see [Agent profiles](#agent-profiles-the-dictionary) |

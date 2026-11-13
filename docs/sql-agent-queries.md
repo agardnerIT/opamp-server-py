@@ -53,6 +53,8 @@ The table is `agents`. Every row is one connected agent.
 |---|---|---|
 | `id` | text | Agent instance uid (same value as `agent_id`) |
 | `agent_id` | text | Agent instance uid |
+| `name` | text | The `agent.name` the agent declared, `NULL` when it declared none (#137) |
+| `agent_name` | text | Alias for `name` |
 | `healthy` | integer | `1` healthy, `0` unhealthy, `NULL` never reported |
 | `health_status` | text | `ComponentHealth.status`, e.g. `ok`, `config_conflict` |
 | `remote_config_status` | text | `UNSET`, `APPLIED`, `APPLYING`, `FAILED`, … |
@@ -86,6 +88,13 @@ anything the columns do not cover.
 Every key an agent reports in its OpAMP `AgentDescription` is **also a column**, named
 exactly as the agent reports it. That is where fleet-specific values live:
 `host_arch`, `environment`, `region`, `os_type`, `geo_country`, and so on.
+
+`agent.name` is the exception worth knowing about: it is reported like any other
+attribute, but it is also projected onto the core `name` / `agent_name` columns, so
+`WHERE name = 'e2e-collector'` works without quoting a dotted key. A raw attribute
+literally keyed `name` is shadowed by that column and stays reachable as
+`attr('name')`. Either way `name` is a **label, not an identity** — filter with it,
+but keep resolving agents by `id`.
 
 - Bare identifiers work: `WHERE environment = 'prod'`.
 - A key containing a dot, space or other non-identifier character must be

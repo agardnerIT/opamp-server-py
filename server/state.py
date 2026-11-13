@@ -29,6 +29,11 @@ def utcnow():
 # disagree about what `healthy` means.
 RESERVED_FILTER_KEYS = frozenset({"healthy", "status", "remote_config_status"})
 
+# #137: the description attribute an agent uses to name itself. Not an OTel semantic
+# convention and not an identity: it is a label the agent's own config carries, so it
+# is what an operator *calls* the agent while `agent_id` stays what addresses it.
+NAME_ATTRIBUTE = "agent.name"
+
 
 def _stringify_any_value(value: Optional[Dict]) -> Optional[str]:
     """Stringify an OpAMP AnyValue oneof dict (as produced by MessageToDict).
@@ -3182,14 +3187,39 @@ class AgentState:
         Looks in both identifyingAttributes and nonIdentifyingAttributes (the
         same sources the UI "By Property" grouping uses). Returns None when the
         attribute is absent or its value is not a scalar (e.g. array/kvlist).
+
+        #137: tolerant of a description whose attribute containers are not lists. It
+        used to be read only by filters and profile matching, so a malformed or
+        hand-edited row in an offline `--db` file went unnoticed; `to_dict()` now reads
+        it on every request to derive `name`, and one bad row must not make the whole
+        fleet unreadable. Entries that are not objects are skipped, not guessed at.
         """
-        attrs = self.description.get("identifyingAttributes", []) + self.description.get(
-            "nonIdentifyingAttributes", []
-        )
+        attrs = []
+        for container in ("identifyingAttributes", "nonIdentifyingAttributes"):
+            entries = self.description.get(container) or []
+            if isinstance(entries, dict):
+                entries = list(entries.values())
+            attrs.extend(entry for entry in entries if isinstance(entry, dict))
         for attr in attrs:
             if attr.get("key") == key:
                 return _stringify_any_value(attr.get("value"))
         return None
+
+    @property
+    def name(self) -> Optional[str]:
+        """The agent's declared `agent.name`, or `None` when it declared none (#137).
+
+        Display only. Every route, selector, revision and rollout keeps addressing
+        `agent_id`, because this is a label the agent chose in its own config: two
+        agents may declare the same one and a restart may change it, so nothing that
+        has to keep pointing at *this* agent may be keyed on it.
+
+        Read from both attribute lists (the same sources `get_attr` uses), trimmed,
+        and `None` for a blank or non-scalar value — an agent that declared its name as
+        a map has not given us something to print.
+        """
+        value = (self.get_attr(NAME_ATTRIBUTE) or "").strip()
+        return value or None
 
     def matches_filters(
         self,
@@ -3281,6 +3311,10 @@ class AgentState:
         health_error = health.get("lastError") or health.get("last_error")
         return {
             "id": self.agent_id,
+            # #137: the agent's own label, `None` when it declared none. Deliberately
+            # not a fallback to a truncated id: "no name" is a fact about the agent,
+            # and every client already has `id` to fall back to.
+            "name": self.name,
             "healthy": self.healthy,
             # #135: the rollout gate pauses on `ComponentHealth.status` — an agent
             # reporting `config_conflict` keeps `healthy: true` — so the field the gate

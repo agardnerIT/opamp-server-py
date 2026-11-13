@@ -46,6 +46,11 @@ MAX_RESULT_ROWS = 10000
 CORE_COLUMNS: Dict[str, str] = {
     "id": "TEXT",
     "agent_id": "TEXT",
+    # #137: the declared `agent.name`, so a selection can filter by the name an agent
+    # showed up under without knowing that it is a description attribute (and without
+    # the quoting the dotted spelling needs). Not an identity — see AgentState.name.
+    "name": "TEXT",
+    "agent_name": "TEXT",
     "healthy": "INTEGER",
     "health_status": "TEXT",
     "remote_config_status": "TEXT",
@@ -74,6 +79,8 @@ CORE_COLUMNS: Dict[str, str] = {
 CORE_DESCRIPTIONS = {
     "id": "Agent instance uid (same value as agent_id)",
     "agent_id": "Agent instance uid (same value as id)",
+    "name": "The agent's declared agent.name (NULL when it declared none)",
+    "agent_name": "Alias for name (the agent.name description attribute)",
     "healthy": "1 healthy, 0 unhealthy, NULL when the agent never reported health",
     "health_status": "ComponentHealth.status, e.g. ok or config_conflict",
     "remote_config_status": "Remote config status, e.g. UNSET, APPLIED, FAILED",
@@ -386,6 +393,10 @@ def _agent_row(agent: "AgentState") -> Dict[str, Any]:
     row: Dict[str, Any] = {
         "id": agent.agent_id,
         "agent_id": agent.agent_id,
+        # #137: `name` is a label, never a key — `id` stays the only projection the
+        # result is resolved back through (see `run`).
+        "name": agent.name,
+        "agent_name": agent.name,
         "healthy": None if agent.healthy is None else int(bool(agent.healthy)),
         "health_status": health_status if isinstance(health_status, str) else None,
         "remote_config_status": agent.remote_config_status,
@@ -642,6 +653,10 @@ def _suggestion_rows(agents: Sequence["AgentState"]) -> List[Dict[str, Any]]:
         for name, value in (
             ("type", type_info.get("agent_type")),
             ("agent_type", type_info.get("agent_type")),
+            # #137: suggest the names this fleet actually declared, so
+            # `WHERE name = 'e2e-collector'` is a suggestion and not a guess.
+            ("name", agent.name),
+            ("agent_name", agent.name),
             ("healthy", None if agent.healthy is None else int(bool(agent.healthy))),
             (
                 "compliant",
@@ -707,6 +722,11 @@ def schema(agents: Sequence["AgentState"]) -> Dict[str, Any]:
     examples.append(
         "SELECT * FROM agents WHERE \"service.name\" = 'collector-prod'"
     )
+    # #137: only when a live agent declared one — the example exists to show the
+    # column, not to suggest a name nobody in this fleet has.
+    named = next((agent.name for agent in agents if agent.name), None)
+    if named is not None:
+        examples.append(f"SELECT * FROM agents WHERE name = {quote_literal(named)}")
     examples.append(
         "SELECT * FROM agents WHERE last_heartbeat < datetime('now', '-1 hour')"
     )

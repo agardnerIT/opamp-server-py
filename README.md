@@ -2,6 +2,8 @@
 
 ![Warning: Entirely vibecoded](https://img.shields.io/badge/Warning-Entirely%20vibecoded-orange?style=for-the-badge)
 
+![overview image](assets/overview-image.png)
+
 OpenTelemetry OpAMP server in Python with FastAPI + Streamlit UI. Optional integration with [Open Policy Agent](https://www.openpolicyagent.org).
 
 This server also lets you:

@@ -257,8 +257,8 @@ def requirements() -> Dict[str, Dict[str, object]]:
             "detail": (
                 "agents present `Authorization: Bearer <token>`; mint one with "
                 "`opampctl agent-tokens create` (fleet) or "
-                "`opampctl agents token create <agent-id>` (bound) — see README → "
-                "Agent tokens"
+                "`opampctl agents token create <agent-id>` (bound) — see "
+                "docs/agent-tokens.md"
             ),
         },
         "tls": {

@@ -4,10 +4,10 @@
 
 This project is designed to be operated by AI agents. Layers (each wraps the previous):
 
-1. **REST API** — FastAPI at `:4320`, self-documenting: `GET /openapi.json` (machine schema), `/docs` (Swagger). Endpoint table + auth model in README → "API Reference".
+1. **REST API** — FastAPI at `:4320`, self-documenting: `GET /openapi.json` (machine schema), `/docs` (Swagger). Endpoint table in `docs/api-reference.md`, auth model in `docs/security.md`.
 2. **`opamp_client`** (Python) — `from client import OpampClient`; reads `OPAMP_SERVER_URL` / `ADMIN_PASSWORD`. Structured errors: `OpampApiError(.status_code, .detail)`, `OpampConnectionError`.
 3. **`opampctl` CLI** — JSON output by default, `--raw` for markdown/YAML, `--db data/opamp.db` for offline SQLite reads. Config: `--server`/`--password` or env.
-4. **MCP server** — `python -m mcp_server` (stdio; `--transport sse` for remote). 39 typed tools by default (47 with `OPAMP_MCP_ALLOW_WRITES=true`); needs `pip install -e ".[mcp]"`. Client config snippets in README → "MCP Server".
+4. **MCP server** — `python -m mcp_server` (stdio; `--transport sse` for remote). 39 typed tools by default (47 with `OPAMP_MCP_ALLOW_WRITES=true`); needs `pip install -e ".[mcp]"`. Client config snippets in `docs/mcp.md`.
 5. **Agent skill** — `skills/opamp-server/SKILL.md`: when/how guidance, quickstart, gotchas.
 6. **Agent selection** — SQL over the live fleet (#132): `GET /agents?q=...`, `GET /agents/query/schema` (columns + values live agents report), `opampctl agents list --query`, MCP `query_agents`. Groups are saved queries. Language guide: `docs/sql-agent-queries.md`.
 

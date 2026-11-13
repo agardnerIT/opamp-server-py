@@ -1253,7 +1253,7 @@ def __getattr__(name: str):
     The collector's rules moved to `server/profiles/otelcol.py`, but `check_structure`,
     `check_invariants`, `check_inventory`, `inventory_components`,
     `allowed_exporter_hosts` and `allowed_opamp_endpoints` were semi-public — the docs,
-    the README and a year of muscle memory point at this module. Resolving them lazily
+    the old module path and a year of muscle memory point at this module. Resolving them lazily
     keeps those callers working without copying a single rule back into the core.
     """
     if name in _PROFILE_OWNED:

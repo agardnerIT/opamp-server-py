@@ -4651,7 +4651,7 @@ def health_check():
     "retry_after_seconds", "lag_seconds", "shedding"}}`. `spec_version` and
     `capabilities` are #79's machine-readable
     answer to "will my agent interoperate?": the version is the spec release this build
-    targets (README has the full matrix) and the bitmask is exactly what is advertised
+    targets (docs/capabilities.md has the full matrix) and the bitmask is exactly what is advertised
     to agents (#74), so a client never has to guess.
     The `config_push` block is the public posture summary — `insecure: true` means
     config push is on despite an unsafe posture and the UI shows a banner.

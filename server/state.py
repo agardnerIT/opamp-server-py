@@ -3174,7 +3174,7 @@ class AgentState:
 
         * `unsupported` — the profile has no component concept (a `generic` agent);
         * `unreported` — the profile can inventory, but the agent has not told us yet
-          (the hash-only report case in README §"Hash-only component lists");
+          (the hash-only report case in docs/transports.md);
         * `reported` — an inventory exists and is what `components` returns.
         """
         if not self.profile.has_components:

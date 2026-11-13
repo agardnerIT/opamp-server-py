@@ -19,7 +19,7 @@ generic decryption error. `CONFIG_AT_REST_KEY_PREVIOUS` is accepted for reads on
 which is the whole rotation procedure: set the new key, keep the old one as
 previous, run the rotation command, drop the previous key.
 
-**The honest failure mode** (documented in the README, because operators ask):
+**The honest failure mode** (documented in docs/remote-config.md, because operators ask):
 losing the key loses *desired* config, not the fleet. Agents keep running their
 last applied config, and the server can rebuild desired state from the
 `effective_config` each agent reports. Losing the key while `previous` is also

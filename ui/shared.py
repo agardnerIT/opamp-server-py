@@ -182,15 +182,14 @@ def agent_auth_note(mode):
             "with `opampctl agent-tokens create` — it is not tied to an agent id, so it "
             "works before any agent has connected — and paste it into "
             f"`{AGENT_TOKEN_ENV}` (or the `headers:` block in the snippet). A token can "
-            "expire and can cap the number of agents it admits; see README → Agent "
-            "tokens."
+            "expire and can cap the number of agents it admits; see docs/agent-tokens.md."
         )
     if mode == AGENT_AUTH_UNKNOWN:
         return (
             "Could not read this server's agent-auth mode from `GET /health`, or it "
             "reported a mode this UI does not support. Agent authentication is "
             "mandatory, so this config still carries a credential: if the endpoint "
-            "answers 401, add the `headers:` block from README → Agent tokens."
+            "answers 401, add the `headers:` block from docs/agent-tokens.md."
         )
     return None
 

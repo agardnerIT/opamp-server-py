@@ -54,7 +54,7 @@ TOUCH_INTERVAL_SECONDS = 60
 
 # Failure reasons — the label on `opamp_agent_auth_failures_total` and the
 # `reason` field of every audit entry. Keep this list stable: dashboards and the
-# cutover runbook in the README both key off it.
+# cutover runbook in docs/agent-tokens.md both key off it.
 REASON_MISSING = "missing"
 REASON_MALFORMED = "malformed"
 REASON_UNKNOWN = "unknown"
@@ -287,7 +287,7 @@ def revoke_tokens(agent_id: str) -> int:
 
     Revocation blocks delivery; it does not delete the agent, its state or (once
     #99 exists) its desired config. That surprises people, so it is also stated
-    in the README.
+    in docs/agent-tokens.md.
     """
     agent_id = normalize_agent_id(agent_id)
     count = CREDENTIALS.revoke_agent(agent_id)

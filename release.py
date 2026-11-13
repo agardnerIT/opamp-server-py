@@ -269,7 +269,7 @@ def main():
         "      https://github.com/open-telemetry/opamp-spec/releases\n"
         "  [ ] If it moved: regenerate the stubs (scripts/generate_proto.sh), "
         "classify any new capability bits,\n"
-        "      update SPEC_VERSION + the README capability matrix (#79)\n"
+        "      update SPEC_VERSION + docs/capabilities.md (#79)\n"
         "  [ ] pytest is green on every supported Python version"
     )
 

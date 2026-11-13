@@ -1,7 +1,7 @@
 # OpenTelemetry Collector — the profile this server was born as. #117h
 #
 # This file is the worked example for the dictionary format: see
-# `server/profiles/schema.py` for the shape and README §"Agent profiles" for the
+# `server/profiles/schema.py` for the shape and docs/agent-profiles.md for the
 # prose. It used to be `server/profiles/otelcol.py`; every block below was moved out
 # of that module, not invented here, and `tests/test_profiles.py::
 # test_the_move_changed_no_output` byte-compares the observable output against the

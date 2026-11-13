@@ -1,7 +1,7 @@
 extensions:
   # WebSocket twin of `collector/e2e.yaml` (#114, #113). It exists to keep the
-  # documented connection settings honest: the "Connect a collector" section of the
-  # README shows this exact block, and CI runs it against a real collector, so a
+  # documented connection settings honest: docs/connect-collectors.md and the README's
+  # "Connect a collector" section show this block, and CI runs it against a real collector, so a
   # config key that the extension does not accept (e.g. `polling_interval` under
   # `server.ws`, which it rejects) fails the build instead of a reader's afternoon.
   #

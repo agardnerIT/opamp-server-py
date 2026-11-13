@@ -15,7 +15,7 @@ the collector's `io.opentelemetry.pause` is the motivating example. Two messages
     a validated, audited **transport**, not a feature layer.
 
 Both directions are Development status upstream, so the shape may move; the spec
-commit this build targets is pinned in README (`SPEC_VERSION`, #79).
+commit this build targets is pinned in server/protocol.py (`SPEC_VERSION`, #79).
 
 Three rules, mirroring `server/commands.py` because the delivery problem is the same:
 

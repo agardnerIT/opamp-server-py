@@ -4,7 +4,7 @@
 # services together and pins the two facts a container cannot read from it. With no
 # .env the app's own defaults apply: read-only until a credential exists, a random
 # admin password generated on first boot, config push off, agent tokens required.
-# See README → "Before you expose this server".
+# See docs/security.md → "Before you expose this server".
 #
 # NOTE: Image tags are pinned to the release these compose files ship with.
 # Current version: 0.0.6
@@ -32,7 +32,7 @@ services:
     # Auth, TLS posture, timeouts, logging, tracing and retention all live in
     # `.env`, where they are documented, and the app already defaults to the same
     # secure values, so nothing here needs restating. A setting in two places is a
-    # setting that will disagree with itself — see README → "Environment Variables".
+    # setting that will disagree with itself — see docs/configuration.md.
     env_file:
       - path: .env
         required: false
@@ -55,7 +55,7 @@ services:
       #
       # The cost is that `./data` is no longer where the files are. Get them out with
       # `docker compose cp server:/app/data/opamp.db data/` when `opampctl --db` needs
-      # the live database offline. See README → "If every write answers 503".
+      # the live database offline. See docs/operations.md → "If every write answers 503".
       - opamp-data:/app/data
     networks:
       - opamp-network

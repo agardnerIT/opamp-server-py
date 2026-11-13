@@ -15,7 +15,7 @@ transports are refused at the same place — the HTTP request, or the upgrade re
 and `server.main`'s WebSocket endpoint holds the detail.
 
 **One signal: event-loop lag.** This server runs one worker on one event loop by
-design (README → "Capacity and deployment topology"), and the message handler is
+design (docs/operations.md → "Capacity and deployment topology"), and the message handler is
 synchronous, so:
 
 * an in-flight request counter never rises above ~1 and measures nothing;

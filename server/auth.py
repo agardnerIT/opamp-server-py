@@ -96,7 +96,7 @@ TOUCH_INTERVAL_SECONDS = 60
 MAX_LOCKOUT_ENTRIES = 5000
 
 # Failure reasons — the label on `opamp_admin_auth_failures_total` and the
-# `reason` field in the audit line. Stable: the README runbook keys off it.
+# `reason` field in the audit line. Stable: the runbook in docs/security.md keys off it.
 REASON_MISSING = "missing"
 REASON_MALFORMED = "malformed"
 REASON_UNKNOWN_PRINCIPAL = "unknown_principal"

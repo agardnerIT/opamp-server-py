@@ -21,8 +21,8 @@ from typing import Dict, List, Optional, Tuple
 from proto.opamp_pb2 import ServerErrorResponseType_BadRequest, ServerToAgent
 
 # #79: the OpAMP specification release this build targets. The counterpart of the
-# generated stubs (`proto/opamp.proto`, v0.20.0, #66), documented in the README's
-# capability matrix and served by `GET /health`, so a client never has to read the
+# generated stubs (`proto/opamp.proto`, v0.20.0, #66), documented in docs/capabilities.md
+# and and served by `GET /health`, so a client never has to read the
 # source to find out what it is talking to.
 SPEC_VERSION = "0.20.0"
 SPEC_RELEASE_URL = (

@@ -113,6 +113,15 @@ jobs:
           curl --max-time 60 --connect-timeout 5 -fsSL -o fluent-bit.deb \
             "https://packages.fluentbit.io/ubuntu/noble/pool/main/f/fluent-bit/fluent-bit_${FLUENT_BIT_VERSION}_${ARCH}.deb"
           sudo dpkg -i fluent-bit.deb || sudo apt-get -f install -y
+          # The package installs into `/opt/fluent-bit/bin` and puts nothing on PATH, so
+          # `fluent-bit --version` exits 127 on a package that installed perfectly.
+          # Ask dpkg where it went instead of hardcoding the prefix, and publish it for
+          # the steps below — the supervisor launches Fluent Bit by name.
+          BIN=$(dpkg -L fluent-bit | grep -E '/bin/fluent-bit$' | head -1)
+          test -n "$BIN"
+          BIN_DIR=${BIN%/*}
+          echo "$BIN_DIR" >> "$GITHUB_PATH"
+          export PATH="$BIN_DIR:$PATH"
           fluent-bit --version
 
       - name: Install the opamp-core consumer

@@ -107,3 +107,55 @@ def test_the_reported_config_key_is_read_from_the_report(script):
     assert script.reported_config_key(detail) == "./fluent-bit.conf"
     assert script.reported_config_key({}) is None
     assert script.reported_config_key({"effective_config": "not json"}) is None
+
+
+class _FakeClient:
+    """A server that registers the agent one poll before it reports its inventory."""
+
+    def __init__(self, details):
+        self.details = list(details)
+        self.polls = 0
+
+    def get(self, path):
+        class _Response:
+            def __init__(self, payload):
+                self._payload = payload
+
+            def json(self):
+                return self._payload
+
+        if path == "/agents":
+            self.polls += 1
+            return _Response({"agents": [{"id": "abc123def456", "agent_type": "fluentbit",
+                                          "components_status": "unreported"}], "count": 1})
+        # Every `/agent/<id>` call pops the next detail: unreported first, then reported.
+        detail = self.details[min(self.polls - 1, len(self.details) - 1)]
+        return _Response(detail)
+
+
+def test_wait_for_agent_waits_for_the_inventory_not_just_registration(script):
+    """Registration lands a heartbeat before the config the profile inventories (#138)."""
+    unreported = {"id": "abc123def456", "agent_type": "fluentbit",
+                  "agent_type_source": "declared",
+                  "components_status": "unreported", "components": {}}
+    reported = dict(unreported, components_status="reported",
+                    components={"input": [{"id": "dummy"}], "output": [{"id": "stdout"}]})
+
+    client = _FakeClient([unreported, reported])
+    detail = script.wait_for_agent(client, timeout=5)
+
+    assert detail["components_status"] == "reported"
+    assert script.check_agent(detail) == []
+    assert client.polls >= 2
+
+
+def test_wait_for_agent_says_what_it_saw_when_it_gives_up(script):
+    """A timeout has to name the agents it saw, or CI red is a guessing game."""
+    unreported = {"id": "abc123def456", "agent_type": "fluentbit",
+                  "agent_type_source": "declared",
+                  "components_status": "unreported", "components": {}}
+
+    with pytest.raises(SystemExit) as failure:
+        script.wait_for_agent(_FakeClient([unreported]), timeout=0.01)
+
+    assert "reported inventory" in str(failure.value)

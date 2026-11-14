@@ -40,11 +40,21 @@ EXPECTED_TYPE = "fluentbit"
 #: A minimal Fluent Bit configuration, in the product's own dialect. The e2e pushes this
 #: and expects it back verbatim; `[SERVICE]`/`[INPUT]`/`[OUTPUT]` are what the profile's
 #: rules require, so a broken validator shows up as a 422 here.
+#:
+#: The `[SERVICE]` block keeps `Health_Check`/`HTTP_Server` on. The supervisor's health
+#: report *is* Fluent Bit's own `/api/v1/health`, so a push that drops the HTTP server
+#: makes the agent look unhealthy one second later and the rollout pauses on `unhealthy`
+#: — with the config already written. That is the #123 finding, and a pushed config has
+#: to honour it exactly like the baseline one does.
 PUSHED_CONFIG = """\
 [SERVICE]
+    Health_Check On
     Flush    2
     Daemon   off
     Log_Level info
+    HTTP_Server On
+    HTTP_Listen 0.0.0.0
+    HTTP_Port 2020
 
 [INPUT]
     Name  dummy
@@ -125,20 +135,32 @@ def check_verdict(verdict: Dict[str, Any]) -> List[str]:
 def wait_for_agent(
     client: httpx.Client, timeout: float, agent_type: str = EXPECTED_TYPE
 ) -> Dict[str, Any]:
-    """Poll `/agents` until an agent resolves to `agent_type`, then return its detail."""
+    """Poll until an agent resolves to `agent_type` *and* has reported its inventory.
+
+    Those are two different moments. Registration lands one heartbeat before the
+    effective config the profile inventories from, so an agent that has just appeared
+    is `components_status: unreported` with an empty component list — returning it
+    would fail the very assertions this script exists to make, for a reason that is
+    just "the agent is early". Wait for the report, then judge it.
+    """
     deadline = time.monotonic() + timeout
     seen: List[str] = []
     while time.monotonic() < deadline:
         listing = client.get("/agents").json()
         for agent in listing.get("agents") or []:
-            seen.append(f"{agent.get('id', '?')[:8]}={agent.get('agent_type')}")
+            seen.append(
+                f"{agent.get('id', '?')[:8]}={agent.get('agent_type')}"
+                f"/{agent.get('components_status')}"
+            )
         found = find_agent(listing, agent_type)
         if found is not None:
-            return client.get(f"/agent/{found['id']}").json()
+            detail = client.get(f"/agent/{found['id']}").json()
+            if detail.get("components_status") == "reported":
+                return detail
         time.sleep(POLL_SECONDS)
     raise SystemExit(
-        f"no agent resolved to {agent_type!r} within {timeout:.0f}s; "
-        f"agents seen: {', '.join(sorted(set(seen))) or 'none'}"
+        f"no agent resolved to {agent_type!r} with a reported inventory within "
+        f"{timeout:.0f}s; last seen: {', '.join(seen[-6:]) or 'no agents at all'}"
     )
 
 

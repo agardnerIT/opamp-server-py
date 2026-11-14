@@ -8,10 +8,10 @@ name: Fluent Bit e2e
 # inventoried from its **INI config**, and takes a pushed config that its profile's
 # rules judged — with no collector vocabulary in the exchange.
 #
-# Non-blocking on purpose, like the collector workflow: it needs Docker, two downloads
-# (Fluent Bit, the consumer wheel) and a network, and a green unit suite should never be
-# red because a runner was slow. Delete `continue-on-error` once it has a stable streak.
-
+# Non-blocking no longer: the job gates. It needs Docker, two downloads (Fluent Bit, the
+# consumer wheel) and a network, so it can still go red for reasons that are not this
+# repository's fault — but `continue-on-error: true` hid a real breakage for four runs
+# (#138: the server refused to start, the run still reported green), which is worse.
 on:
   push:
     branches: [main]
@@ -29,7 +29,6 @@ jobs:
   fluentbit-e2e:
     name: Fluent Bit (opamp-core) against the server
     runs-on: ubuntu-latest
-    continue-on-error: true
     timeout-minutes: 15
 
     env:
@@ -37,7 +36,7 @@ jobs:
       # written against (#123's spike), so a floating version would hide the thing
       # under test.
       FLUENT_BIT_VERSION: "3.2.10"
-      OPAMP_CORE_REF: "v0.6.0"
+      OPAMP_CORE_REF: "v0.6"
       SERVER_URL: http://localhost:4320
       ADMIN_PASSWORD: fluentbit-e2e-admin-pw-123
 
@@ -56,12 +55,19 @@ jobs:
           pip install -r requirements.txt
 
       - name: Start the server
-        # A pushing server with the local-development posture override: this workflow is
-        # about the agent, not about TLS. A fresh DATA_DIR keeps the run hermetic.
+        # A pushing server with the local-development posture overrides: this workflow
+        # is about the agent, not about TLS. A fresh DATA_DIR keeps the run hermetic.
+        #
+        # There is deliberately no `OPAMP_AGENT_AUTH` here. `off` stopped being a
+        # supported value in #125: the server now *refuses to start* on it, and since
+        # the refusal happens in the lifespan hook the symptom is a silent port, not an
+        # error — that is what made #138 look like a flaky timeout.
         env:
           OPAMP_CONFIG_PUSH_ENABLED: "true"
           OPAMP_ALLOW_INSECURE_CONFIG_PUSH: "true"
-          OPAMP_AGENT_AUTH: "off"
+          # This job pushes a config body and never has a key, so say so out loud
+          # rather than let /health report `unconfigured` while storing plaintext.
+          OPAMP_ALLOW_PLAINTEXT_CONFIG_STORAGE: "true"
         run: |
           mkdir -p "$RUNNER_TEMP/opamp"
           DATA_DIR="$RUNNER_TEMP/opamp" nohup python -m uvicorn server.main:app \
@@ -70,19 +76,49 @@ jobs:
             curl --max-time 20 --connect-timeout 5 -sf "$SERVER_URL/health" >/dev/null && break
             sleep 1
           done
-          curl --max-time 20 --connect-timeout 5 -sf "$SERVER_URL/health" | python -m json.tool
+          # Ask for the health payload explicitly instead of piping an unchecked curl
+          # into `json.tool`: an empty body there reported "Expecting value: line 1
+          # column 1 (char 0)", which says nothing about why the server never came up.
+          if ! curl --max-time 20 --connect-timeout 5 -sf "$SERVER_URL/health" \
+              -o "$RUNNER_TEMP/health.json"; then
+            echo "::error::the server never answered /health; last 40 server log lines:"
+            tail -40 "$RUNNER_TEMP/server.log" || true
+            exit 1
+          fi
+          python -m json.tool "$RUNNER_TEMP/health.json"
+
+      - name: Mint the fleet agent token
+        # Agent tokens are mandatory (#125), so the consumer needs one before it
+        # connects. Same bootstrap as `collector-e2e.yml`: mint one fleet token with
+        # the admin password, mask it, and hand it to the consumer, which reads it
+        # from the environment (`server-authorization: env-var`) rather than from a
+        # committed file.
+        run: |
+          TOKEN=$(curl -sf -u "admin:$ADMIN_PASSWORD" \
+            -H 'Content-Type: application/json' \
+            -d '{"label":"fluentbit-ci","max_agents":5}' \
+            "$SERVER_URL/agent-tokens" \
+            | python -c 'import json, sys; print(json.load(sys.stdin)["token"])')
+          test -n "$TOKEN"
+          echo "::add-mask::$TOKEN"
+          echo "OPAMP_AGENT_TOKEN=$TOKEN" >> "$GITHUB_ENV"
 
       - name: Install Fluent Bit
+        # Pick the package by the runner's own architecture. The old arm64-then-amd64
+        # fallback could not work: the arm64 URL is a real file, so `curl` succeeded on
+        # an amd64 runner and the `||` never fired. `dpkg` then refused the package and
+        # `apt-get -f install` had nothing to fix.
         run: |
-          curl --max-time 20 --connect-timeout 5 -fsSL -o fluent-bit.deb \
-            "https://packages.fluentbit.io/ubuntu/noble/pool/main/f/fluent-bit/fluent-bit_${FLUENT_BIT_VERSION}_arm64.deb" \
-            || curl --max-time 20 --connect-timeout 5 -fsSL -o fluent-bit.deb \
-            "https://packages.fluentbit.io/ubuntu/noble/pool/main/f/fluent-bit/fluent-bit_${FLUENT_BIT_VERSION}_amd64.deb"
+          ARCH=$(dpkg --print-architecture)
+          curl --max-time 60 --connect-timeout 5 -fsSL -o fluent-bit.deb \
+            "https://packages.fluentbit.io/ubuntu/noble/pool/main/f/fluent-bit/fluent-bit_${FLUENT_BIT_VERSION}_${ARCH}.deb"
           sudo dpkg -i fluent-bit.deb || sudo apt-get -f install -y
           fluent-bit --version
 
       - name: Install the opamp-core consumer
         # The supervisor is a Python package (`opamp-observe/opamp-core`, `consumer/`).
+        # The tag is `v0.6`, not the `v0.6.0` in the wheel's own version string — pinning
+        # the version string made `pip` fail on a ref that does not exist.
         run: |
           python -m venv "$RUNNER_TEMP/oc"
           "$RUNNER_TEMP/oc/bin/pip" install --upgrade pip
@@ -93,7 +129,9 @@ jobs:
         # `Health_Check On` matters: without it Fluent Bit's `/api/v1/health` is 404, the
         # supervisor reports `healthy: false` forever, and every rollout pauses on
         # `unhealthy` — the finding recorded on #123. `agent_capabilities` is what makes
-        # the consumer advertise `AcceptsRemoteConfig` at all (its defaults do not).
+        # the consumer advertise `AcceptsRemoteConfig` at all (its defaults do not), and
+        # `agent_additional_params` is required by its config loader (an omission the
+        # loader reports as a plain exception, which the old `nohup &` swallowed).
         run: |
           mkdir -p "$RUNNER_TEMP/agent"
           cd "$RUNNER_TEMP/agent"
@@ -122,9 +160,10 @@ jobs:
               "server_port": 4320,
               "client_status_port": 2020,
               "transport": "http",
-              "server-authorization": "none",
+              "server-authorization": "env-var",
               "service_type": "fluentbit",
               "agent_config_path": "./fluent-bit.conf",
+              "agent_additional_params": [],
               "processTracking": "Supervisor",
               "heartbeat_frequency": 5,
               "agent_capabilities": ["AcceptsRemoteConfig", "ReportsHeartbeat", "ReportsEffectiveConfig"],
@@ -132,8 +171,19 @@ jobs:
             }
           }
           EOF
-          nohup "$RUNNER_TEMP/oc/bin/opamp-consumer" --config-path ./opamp.json \
+          # Not detached from the step's failure: a consumer that cannot start is a
+          # failed step, and the log tail below is the evidence. `env` rather than an
+          # `export` because the variable the consumer's `env-var` auth mode reads is
+          # literally named `OpAMP-token`.
+          env "OpAMP-token=$OPAMP_AGENT_TOKEN" \
+            nohup "$RUNNER_TEMP/oc/bin/opamp-consumer" --config-path ./opamp.json \
             > "$RUNNER_TEMP/consumer.log" 2>&1 &
+          for _ in $(seq 30); do
+            curl --max-time 5 -sf "http://127.0.0.1:2020/api/v1/health" >/dev/null && break
+            sleep 1
+          done
+          curl --max-time 5 -sf "http://127.0.0.1:2020/api/v1/health" \
+            || { echo "::error::Fluent Bit's health API never came up"; tail -40 "$RUNNER_TEMP/consumer.log"; exit 1; }
 
       - name: Assert identity, inventory, and a pushed config the profile judged
         # The script polls for an agent the *server* resolved to `fluentbit` — a

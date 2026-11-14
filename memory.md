@@ -806,3 +806,36 @@ host *was* fixed: `osquery.config_plugin=opamp`, exactly one `battery_stats` in
   branch, is still read-only code (it only renders for a profile that declares telemetry
   and reports none).
 - Suite after: **1636 passed**.
+
+## #138 — the Fluent Bit e2e was never green, it was green-looking, 2026-11-13
+
+- **`continue-on-error: true` at *job* level hides a failing job, not just a flaky one.**
+  All eight runs listed as `success`; every job conclusion via the API was `failure`.
+  Check `gh api .../runs/<id>/jobs` when a "green" workflow guards something you care about.
+- **The issue's error was a symptom two layers down.** `Expecting value: line 1 column 1
+  (char 0)` was `curl --max-time 20 --connect-timeout 5 -sf … | python -m json.tool` on an empty body after a 60s health
+  loop; the actual cause was `AgentAuthConfigError: OPAMP_AGENT_AUTH=off is no longer
+  supported` (since #125, fatal in the lifespan hook → silent port, not a loud failure).
+  A health loop must fetch the body *conditionally* and print the server log on expiry.
+- **`curl --max-time 20 --connect-timeout 5 A || curl --max-time 20 --connect-timeout 5 B` for architecture selection cannot work** when both URLs exist: the
+  arm64 `.deb` downloads fine on amd64, so the fallback never runs and `dpkg` refuses it
+  (`package architecture (arm64) does not match system (amd64)`). Use
+  `dpkg --print-architecture`.
+- **`opamp-observe/opamp-core` tags are `v0.6`, not the `v0.6.0` in its wheel version.**
+  A pin that no one exercises is a pin that is probably wrong.
+- Its consumer config loader requires `consumer.agent_additional_params` (else a plain
+  `AgentConfigException`) and defaults to advertising no `AcceptsRemoteConfig`; and
+  `server-authorization: env-var` reads a variable literally named `OpAMP-token` (so
+  `env "OpAMP-token=$TOKEN" nohup …`, not `export`).
+- **The pushed config has to keep the health endpoint.** Fluent Bit's `/api/v1/health`
+  *is* the supervisor's health report, so the e2e's original pushed `[SERVICE]` block
+  (no `Health_Check`/`HTTP_Server`) made the agent unhealthy one second after delivery
+  and the rollout paused on `unhealthy` with `applied: 1` — the #123 finding, arriving
+  from the push side instead of the bootstrap side. `PUSHED_CONFIG` now keeps both.
+- **Registration and inventory are two moments.** `wait_for_agent` returned the first
+  agent that resolved to `fluentbit`, which can still be `components_status: unreported`
+  with no components, so the assert failed for "the agent is early". It now waits for
+  `reported` within the same timeout.
+- Verified by running the workflow's own steps locally (real Fluent Bit 3.x + opamp-core
+  v0.6 against a throwaway `DATA_DIR`): rollout `completed`, `applied: 1`. Suite: 1765
+  passed.

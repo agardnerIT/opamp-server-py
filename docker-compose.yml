@@ -5,9 +5,6 @@
 # .env the app's own defaults apply: read-only until a credential exists, a random
 # admin password generated on first boot, config push off, agent tokens required.
 # See docs/security.md → "Before you expose this server".
-#
-# NOTE: Image tags are pinned to the release these compose files ship with.
-# Current version: 0.0.6
 version: '3.8'
 
 services:

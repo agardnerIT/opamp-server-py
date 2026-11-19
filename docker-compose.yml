@@ -5,7 +5,6 @@
 # .env the app's own defaults apply: read-only until a credential exists, a random
 # admin password generated on first boot, config push off, agent tokens required.
 # See docs/security.md → "Before you expose this server".
-version: '3.8'
 
 services:
   server:

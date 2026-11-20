@@ -5,25 +5,17 @@ This server recognises an agent through a **profile** — one YAML file in
 `generic` is the built-in fallback. A new type can therefore be one file and a restart,
 and the mechanics are in [docs/agent-profiles.md](agent-profiles.md) ("Adding a profile").
 
-This page is about the *proposal* half, and the message is short: **nominate first.**
-Open the "Add a new agent type" issue with nothing more than the product's name. Fill in
-whatever else you happen to know; skip everything else. We will work with you to connect
-the product to a server, watch what it actually reports, and write the profile from
-observation — that is how every shipped profile was built anyway.
-
-## The one thing that genuinely helps
-
-If it is easy, paste a **real status report from a running agent** into the issue. That
-single artifact is worth more than any amount of documentation: it is how `fluentbit`
-got identity right (`service.type`, not `service.name`) and how `osquery` found its
-durable signal (the `osquery.` attribute namespace). But it is optional — if capturing
-one is work, nominate and we will capture one together.
+Proposing one is deliberately tiny: open the "Add a new agent type" issue with the
+**project's name and a link to it** (preferably GitHub). That is the whole form. We will
+reach out, connect the project to a server, and observe what the profile needs — the same
+capture-driven way every shipped profile was built. Nobody is asked to fill in a
+specification, because the server can see the answers; the proposer's job is to point us
+at the project and want it supported.
 
 ## What we will figure out together
 
-None of this is required from a proposer. It is the list of questions the profile
-eventually answers, kept here so the conversation has a shape and so nobody feels the
-issue must arrive complete:
+Nothing here is required from a proposer. It is the list of questions the profile
+eventually answers, kept so the conversation has a shape:
 
 | Question | Where the answer lands in the profile |
 |---|---|
@@ -35,28 +27,24 @@ issue must arrive complete:
 | What does it do with a pushed config, and a bad one? | `guidance` |
 | Should the server judge its config's structure? | `validates_structure` + an engine — the only step that needs code, and it is optional |
 
-A capture from a real agent answers most of the table by itself; the rest is a short
-conversation.
+A real status report captured from a running agent answers most of the table by itself.
+That capture is our job, not the proposer's — it is how `fluentbit` got identity right
+(`service.type`, not `service.name`) and how `osquery` found its durable signal (the
+`osquery.` attribute namespace). A profile that is *almost* right is the dangerous
+failure mode: it matches, it renders, and it is quietly wrong about the product — and
+real captures are the antidote.
 
 ## Who does what
 
-- **The proposer** names the product and, ideally, helps get one agent talking to a
-  server. That is the whole ask.
-- **The maintainer (or an LLM agent) working the issue** captures the payload, writes the
-  profile file, and writes the one test that replays the capture
-  (`tests/test_<name>_profile.py` — see
-  [docs/agent-profiles.md](agent-profiles.md#adding-a-profile)). A proposer is welcome to
-  write the profile themselves — it can be one YAML file — and will get review, not gatekeeping.
+- **The proposer** names the project and links to it. Done.
+- **The maintainer (or an LLM agent) working the issue** connects an agent to a server,
+  captures what it reports, writes the profile file, and writes the one test that replays
+  the capture (`tests/test_<name>_profile.py` — see
+  [docs/agent-profiles.md](agent-profiles.md#adding-a-profile)). A proposer who wants to
+  write the profile themselves is welcome to — it can be one YAML file — and gets review,
+  not gatekeeping.
 - **Nobody** is asked to modify `server/*.py` unless the product wants config structure
   judged, and even then only in agreement.
-
-## Why observation beats a specification
-
-A profile that is *almost* right is the dangerous failure mode: it matches, it renders,
-and it is quietly wrong about the product. Real captured payloads are the antidote, which
-is why this project captures rather than asks people to specify. But that is work for the
-session in which the profile is written — never a barrier for the person who had the
-idea.
 
 ## References
 

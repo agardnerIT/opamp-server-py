@@ -1,60 +1,25 @@
-name: "Add a new agent type (profile)"
-description: "Tell us about a product this server should recognise — one YAML profile in server/profiles/data/ (see docs/new-agent-type.md)"
+name: "Add a new agent type"
+description: "Nominate a project this server should recognise — we'll reach out and build the profile together"
 labels: ["enhancement"]
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for nominating a product! Adding an agent type to this server can be as
-        small as one YAML file — no server code, no release ([docs/agent-profiles.md](../blob/main/docs/agent-profiles.md)).
-
-        **You don't need most of this form.** Fill in what you know, skip the rest, and
-        we'll work with you to connect the product to the server and observe what the
-        profile needs to know. The single most useful thing, if it's easy: paste a real
-        status report from a running agent. But nominate first — details come later.
+        Thanks for nominating! That's all this form needs — we'll reach out, connect the
+        project to a server, and see what the profile needs from there.
 
   - type: input
-    id: product
+    id: project
     attributes:
-      label: Product name
+      label: Project name
       description: "What should this server call it? e.g. 'Fluent Bit', 'osquery', 'Vector'"
     validations:
       required: true
 
-  - type: textarea
-    id: what
+  - type: input
+    id: link
     attributes:
-      label: What is it, in a sentence or two?
-      description: "Optional but helpful. Don't write docs — a link to the product's page is fine."
-
-  - type: textarea
-    id: opamp
-    attributes:
-      label: How does it speak OpAMP (if you know)?
-      description: "Optional. Which OpAMP client/extension it uses, if any. If you don't know, that's fine — we can figure it out together."
-
-  - type: textarea
-    id: payload
-    attributes:
-      label: A real status report from a running agent (if easy)
-      description: |
-        The most valuable thing you can attach, and completely optional. Run the agent
-        against any OpAMP server (or this one) and paste its status/description report.
-        Redact secrets. If this feels like work, skip it — nominating is the important part.
-      render: yaml
-
-  - type: checkboxes
-    id: help
-    attributes:
-      label: Can you help connect it?
-      description: "Totally optional — a 'yes' is enough. We'll work with you to get an agent talking to a server and see what it reports."
-      options:
-        - label: "I can run an agent against a server while we work on this"
-        - label: "I'd like to try writing the profile myself (we'll review — it can be one YAML file)"
-        - label: "Just nominating it — happy for maintainers to take it from here"
-
-  - type: textarea
-    id: extra
-    attributes:
-      label: Anything else
-      description: "Links, questions, wishlist items (telemetry panels, config validation…). All optional."
+      label: Link to the project
+      description: "Preferably GitHub."
+    validations:
+      required: true

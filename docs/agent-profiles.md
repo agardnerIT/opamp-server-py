@@ -7,9 +7,9 @@ knowledge lives in one place: a directory of YAML files, one per agent type, in
 
 This page is for someone adding a profile — including an LLM agent doing it — and for
 anyone wondering why a specific panel or report is absent for their agent. If you are
-*proposing* a type rather than adding one, start with
-[new-agent-type.md](new-agent-type.md) and the "Add a new agent type" issue template; it
-lists what to bring so the profile written from your issue is true of the product.
+*proposing* a type rather than adding one, just open the "Add a new agent type" issue
+with the product's name — see [new-agent-type.md](new-agent-type.md) for how the rest of
+the profile gets discovered together.
 
 ## The model in one table
 

@@ -586,6 +586,37 @@ def _parse_or_none(body: Any) -> Any:
         return None
 
 
+def _reported_objects(agent: Any) -> List[tuple]:
+    """`(key, document)` for every parseable object the agent reports, in map order.
+
+    The key matters as much as the document: an osquery agent reports **one object per
+    config source** (`osquery.json` for the source this server pushes,
+    `osquery.osquery.conf.json` for the local file next to it), so the key is how a
+    document is attributed to a source. Dropping it made two sources look like one
+    merged report, and the subtraction below then credited their addresses to us.
+    """
+    report = getattr(agent, "effective_config", None)
+    if not report:
+        return []
+    if isinstance(report, (str, bytes, bytearray)):
+        try:
+            report = json.loads(report)
+        except (ValueError, TypeError):
+            return []
+    if not isinstance(report, Mapping):
+        return []
+    from server import effective_config as effective_config_module
+
+    try:
+        return [
+            (str(obj.key), obj.document)
+            for obj in effective_config_module.objects(report, accept_json=True)
+            if obj.parsed
+        ]
+    except Exception:  # a damaged report is not a reason to fail a validation
+        return []
+
+
 def _reported_documents(agent: Any) -> List[Any]:
     """The documents an agent reports as its effective config, JSON included.
 
@@ -621,6 +652,7 @@ def check_merge_collisions(
     agents: Sequence[Any],
     previous_bodies: Optional[Mapping[str, Sequence[str]]] = None,
     address_sections: Sequence[str] = ADDRESS_SECTIONS,
+    previous_keys: Optional[Mapping[str, Sequence[str]]] = None,
 ) -> None:
     """Warn when this revision defines an address another source already provides.
 
@@ -633,10 +665,18 @@ def check_merge_collisions(
     rollout pauses with no config to blame.
 
     The server cannot remove a key it does not own, but it does have the evidence to
-    warn before delivery: the agent's reported effective config, minus the addresses
-    *this* server already pushes (`previous_bodies`, the assignment currently in
-    force). Whatever is left in the report was supplied by someone else — a local
-    flag, a mounted file, another controller — and re-defining it here collides.
+    warn before delivery. Two shapes of report, and they are read differently:
+
+    * **split per source** (osquery: one object per config source, `previous_keys`
+      names ours) — every object whose key we do not push *is* another source, so its
+      addresses are foreign even when they duplicate ours. That last part is not
+      pedantry: a revision prefilled from the agent's own local file has the *same*
+      addresses we already push, so subtracting "ours" (the old rule) credited the
+      local file's `battery_stats` to us and the collision went unreported (#135).
+    * **one merged document** (a collector, or an agent that has not received ours
+      yet) — the sources cannot be told apart, so the addresses in
+      `previous_bodies` (the assignment in force) are subtracted and whatever is left
+      was supplied by someone else: a local flag, a mounted file, another controller.
 
     A warning, not an error: a server-side `config_map` mutation may legitimately
     address an agent whose merge semantics *is* last-source-wins, and the evidence is
@@ -658,24 +698,33 @@ def check_merge_collisions(
         return
 
     previous = previous_bodies or {}
+    ours_by_agent = previous_keys or {}
     # key -> address -> agent ids that define it from another source
     collisions: Dict[str, Dict[str, List[str]]] = {}
     compared = 0
     for agent in present:
-        documents = _reported_documents(agent)
-        if not documents:
+        objects = _reported_objects(agent)
+        if not objects:
             continue
         compared += 1
         agent_id = str(getattr(agent, "agent_id", "") or "")
+        ours = {str(name) for name in (ours_by_agent.get(agent_id) or ())}
         reported: set = set()
-        for document in documents:
-            reported |= _addresses(document, address_sections)
-        owned: set = set()
-        for body in previous.get(agent_id, ()) or ():
-            document = _parse_or_none(body)
-            if document is not None:
-                owned |= _addresses(document, address_sections)
-        foreign = reported - owned
+        foreign: set = set()
+        for key, document in objects:
+            addresses = _addresses(document, address_sections)
+            reported |= addresses
+            if ours and len(objects) > 1 and key not in ours:
+                foreign |= addresses
+        if not foreign:
+            # One merged document (or no assignment to attribute against): fall back
+            # to "everything that is not an address we already push".
+            owned: set = set()
+            for body in previous.get(agent_id, ()) or ():
+                document = _parse_or_none(body)
+                if document is not None:
+                    owned |= _addresses(document, address_sections)
+            foreign = reported - owned
         for key, addresses in proposed.items():
             for address in addresses & foreign:
                 collisions.setdefault(key, {}).setdefault(address, []).append(agent_id)
@@ -1007,6 +1056,7 @@ def check_config_map(
     agents: Optional[Sequence[Any]] = None,
     run_policy: bool = True,
     previous_bodies: Optional[Mapping[str, Sequence[str]]] = None,
+    previous_keys: Optional[Mapping[str, Sequence[str]]] = None,
     profile: Optional[str] = None,
 ) -> Verdict:
     """Run the whole pipeline and return the verdict. **Never raises.**
@@ -1015,7 +1065,9 @@ def check_config_map(
     `available_components`) so the inventory warnings are per-target.
     `previous_bodies` maps an agent id to the config bodies this server already
     pushes to it (its current assignment), so :func:`check_merge_collisions` can tell
-    *our* keys from another source's.
+    *our* keys from another source's. `previous_keys` names those objects: with it, a
+    report that carries one object per source (osquery) is attributed exactly instead
+    of by subtraction.
 
     `profile` names the rules to judge the body by (#119). Without it the profile is
     resolved from `agents` — the existing call sites (API, `opampctl --db`, MCP, the
@@ -1046,7 +1098,12 @@ def check_config_map(
 
     check_object_names(normalised, verdict, agent_list)
     check_merge_collisions(
-        normalised, verdict, agent_list, previous_bodies, address_sections
+        normalised,
+        verdict,
+        agent_list,
+        previous_bodies,
+        address_sections,
+        previous_keys=previous_keys,
     )
 
     context = StructureContext(

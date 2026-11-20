@@ -286,7 +286,32 @@ def validate_for_targets(
         agents=present,
         run_policy=run_policy,
         previous_bodies=_assigned_bodies(present),
+        previous_keys=_assigned_keys(present),
     )
+
+
+def _assigned_config_map(agent: AgentState) -> Mapping[str, Any]:
+    """The `config_map` this server currently pushes to one agent (`{}` if none)."""
+    record = remote_config.REGISTRY.get(agent.agent_id)
+    if not record:
+        return {}
+    config_map = record.get("config_map") or {}
+    return config_map if isinstance(config_map, Mapping) else {}
+
+
+def _assigned_keys(agents: Sequence[AgentState]) -> Dict[str, List[str]]:
+    """The object **names** this server already pushes to each agent.
+
+    The merge-collision check needs them next to the bodies: an osquery agent reports
+    one object per config source, so the name is what tells a source this server owns
+    from a local file that merely happens to define the same query.
+    """
+    keys: Dict[str, List[str]] = {}
+    for agent in agents:
+        config_map = _assigned_config_map(agent)
+        if config_map:
+            keys[agent.agent_id] = [str(key) for key in config_map]
+    return keys
 
 
 def _assigned_bodies(agents: Sequence[AgentState]) -> Dict[str, List[str]]:
@@ -298,15 +323,9 @@ def _assigned_bodies(agents: Sequence[AgentState]) -> Dict[str, List[str]]:
     """
     bodies: Dict[str, List[str]] = {}
     for agent in agents:
-        record = remote_config.REGISTRY.get(agent.agent_id)
-        if not record:
-            continue
-        config_map = record.get("config_map") or {}
-        if not isinstance(config_map, Mapping):
-            continue
         decoded = [
             entry.get("body")
-            for entry in config_map.values()
+            for entry in _assigned_config_map(agent).values()
             if isinstance(entry, Mapping) and isinstance(entry.get("body"), str)
         ]
         if decoded:

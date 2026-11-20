@@ -648,3 +648,123 @@ def test_an_agent_that_reports_nothing_is_no_evidence_for_a_collision():
         agents=[Silent()],
     )
     assert _collision_warnings(verdict) == []
+
+
+class _AgentWithSources:
+    """An osquery agent stand-in that reports **one object per config source**.
+
+    `osquery-opamp` maps each source the daemon runs to its own object key
+    (`server/osquery_opamp/opamp/configview.py`): the source the agent pushes is
+    `osquery.json`, and `/var/osquery/osquery.conf` becomes
+    `osquery.osquery.conf.json`. A revision prefilled from that report and pushed
+    back therefore arrives as a *second* source with the same query names.
+    """
+
+    def __init__(self, agent_id, sources):
+        self.agent_id = agent_id
+        self.available_components = {}
+        self.effective_config = json.dumps(
+            {
+                "configMap": {
+                    "configMap": {
+                        name: {
+                            "body": base64.b64encode(json.dumps(document).encode()).decode(),
+                            "contentType": "application/json",
+                        }
+                        for name, document in sources.items()
+                    }
+                }
+            }
+        )
+
+
+def test_a_local_file_the_revision_was_prefilled_from_still_collides():
+    """#135, second occurrence: the prefill copies the local file, so the addresses
+    match the ones we push — and subtracting "ours" hid the duplicate.
+
+    The operator prefills from the agent (which loads `osquery.osquery.conf.json`,
+    the local file), edits the interval, and proposes. The revision is keyed
+    `osquery.json` and delivered next to the file that is still there, so the daemon
+    schedules `battery_stats` twice and pauses with `config_conflict` *after* the
+    canary. The server had both objects in the report; it must warn before delivery.
+    """
+    local = {"schedule": {"battery_stats": {"query": "SELECT 1;", "interval": 32}}}
+    agent = _AgentWithSources(
+        "ef" * 16,
+        {
+            # our previous revision, same address, different interval
+            "osquery.json": {"schedule": {"battery_stats": {"query": "SELECT 1;", "interval": 28}}},
+            # the local file, which is what prefill offered the operator
+            "osquery.osquery.conf.json": local,
+        },
+    )
+    verdict = config_validation.check_config_map(
+        {
+            "osquery.json": {
+                "body": json.dumps(
+                    {"schedule": {"battery_stats": {"query": "SELECT 1;", "interval": 30}}}
+                ),
+                "content_type": "application/json",
+            }
+        },
+        agents=[agent],
+        previous_bodies={agent.agent_id: [json.dumps(local)]},
+        previous_keys={agent.agent_id: ["osquery.json"]},
+    )
+    assert verdict.ok, "a warning: the prefill is the mistake, not the document"
+    findings = _collision_warnings(verdict)
+    assert len(findings) == 1
+    assert "`schedule.battery_stats`" in findings[0].message
+    assert "config_conflict" in findings[0].hint
+
+
+def test_a_single_source_report_still_uses_the_subtraction_rule():
+    """A collector reports one merged document; its sources cannot be told apart, so
+    the addresses we already push must keep being credited to us."""
+    agent = _AgentWithConfig(
+        "ab" * 16,
+        "",
+        document=(
+            "receivers:\n"
+            "  hostmetrics:\n"
+            "    collection_interval: 30s\n"
+            "exporters:\n"
+            "  debug: {}\n"
+            "service:\n"
+            "  pipelines:\n"
+            "    metrics:\n"
+            "      receivers: [hostmetrics]\n"
+            "      exporters: [debug]\n"
+        ),
+    )
+    body = json.loads(agent.effective_config)["configMap"]["configMap"][""]["body"]
+    body = base64.b64decode(body).decode()
+    verdict = config_validation.check_config_map(
+        {"": {"body": body, "content_type": "text/yaml"}},
+        agents=[agent],
+        previous_bodies={agent.agent_id: [body]},
+    )
+    assert _collision_warnings(verdict) == []
+
+
+def test_two_sources_with_disjoint_addresses_are_clean():
+    """Splitting the report per source must not turn every second object into a
+    collision: only an address the revision actually redefines is one."""
+    agent = _AgentWithSources(
+        "ef" * 16,
+        {
+            "osquery.json": {"schedule": {"ours": {"query": "SELECT 1;"}}},
+            "osquery.osquery.conf.json": {"schedule": {"theirs": {"query": "SELECT 2;"}}},
+        },
+    )
+    verdict = config_validation.check_config_map(
+        {
+            "osquery.json": {
+                "body": json.dumps({"schedule": {"ours": {"query": "SELECT 3;"}}}),
+                "content_type": "application/json",
+            }
+        },
+        agents=[agent],
+        previous_keys={agent.agent_id: ["osquery.json"]},
+    )
+    assert _collision_warnings(verdict) == []

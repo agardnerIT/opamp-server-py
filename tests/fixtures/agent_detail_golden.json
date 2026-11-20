@@ -5,6 +5,10 @@
       "button": [
         {
           "disabled": false,
+          "label": "\u2190 All agents"
+        },
+        {
+          "disabled": false,
           "label": "\u21bb Refresh"
         },
         {
@@ -86,6 +90,10 @@
     "case": "generic",
     "elements": {
       "button": [
+        {
+          "disabled": false,
+          "label": "\u2190 All agents"
+        },
         {
           "disabled": false,
           "label": "\u21bb Refresh"
@@ -195,6 +203,10 @@
     "case": "otelcol",
     "elements": {
       "button": [
+        {
+          "disabled": false,
+          "label": "\u2190 All agents"
+        },
         {
           "disabled": false,
           "label": "\u21bb Refresh"

@@ -69,22 +69,34 @@ guidance: >-
   before pushing.
 
 # There is no `onboarding_snippet`: the endpoint and credential live in the OpAMP
-# extension's configuration, not in `osquery.json`, so this server has no complete file
-# it can honestly write for a new agent (#121). The bootstrap block below is what an
-# operator actually needs: where to point the extension and how to start osqueryd.
+# extension's own configuration, not in `osquery.json`, so this server has no complete
+# file it can honestly write for a new agent (#121). The bootstrap block below is what
+# an operator actually needs, and since #144 it is the extension's own quickstart
+# (github.com/agardnerIT/osquery-opamp) with the endpoint and token substituted — not a
+# paraphrase of it. That is the point of choosing an agent type when minting a token:
+# an osquery fleet is handed osquery instructions.
 snippet: |
   # osquery does not speak OpAMP itself: the osquery-opamp extension does, and osqueryd
-  # must load and require it. Put this server's endpoint and credential in the
-  # extension's own configuration:
+  # keeps running its own config file. Point the extension at this server, hand it the
+  # credential, and it merges what this server pushes into the live schedule.
   #
-  #   endpoint: {endpoint}
-  #   Authorization: Bearer {token}
+  #   git clone https://github.com/agardnerIT/osquery-opamp
+  #   cd osquery-opamp
+  #   python -m venv .venv && source .venv/bin/activate
+  #   sudo .venv/bin/python -m osquery_opamp \
+  #        --endpoint {endpoint} \
+  #        --header 'Authorization: Bearer {token}'
   #
-  # Then start osqueryd with the OpAMP config plugin (both flags are required — without
+  # `--header` is how the credential is presented, and the endpoint's scheme picks the
+  # transport: http:// polls, ws:// lets this server push without waiting for a poll.
+  # The extension registers with an osqueryd that is already running.
+  #
+  # That is push mode, the quickstart: the daemon keeps --config_plugin=filesystem and a
+  # restart forgets what was pushed. To make this server the source of truth, run
+  # osqueryd in pull mode instead (both flags are required — without
   # --extensions_require osqueryd exits with "Unknown registry plugin: opamp"):
   #
-  #   osqueryd --config_plugin=opamp \
-  #            --extensions_require=opamp --extensions_timeout=30
+  #   osqueryd --config_plugin=opamp --extensions_require=opamp --extensions_timeout=30
   #
   # A pushed config must be the object "osquery.json" (content type application/json),
   # because that is the name the extension applies and reports.

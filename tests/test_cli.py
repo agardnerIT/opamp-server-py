@@ -435,6 +435,41 @@ class TestTokenCommands:
         assert json.loads(result.output)["error"].startswith("HTTP 401")
 
 
+class TestFleetTokenAgentType:
+    """#144: `-t/--agent-type` picks the snippet the token comes with."""
+
+    def test_osquery_gets_the_extension_quickstart(self, live):
+        data = parse(run("--password", "cli-pw-123456", "agent-tokens", "create",
+                         "--label", "edr", "--agent-type", "osquery"))
+        assert data["agent_type"] == "osquery"
+        assert "osquery_opamp" in data["collector_snippet"]
+        assert "--header 'Authorization: Bearer " + data["token"] + "'" in data["collector_snippet"]
+        assert "extensions:" not in data["collector_snippet"]
+
+    def test_the_default_stays_a_collector_block(self, live):
+        data = parse(run("--password", "cli-pw-123456", "agent-tokens", "create"))
+        assert data["agent_type"] is None
+        assert data["collector_snippet"].startswith("extensions:")
+
+    def test_raw_still_prints_only_the_token(self, live):
+        result = run("--password", "cli-pw-123456", "agent-tokens", "create",
+                     "--agent-type", "osquery", "--raw")
+        assert result.exit_code == 0, result.output
+        assert result.output.strip().startswith("opamp_agent_")
+        assert "{" not in result.output
+
+    def test_an_unknown_type_fails_instead_of_guessing(self, live):
+        result = run("--password", "cli-pw-123456", "agent-tokens", "create",
+                     "--agent-type", "osquerry")
+        assert result.exit_code == 1
+        payload = json.loads(result.output)
+        assert payload["error"] == "HTTP 422"
+        # The detail names the typo *and* the types that exist — a bare 422 would send
+        # the operator to the source to find out which names are real.
+        detail = payload["response"]["detail"]
+        assert "osquerry" in detail and "osquery" in detail
+
+
 class TestOfflineCredentials:
     def test_agents_get_reports_credential_state_offline(self, offline_db):
         """Operators watching a cutover are often doing it with the server down."""

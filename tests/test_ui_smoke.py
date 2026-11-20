@@ -935,7 +935,10 @@ def test_the_mint_form_asks_for_an_agent_type_and_sends_it(server):
     # operator reads (`🔎 osquery`), which is the one the dictionary supplies (#134).
     assert any("osquery" in option for option in types[0].options), list(types[0].options)
 
-    types[0].set_value("osquery").run()
+    # Set the value and submit in the *same* run: this selectbox lives in an
+    # `st.form`, so a value set in one run is discarded unless the submit button
+    # travels with it.
+    types[0].set_value("osquery")
     [button for button in app.button if (button.label or "") == "Generate token"][0].click().run()
     assert not app.exception, app.exception
 

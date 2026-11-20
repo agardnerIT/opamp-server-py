@@ -480,6 +480,34 @@ class TestAgentCredentials:
             assert exc.value.status_code == 422
 
 
+class TestFleetTokenAgentType:
+    """#144: the snippet follows the agent type the caller asked for."""
+
+    def test_the_choice_reaches_the_server_and_shapes_the_snippet(self, credentials):
+        with make_client(password="client-pw-123456") as c:
+            created = c.create_fleet_token(label="edr", agent_type="osquery")
+            assert created["agent_type"] == "osquery"
+            assert "osquery_opamp" in created["collector_snippet"]
+            assert "extensions:" not in created["collector_snippet"]
+            # The listing says what the token was for, which is the point of recording it.
+            token = c.list_agent_tokens()["tokens"][0]
+            assert token["agent_type"] == "osquery"
+
+    def test_omitting_it_keeps_the_default_profile(self, credentials):
+        with make_client(password="client-pw-123456") as c:
+            created = c.create_fleet_token()
+            assert created["agent_type"] is None
+            assert created["collector_snippet"].startswith("extensions:")
+            assert c.list_agent_tokens()["tokens"][0]["agent_type"] is None
+
+    def test_an_unknown_type_is_a_422_not_a_guess(self, credentials):
+        with make_client(password="client-pw-123456") as c:
+            with pytest.raises(OpampApiError) as exc:
+                c.create_fleet_token(agent_type="osquerry")
+            assert exc.value.status_code == 422
+            assert "osquery" in str(exc.value.detail)
+
+
 # --- audit log (#97) -------------------------------------------------------------
 
 class TestAudit:

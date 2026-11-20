@@ -152,7 +152,9 @@ the wrong one is the most common mistake:
 ```bash
 opampctl agent-tokens create --label prod --expires-in-days 7 --max-agents 15
 #   -> {"token": "opamp_agent_...", "token_id": "agtok_...", "expires_at": ..., "collector_snippet": ...}
-opampctl agent-tokens list          # token_id, expires_at, agents_used/max_agents, active
+# For a fleet that is not collectors, name the type and the snippet follows it:
+opampctl agent-tokens create --label edr --max-agents 15 --agent-type osquery
+opampctl agent-tokens list          # token_id, agent_type, expires_at, agents_used/max_agents, active
 opampctl agent-tokens revoke agtok_...        # blocks new messages, keeps state + the row
 ```
 
@@ -160,6 +162,9 @@ Rules that matter when acting on this:
 
 - A fleet token is **access, not identity**: it authorises the endpoint, and each agent
   keeps its own uid. A bound token **is** identity and refuses any other uid.
+- `--agent-type` only picks the *snippet's* shape (`otelcol`, `osquery`, `fluentbit`,
+  `generic`). It is recorded on the token and shown by `agent-tokens list`, and it is
+  never enforced — the token still admits whatever agent presents it.
 - The token is returned **once**; only its SHA-256 is stored. Never print it into a
   report, issue, commit or chat transcript. `--raw` exists for
   `TOKEN=$(opampctl ... --raw)` pipelines, not for display. Only `token_id` is safe to

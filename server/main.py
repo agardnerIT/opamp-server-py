@@ -2451,17 +2451,24 @@ class AgentTokenRequest(BaseModel):
 
 
 class AgentTokenCreate(BaseModel):
-    """Body for minting a fleet token (#126).
+    """Body for minting a fleet token (#126, #144).
 
     `expires_in_days` is one of 1/7/30 or null (never); `max_agents` is a positive
     integer or null (unlimited). `agent_id` is absent on purpose: a fleet token is not
     bound to a uid, which is the whole point — an admin can mint it before any agent has
     ever contacted the server.
+
+    `agent_type` (#144) selects which profile writes the returned snippet: `osquery`
+    gets the extension's quickstart, `otelcol` the `extensions.opamp` block, `generic`
+    plain text. Omitted (or null) keeps the old behaviour — the dictionary's
+    `bootstrap_default`. It is *not* a constraint on who may use the token: no agent
+    exists yet at mint time, so enforcing a guess here would only lock people out.
     """
 
     label: str = ""
     expires_in_days: int | None = None
     max_agents: int | None = None
+    agent_type: str | None = None
 
 
 @app.post(
@@ -2482,10 +2489,20 @@ def create_fleet_token(
     config (`extensions.opamp.server.http.headers.Authorization`, or `server.ws.headers`)
     and the server accepts the uid each agent invents for itself.
 
-    Body (all optional): `{"label": "prod", "expires_in_days": 7, "max_agents": 15}`.
+    Body (all optional): `{"label": "prod", "expires_in_days": 7, "max_agents": 15,
+    "agent_type": "osquery"}`.
     `expires_in_days` is 1-365, or `null` for never. `max_agents` is 1+, or `null` for
     unlimited; the agent that would exceed it is refused with 403 (`agent_limit`) and a
     line in the server log, so a leaked token cannot consume the fleet.
+
+    `agent_type` (#144) picks the shape of `collector_snippet`: the profile you name
+    owns its own bootstrap, so an osquery fleet is handed the `osquery-opamp`
+    quickstart instead of a collector YAML block. Omitted means the dictionary's
+    `bootstrap_default` (the collector block, today). A name no registered profile
+    provides is **422**, never a silent fall back to `generic` — a snippet for the
+    wrong product is worse than an error, because it looks like instructions. The
+    choice is recorded on the token (so `GET /agent-tokens` can say what it was for)
+    and is never enforced: a fleet token still admits whatever agent presents it.
 
     The plaintext token is returned **once** — only its SHA-256 is stored — along with
     `token_id`, the public handle used to list and revoke it. It never appears in
@@ -2500,6 +2517,7 @@ def create_fleet_token(
             label=body.label,
             expires_in_days=body.expires_in_days,
             max_agents=body.max_agents,
+            agent_type=body.agent_type,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
@@ -2512,16 +2530,20 @@ def create_fleet_token(
         label=body.label,
         expires_at=record.get("expires_at"),
         max_agents=body.max_agents,
+        agent_type=record.get("agent_type"),
     )
     response.headers["Cache-Control"] = "no-store"
     return {
         "token": token,
         "token_id": record.get("token_id"),
         "label": record.get("label", ""),
+        "agent_type": record.get("agent_type"),
         "created_at": record.get("created_at"),
         "expires_at": record.get("expires_at"),
         "max_agents": record.get("max_agents"),
-        "collector_snippet": agent_auth.collector_snippet(token),
+        "collector_snippet": agent_auth.collector_snippet(
+            token, agent_type=record.get("agent_type")
+        ),
         "note": (
             "Shown once and not recoverable: put it in the agents' config now. "
             "The token's hash is all this server keeps. Revoke it with "
@@ -2541,7 +2563,9 @@ def list_agent_tokens(request: Request):
 
     `agents_used` and `max_agents` are reported together because a cap is only
     meaningful as "3 of 15"; `expires_at: null` means never; `expired` and `active`
-    are computed server-side so no client has to re-derive them.
+    are computed server-side so no client has to re-derive them. `agent_type` (#144)
+    is the profile the token's snippet was minted for, or null if the minter did not
+    say — a label for the operator, not a rule the server applies.
     """
     require_roles(request, ROLE_VIEWER)
     tokens = agent_auth.list_tokens()
@@ -2621,12 +2645,19 @@ def create_agent_token(
         label=body.label,
         retire_previous=body.retire_previous,
     )
+    # #144: a bound token's snippet was already written for the agent's own type —
+    # record that as the token's `agent_type` too, so the listing agrees with the
+    # snippet the operator was handed. `None` when the agent has never been seen, in
+    # which case the snippet is the dictionary's default and the row says so.
+    agent = AGENT_REGISTRY.get(agent_id)
+    resolved_type = agent.type_info()["agent_type"] if agent is not None else None
     try:
         token, record = agent_auth.issue_token(
             agent_id,
             label=body.label,
             retire_previous=body.retire_previous,
             expires_in_days=body.expires_in_days,
+            agent_type=resolved_type,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
@@ -2637,15 +2668,11 @@ def create_agent_token(
         "token": token,
         "token_id": record.get("token_id"),
         "label": record.get("label", ""),
+        "agent_type": record.get("agent_type"),
         "created_at": record.get("created_at"),
         "expires_at": record.get("expires_at"),
         "collector_snippet": agent_auth.collector_snippet(
-            token,
-            agent_type=(
-                AGENT_REGISTRY.get(agent_id).type_info()["agent_type"]
-                if AGENT_REGISTRY.get(agent_id) is not None
-                else None
-            ),
+            token, agent_type=record.get("agent_type")
         ),
         "note": (
             "Shown once and not recoverable: put it in the agent's config now. "

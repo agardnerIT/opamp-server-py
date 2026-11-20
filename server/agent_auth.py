@@ -194,6 +194,7 @@ def issue_token(
     *,
     expires_in_days: Optional[int] = None,
     max_agents: Optional[int] = None,
+    agent_type: Optional[str] = None,
 ) -> Tuple[str, Dict[str, Any]]:
     """Mint a token. Returns `(token, record)` — the plaintext token, exactly once.
 
@@ -210,6 +211,15 @@ def issue_token(
     unlimited. Both are enforced on the auth path (`authenticate` / `authorize_agent`),
     not here — issuing a token that cannot be used yet is legitimate.
 
+    `agent_type` (#144) is the profile the token's snippet should be written for, so an
+    operator onboarding osquery gets the osquery quickstart instead of a collector's
+    YAML. It is *recorded and documented, never enforced*: at mint time no agent exists
+    to check it against, and a fleet token that refused the agent it was not minted for
+    would be a lock-out dressed as a safety feature. Canonicalised here (a human types
+    `OtelCol` and the server stores `otelcol`) and unknown names raise `ValueError`
+    rather than falling back to `generic`, for the same reason a type pin does: "pinned
+    to a typo" and "deliberately opaque" must not look the same.
+
     The plaintext token is not persisted anywhere. When a bound token already exists for
     that agent, the outgoing ones are marked `retire_on_use` so they stop working the
     moment this one is first seen (`retire_previous=True` retires them immediately
@@ -220,6 +230,7 @@ def issue_token(
         agent_id = normalize_agent_id(agent_id)
     expires_at = _expiry_timestamp(expires_in_days)
     max_agents = _validate_max_agents(max_agents)
+    agent_type = resolve_agent_type(agent_type)
     previous = CREDENTIALS.active(agent_id) if agent_id else []
 
     token = TOKEN_PREFIX + secrets.token_urlsafe(TOKEN_BYTES)
@@ -232,6 +243,7 @@ def issue_token(
         token_id=token_id,
         expires_at=expires_at,
         max_agents=max_agents,
+        agent_type=agent_type,
     )
 
     for record in previous:
@@ -244,6 +256,7 @@ def issue_token(
     logger.info(
         f"agent token {token_id} issued for {target}"
         + (f" (label: {label})" if label else "")
+        + (f"; snippet for {agent_type}" if agent_type else "")
         + f"; expires {expires_at or 'never'}"
         + f"; max agents {max_agents if max_agents is not None else 'unlimited'}"
         + (f"; {len(previous)} previous credential(s) "
@@ -252,6 +265,26 @@ def issue_token(
            else "")
     )
     return token, CREDENTIALS.get(digest) or {}
+
+
+def resolve_agent_type(agent_type: Optional[str]) -> Optional[str]:
+    """Canonical profile name for a token's `agent_type`, or `None` for "not said".
+
+    `""` and `None` both mean "the operator made no choice", which is not the same as
+    `generic`: no choice still gets the dictionary's `bootstrap_default` snippet, while
+    `generic` is a choice and gets the honest plain-text block.
+    """
+    requested = (agent_type or "").strip()
+    if not requested:
+        return None
+    from server import profiles
+
+    canonical = profiles.canonical(requested)
+    if canonical is None:
+        raise ValueError(
+            f"unknown agent type {requested!r}; known types: {', '.join(profiles.names())}"
+        )
+    return canonical
 
 
 def _expiry_timestamp(expires_in_days: Optional[int]) -> Optional[str]:
@@ -325,6 +358,9 @@ def token_view(record: Mapping[str, Any]) -> Dict[str, Any]:
     return {
         "token_id": record.get("token_id") or "",
         "label": record.get("label") or "",
+        # #144: the profile this token's snippet was written for, or None when the
+        # minter did not say. A display hint only — nothing on the auth path reads it.
+        "agent_type": record.get("agent_type") or None,
         "agent_id": record.get("agent_id") or None,
         "bound": bool(record.get("agent_id")),
         "created_at": record.get("created_at"),
@@ -616,6 +652,12 @@ def collector_snippet(
     dictionary answers which snippet to show then, with `bootstrap_default: true`
     (`registry.bootstrap_default()`), and the fallback profile's plain text when no
     file claims it.
+
+    *#144*: minting a fleet token is where that choice becomes the operator's. The
+    request's `agent_type` is canonicalised at issue time and arrives here, so an
+    operator onboarding osquery is handed the extension's quickstart rather than a
+    collector YAML block — the same one-profile-owns-its-own-bootstrap rule, decided
+    by a person instead of by a guess.
     """
     from server import profiles
 

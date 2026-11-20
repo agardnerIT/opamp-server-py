@@ -483,3 +483,22 @@ class TestBootstrapSnippets:
         assert "extensions:" not in snippet
         assert "Authorization: Bearer tok" in snippet
         assert "/v1/opamp" in snippet
+
+    def test_osquery_snippet_is_the_extensions_own_quickstart(self):
+        """#144: the osquery block is osquery instructions, not a paraphrase of them.
+
+        An operator minting a token for an osquery fleet is about to run the
+        `osquery-opamp` extension; handing them collector YAML was the bug. The text
+        is the extension's quickstart with this server's endpoint and token
+        substituted, so the commands can be pasted as they are.
+        """
+        from server import agent_auth
+
+        snippet = agent_auth.collector_snippet(
+            "opamp_agent_x", agent_type="osquery"
+        )
+        assert "git clone https://github.com/agardnerIT/osquery-opamp" in snippet
+        assert "python -m osquery_opamp" in snippet
+        assert "--header 'Authorization: Bearer opamp_agent_x'" in snippet
+        assert "--endpoint http://localhost:4320/v1/opamp" in snippet
+        assert "extensions:" not in snippet

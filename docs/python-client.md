@@ -33,6 +33,8 @@ oc.rollback_agent_config(agent_id, note="v2 broke tracing")
 print(oc.list_config_revisions(status="poisoned"))            # metadata only
 
 # Agent credentials (admin) — the token is returned once
+fleet = oc.create_fleet_token(label="edr", max_agents=15, agent_type="osquery")
+print(fleet["token"], fleet["collector_snippet"])   # snippet in osquery's own shape
 token = oc.create_agent_token("4f3c2b1a...", label="prod-1")["token"]
 print(oc.get_agent("4f3c2b1a...")["credential"])
 print(oc.revoke_agent_token("4f3c2b1a..."))   # {"revoked": 1}

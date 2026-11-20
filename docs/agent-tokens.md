@@ -56,7 +56,12 @@ Tokens carry two limits, both optional and both enforced on every message:
   agents*, so re-polling does not eat slots. Slots are never released — a token that
   could recycle uids forever would defeat the cap; mint a new token when you need room.
 
-The token response also carries a paste-ready collector snippet; the UI's connect
+The token response also carries a paste-ready snippet, written for the agent type you
+name at mint time (`agent_type`): `osquery` gets the extension's own quickstart, the
+collector gets the `extensions.opamp` block, `generic` gets plain text, and omitting it
+keeps this server's default profile. That choice is recorded on the token and shown in
+`GET /agent-tokens`, but it is **not enforced**: a fleet token is access, not identity,
+and at mint time there is no agent to check it against. The UI's connect
 snippet (Help page and the Agents empty state) is not hardcoded either: it reads
 `config_push.agent_auth` from `GET /health` and renders the `headers:` block. Agent
 auth is mandatory, so the snippet always carries a credential and the empty fleet
@@ -92,6 +97,11 @@ cutover and answer "which token let this agent in".
 opampctl --password "$ADMIN_PASSWORD" agent-tokens create \
     --label prod --expires-in-days 30 --max-agents 50
 #    -> {"token": "opamp_agent_...", "token_id": "agtok_...", "collector_snippet": ...}
+
+#    For a fleet that is not collectors, say so, and the snippet comes back in that
+#    product's own terms — an osquery extension quickstart, not collector YAML:
+opampctl --password "$ADMIN_PASSWORD" agent-tokens create \
+    --label edr --max-agents 50 --agent-type osquery
 
 # 2. Put the headers block in each agent's config (the response carries it ready to
 #    paste) and reload the collector:

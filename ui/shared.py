@@ -204,6 +204,31 @@ EXPIRY_CHOICES = {"1 day": 1, "7 days": 7, "30 days": 30, "Never": None}
 MINTED_TOKEN_KEY = "minted_agent_token"
 
 
+def token_agent_type_choices():
+    """The agent types a token may be minted for: `(name, label)` in match order (#144).
+
+    The dictionary's profiles, not a hardcoded list: a new `server/profiles/data/*.yaml`
+    must appear in this selectbox without a UI change, which is the same rule #134
+    applied to badges and snippets.
+    """
+    return [
+        (profile.name, f"{profile.icon or '📦'} {profile.display_name}")
+        for profile in profiles.PROFILES
+    ]
+
+
+def token_type_label(agent_type):
+    """`🧩 OpenTelemetry Collector` for a token's recorded `agent_type` (#144)."""
+    if not agent_type:
+        return "—"
+    profile = profiles.get(agent_type)
+    if profile is None:
+        # A name this build does not have: a profile file was removed, or the row came
+        # from a later release. Name it rather than pretending the hint is absent.
+        return agent_type
+    return f"{profile.icon or '📦'} {profile.display_name}"
+
+
 def mint_agent_token_form(
     key_prefix,
     *,
@@ -226,6 +251,14 @@ def mint_agent_token_form(
     After a successful mint the page reruns so the form is replaced by the token. Every
     page that renders this form is now a page in its own right (no tabs), so that rerun
     cannot land the operator somewhere else — which is what used to hide the token.
+
+    *#144*: the form asks which agent type the token is for, and the snippet it shows
+    afterwards is that profile's. Before this, every mint ended in a collector YAML
+    block — correct for one of the (then three) supported agent types and meaningless
+    for the others, so an osquery operator was handed a file osquery does not read.
+    The answer is sent to the server (`agent_type`), which canonicalises it, records it
+    on the token and renders the snippet; the page then renders from the *response*,
+    not from the selectbox, so what is shown always matches what was minted.
     """
     minted = st.session_state.get(MINTED_TOKEN_KEY)
     if minted is None:
@@ -242,6 +275,25 @@ def mint_agent_token_form(
 
         with st.form(f"{key_prefix}_mint_token"):
             label = st.text_input("Label", value="", placeholder="prod")
+            # #144: the token is the same in every case — what changes is the snippet
+            # it comes with. The default is the dictionary's `bootstrap_default`, which
+            # is what this form showed before the choice existed, so nobody's habit
+            # breaks; naming a type gets that product's own instructions instead
+            # (osquery gets the osquery-opamp quickstart, not collector YAML).
+            choices = token_agent_type_choices()
+            names = [name for name, _label in choices]
+            default_profile = profiles.bootstrap_default()
+            agent_type = st.selectbox(
+                "Agent type",
+                names,
+                index=names.index(default_profile.name)
+                if default_profile.name in names
+                else 0,
+                format_func=dict(choices).get,
+                key=f"{key_prefix}_mint_agent_type",
+                help="Which product this token is for. It only decides the shape of "
+                "the snippet you get back — the token itself works for any agent.",
+            )
             expiry = st.selectbox(
                 "Expires",
                 list(EXPIRY_CHOICES),
@@ -263,7 +315,7 @@ def mint_agent_token_form(
 
         # No second auth check: a submit is a fresh run, so the gate above already ran
         # for it and returned the session that made this form reachable.
-        body = {"label": label, "max_agents": int(max_agents)}
+        body = {"label": label, "max_agents": int(max_agents), "agent_type": agent_type}
         days = EXPIRY_CHOICES[expiry]
         if days is not None:
             body["expires_in_days"] = days
@@ -285,29 +337,52 @@ def mint_agent_token_form(
         "is the one and only time it is shown."
     )
     st.code(minted["token"], language="text")
+    # #144: the snippet is the *type's*, never the page's. Read back from the response
+    # rather than from the selectbox so a rerun (or a different page) cannot render one
+    # product's instructions under another product's heading; `None` means the server
+    # fell back to its default, which is what this form showed before the choice existed.
+    profile = profiles.get(minted.get("agent_type")) or profiles.bootstrap_default()
     if show_snippet:
         snippet = connect_snippet(
             get_server_url(),
+            profile=profile,
             in_container=in_container,
             agent_auth="token",
             token_literal=minted["token"],
         )
-        st.code(snippet, language="yaml")
-        st.download_button(
-            "Download config.yaml",
-            snippet,
-            file_name="config.yaml",
-            mime="text/yaml",
-            key=f"{key_prefix}_download",
-        )
+        # A profile with a whole config file gets a "put this here" line and a download;
+        # one whose bootstrap is instructions (osquery's extension, a generic agent) gets
+        # neither — handing someone a `.json` file that is really a shell transcript is
+        # the #121 mistake in a new place.
+        if profile.onboarding is not None:
+            st.markdown(
+                f"Paste this into `{profile.filename_for()}` and start a "
+                f"**{profile.display_name}**:"
+            )
+        else:
+            st.markdown(
+                f"Run this to point a **{profile.display_name}** at this server:"
+            )
+        st.code(snippet, language="yaml" if profile.onboarding is not None else "text")
+        if profile.onboarding is not None:
+            st.download_button(
+                f"Download {profile.filename_for()}",
+                snippet,
+                file_name=profile.filename_for(),
+                mime="text/yaml",
+                key=f"{key_prefix}_download",
+            )
     cap = minted.get("max_agents")
     st.caption(
-        f"Token `{minted.get('token_id')}` · expires "
+        f"Token `{minted.get('token_id')}` · "
+        + (token_type_label(minted.get("agent_type")) + " · " if minted.get("agent_type") else "")
+        + "expires "
         + (minted.get("expires_at") or "never")
         + " · max agents "
         + (str(cap) if cap is not None else "unlimited")
         + ". Revoke it on the **Admin** page if it leaks. The snippet embeds the "
-        f"token because you are pasting it into a file you own; `{AGENT_TOKEN_ENV}` "
+        "token because you are pasting it into a file or a command you own; "
+        f"`{AGENT_TOKEN_ENV}` "
         "(Help page) keeps it out of the file, which is better once it works."
     )
     if st.button("Done", key=f"{key_prefix}_dismiss_token"):
@@ -334,7 +409,12 @@ def agent_token_state(token):
 
 
 def agent_token_rows(tokens):
-    """The Admin table: one row per token, never a token or a hash (#126)."""
+    """The Admin table: one row per token, never a token or a hash (#126).
+
+    `For` is the `agent_type` the token was minted for (#144): an operator with a
+    token per product needs to see which is which without opening the label, and a
+    token minted before the choice existed says `—` rather than guessing.
+    """
     rows = []
     for token in tokens or []:
         cap = token.get("max_agents")
@@ -342,6 +422,7 @@ def agent_token_rows(tokens):
             {
                 "State": agent_token_state(token),
                 "Label": token.get("label") or "—",
+                "For": token_type_label(token.get("agent_type")),
                 "Token": token.get("token_id") or "",
                 "Bound to": token.get("agent_id") or "fleet",
                 "Expires": format_local_time(token.get("expires_at"))

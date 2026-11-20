@@ -447,6 +447,13 @@ class SQLiteCredentialStore:
     entries key off. A `token_hash` must never be one: it is the verifier, so publishing
     it — even hashed — would turn a listing endpoint into an oracle.
 
+    `agent_type` (#144) is neither an identity nor a permission: it is the profile the
+    minting operator chose so the token's paste-ready snippet is written in that
+    product's own shape. Nothing on the auth path reads it, so a token minted for one
+    agent type still admits another — which is deliberate, because at mint time there
+    is no agent to enforce it against and a guess about the fleet must not lock anyone
+    out.
+
     Timestamps are ISO-8601 UTC strings, like every other table here.
     """
 
@@ -459,6 +466,10 @@ class SQLiteCredentialStore:
         ("token_id", "TEXT"),
         ("expires_at", "TEXT"),
         ("max_agents", "INTEGER"),
+        # #144: which agent type the token's bootstrap snippet was written for. A
+        # hint for the operator, *not* a constraint: it is never consulted on the
+        # auth path, so a token minted "for osquery" still admits a collector.
+        ("agent_type", "TEXT"),
     )
 
     def __init__(self, db_path: Path = DB_PATH):
@@ -535,13 +546,20 @@ class SQLiteCredentialStore:
         token_id: Optional[str] = None,
         expires_at: Optional[str] = None,
         max_agents: Optional[int] = None,
+        agent_type: Optional[str] = None,
     ) -> None:
-        """Insert one token. `agent_id=""` (the default) is a fleet token (#126)."""
+        """Insert one token. `agent_id=""` (the default) is a fleet token (#126).
+
+        `agent_type` (#144) is the profile the minting operator said this token is
+        for. It is recorded so listings can say "this one is for osquery" and so the
+        snippet can be re-rendered without asking; it is not an ACL.
+        """
         with self._connect() as conn:
             conn.execute(
                 "INSERT INTO agent_credentials "
                 "(token_hash, agent_id, label, created_at, retire_on_use, token_id, "
-                "expires_at, max_agents) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "expires_at, max_agents, agent_type) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     token_hash,
                     agent_id,
@@ -551,6 +569,7 @@ class SQLiteCredentialStore:
                     token_id or f"agtok_{token_hash[:16]}",
                     expires_at,
                     max_agents,
+                    agent_type,
                 ),
             )
 

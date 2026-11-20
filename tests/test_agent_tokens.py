@@ -221,6 +221,112 @@ class TestFleetTokens:
         assert AGENT_REGISTRY.get(UID_B.hex()) is None
 
 
+# ---------------------------------------------------------- agent type (#144)
+
+
+class TestTokenAgentType:
+    """The snippet a token comes with is the agent type's, not the collector's.
+
+    Before #144 every mint ended in `extensions:\n  opamp:` YAML. That is correct for
+    one of the supported agent types and meaningless for the others: an osquery
+    operator was handed a file osquery does not read. The choice is a *rendering*
+    hint — recorded, never enforced — because at mint time no agent exists to check it
+    against, and a token that refused the fleet it was not minted for would be a
+    lock-out dressed as a safety feature.
+    """
+
+    def test_the_osquery_snippet_is_the_extension_quickstart(self, client):
+        minted = mint_fleet(client, agent_type="osquery")
+        assert minted["agent_type"] == "osquery"
+        snippet = minted["collector_snippet"]
+        # The real instructions (github.com/agardnerIT/osquery-opamp), with this
+        # server's endpoint and this token substituted — not a paraphrase.
+        assert "osquery_opamp" in snippet
+        assert "--header 'Authorization: Bearer " + minted["token"] + "'" in snippet
+        assert "http://localhost:4320/v1/opamp" in snippet
+        assert "extensions:" not in snippet, "an osquery fleet gets no collector YAML"
+
+    def test_the_collector_snippet_is_still_collector_yaml(self, client):
+        minted = mint_fleet(client, agent_type="otelcol")
+        assert minted["agent_type"] == "otelcol"
+        assert minted["collector_snippet"].startswith("extensions:\n  opamp:\n")
+
+    def test_generic_is_a_choice_and_not_the_same_as_no_choice(self, client):
+        """"I did not say" and "this agent is opaque" are different answers."""
+        default = mint_fleet(client)
+        generic = mint_fleet(client, agent_type="generic")
+        assert default["agent_type"] is None
+        assert generic["agent_type"] == "generic"
+        # No choice: the dictionary's default profile, which is the collector block.
+        assert default["collector_snippet"].startswith("extensions:")
+        # An explicit `generic`: plain text, because there is no generic config file.
+        assert "extensions:" not in generic["collector_snippet"]
+        assert "/v1/opamp" in generic["collector_snippet"]
+
+    def test_the_name_is_canonicalised_before_it_is_stored(self, client):
+        minted = mint_fleet(client, agent_type="  OtelCol ")
+        assert minted["agent_type"] == "otelcol"
+        listed = client.get("/agent-tokens", headers=admin_headers()).json()["tokens"]
+        assert [row["agent_type"] for row in listed] == ["otelcol"]
+
+    def test_an_unknown_type_is_refused_rather_than_guessed(self, client):
+        """"Minted for a typo" and "deliberately opaque" must not look the same."""
+        response = client.post(
+            "/agent-tokens", headers=admin_headers(), json={"agent_type": "osquerry"}
+        )
+        assert response.status_code == 422, response.text
+        assert "osquerry" in response.json()["detail"]
+        # The message has to be actionable: an operator needs the names that do exist.
+        assert "otelcol" in response.json()["detail"]
+        assert "osquery" in response.json()["detail"]
+        # Nothing was issued, so a failed mint cannot leave a usable credential behind.
+        assert client.get("/agent-tokens", headers=admin_headers()).json()["count"] == 0
+
+    def test_the_type_is_recorded_so_listing_can_name_it(self, client):
+        minted = mint_fleet(client, agent_type="osquery")
+        row = client.get("/agent-tokens", headers=admin_headers()).json()["tokens"][0]
+        assert row["token_id"] == minted["token_id"]
+        assert row["agent_type"] == "osquery"
+        # Still never a token, and the new field is not one either.
+        assert minted["token"] not in json.dumps(row)
+
+    def test_choosing_a_type_does_not_restrict_who_may_use_the_token(self, client):
+        """The hint is a hint: a token minted "for osquery" still admits a collector.
+
+        This is deliberate. At mint time there is no agent to compare against, and a
+        token is a *fleet* credential — turning the choice into an ACL would refuse
+        the agent the operator was describing, because the agent's own type is only
+        resolved after it connects.
+        """
+        minted = mint_fleet(client, agent_type="osquery")
+        assert post(client, UID_A, minted["token"]).status_code == 200
+
+    def test_the_choice_is_in_the_audit_entry(self, client):
+        mint_fleet(client, agent_type="osquery")
+        entries = json.dumps(client.get("/audit?limit=20", headers=admin_headers()).json())
+        assert "agent.token.issued" in entries
+        assert "osquery" in entries
+
+    def test_a_bound_token_records_the_agents_own_type(self, client):
+        """A bound token's snippet was already type-aware (#118) — say so in the row.
+
+        Otherwise `GET /agent-tokens` reports `agent_type: null` for a token whose
+        snippet was a collector block, and the listing contradicts the response the
+        operator just read.
+        """
+        post(client, UID_A, mint_fleet(client)["token"])
+        client.put(
+            f"/agent/{UID_A.hex()}/type",
+            headers=admin_headers(),
+            json={"agent_type": "osquery"},
+        )
+        bound = client.post(
+            f"/agents/{UID_A.hex()}/token", headers=admin_headers(), json={}
+        ).json()
+        assert bound["agent_type"] == "osquery"
+        assert "osquery_opamp" in bound["collector_snippet"]
+
+
 # --------------------------------------------------------------------- listing
 
 

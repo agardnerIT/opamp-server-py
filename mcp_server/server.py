@@ -548,6 +548,7 @@ def create_fleet_token(
     label: str = "",
     expires_in_days: Optional[int] = None,
     max_agents: Optional[int] = None,
+    agent_type: Optional[str] = None,
 ) -> str:
     """Mint a fleet agent token (admin; write-gated, requires ADMIN_PASSWORD).
 
@@ -557,12 +558,23 @@ def create_fleet_token(
     cap is refused `agent_limit`), and `expires_in_days` (1-365, or null for never)
     bounds how long a leak is useful.
 
+    `agent_type` picks the shape of the returned `collector_snippet`: an osquery
+    fleet gets the osquery-opamp quickstart with the endpoint and token filled in, a
+    collector gets the `extensions.opamp` block, `generic` gets plain text. Omit it
+    for the server's default profile. Names come from `list_agent_types`; an unknown
+    one is refused (422) rather than silently rendered as `generic`. It is a rendering
+    hint recorded on the token, not a constraint — the token admits whatever agent
+    presents it.
+
     The token is returned once — only its hash is stored — with `token_id` (the
     handle to list or revoke it) and a paste-ready `collector_snippet`.
     """
     return _tool(
         lambda oc: oc.create_fleet_token(
-            label=label, expires_in_days=expires_in_days, max_agents=max_agents
+            label=label,
+            expires_in_days=expires_in_days,
+            max_agents=max_agents,
+            agent_type=agent_type,
         )
     )
 

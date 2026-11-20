@@ -839,3 +839,39 @@ host *was* fixed: `osquery.config_plugin=opamp`, exactly one `battery_stats` in
 - Verified by running the workflow's own steps locally (real Fluent Bit 3.x + opamp-core
   v0.6 against a throwaway `DATA_DIR`): rollout `completed`, `applied: 1`. Suite: 1765
   passed.
+
+## #144 — a token's snippet follows the agent type, 2026-11-20
+
+- **The bug was a default that was really a product.** Every mint ended in
+  `extensions:\n  opamp:` YAML. That is right for one of the recognised agent types and
+  meaningless for the rest, and #134 had already moved snippet ownership into the
+  profile dictionary — the missing piece was a *person* choosing, since at mint time
+  there is no agent to resolve.
+- **`agent_type` is recorded, never enforced.** It is a column on `agent_credentials`
+  (additive, `_ADDED_COLUMNS`) and appears in `GET /agent-tokens`, so a token per product
+  can be told apart. It is not on the auth path, deliberately: a fleet token is access,
+  not identity, and a mint-time guess that refused the fleet it "was not for" would be a
+  lock-out. `test_choosing_a_type_does_not_restrict_who_may_use_the_token` is the test
+  that keeps someone from "fixing" it into an ACL later.
+- **Unknown name → 422 with the known names, never `generic`.** Same rule as the type
+  pin: "minted for a typo" and "deliberately opaque" must not look the same. `""`/null
+  means *no choice* (dictionary `bootstrap_default`, i.e. today's behaviour) and is not
+  the same answer as `generic` (plain text, because no generic config file exists).
+- **The osquery snippet was wrong in a way only the source showed.** It told the operator
+  to put endpoint+credential "in the extension's configuration" and start osqueryd in
+  pull mode. The extension's actual quickstart is `git clone …osquery-opamp`, venv, then
+  `python -m osquery_opamp --endpoint … --header 'Authorization: Bearer …'` against a
+  running daemon (push mode). The block is now that quickstart with both values
+  substituted, so it can be pasted as-is; pull mode stays as the one-line alternative.
+- **UI lesson:** a widget inside `st.form` is discarded unless the submit travels in the
+  same `AppTest` run — `selectbox.set_value(x).run()` then `button.click().run()` mints
+  with the *default*, silently. Set the value and click on the same tree object.
+- **Empty fleet no longer names a file** ("copy this into `otelcol-config.yaml`"): the
+  form now prints the chosen profile's own line ("Paste this into `osquery.json`…" vs
+  "Run this to point a … at this server"), and a profile with no onboarding template gets
+  no download button — a `.json` file that is really a shell transcript is the #121
+  mistake in a new place.
+- Suite after: **1813 passed**, 3 failed — `tests/test_ui_golden.py`'s three captures,
+  which fail identically on a clean `main` (verified by stashing: same three), so they
+  are a pre-existing drift in the fixture, not this change. Worth regenerating in their
+  own commit, not silently inside this one.

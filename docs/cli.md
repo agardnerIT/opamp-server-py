@@ -26,6 +26,12 @@ opampctl agents token create <agent-id> --raw            # just the token, for $
 opampctl agents token create <agent-id> --retire-previous  # rotate with an immediate cutover
 opampctl agents token revoke <agent-id>                  # blocks delivery, keeps agent state
 
+# Fleet tokens: mint before any agent exists, one token for many agents (#126)
+opampctl agent-tokens create --label prod --expires-in-days 7 --max-agents 15
+opampctl agent-tokens create --label edr --max-agents 15 --agent-type osquery  # snippet follows the type
+opampctl agent-tokens list                    # token_id, agent_type, expiry, agents_used/max_agents
+opampctl agent-tokens revoke agtok_...        # blocks delivery, keeps the row and every agent
+
 # Remote config (#81) — config push must be enabled and the posture secure
 opampctl agents config get <agent-id>        # desired + effective, REDACTED
 opampctl agents config get <agent-id> --reveal   # real values: approver role, audited

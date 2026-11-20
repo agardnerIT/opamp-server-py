@@ -1163,6 +1163,7 @@ class OpampClient:
         label: str = "",
         expires_in_days: Optional[int] = None,
         max_agents: Optional[int] = None,
+        agent_type: Optional[str] = None,
     ) -> Dict[str, Any]:
         """``POST /agent-tokens`` — mint a fleet token (admin).
 
@@ -1175,25 +1176,37 @@ class OpampClient:
         cap is refused with 403 (``agent_limit``) and a line in the server log, so a
         leaked token cannot consume the fleet.
 
-        Returns ``{"token", "token_id", "label", "created_at", "expires_at",
-        "max_agents", "collector_snippet", "note"}``. The token is shown **once**; use
-        ``token_id`` to list or revoke it.
+        ``agent_type`` (#144) chooses the shape of ``collector_snippet``: name the
+        profile you are onboarding (``"otelcol"``, ``"osquery"``, ``"fluentbit"``,
+        ``"generic"``) and the snippet is written in that product's own terms — an
+        osquery fleet gets the extension's quickstart, not a collector YAML block.
+        ``None`` keeps the server's default profile. It is a rendering hint, not an
+        ACL: the token still admits whatever agent presents it, and an unknown name is
+        a 422 rather than a silent fall back to ``generic``.
+
+        Returns ``{"token", "token_id", "label", "agent_type", "created_at",
+        "expires_at", "max_agents", "collector_snippet", "note"}``. The token is shown
+        **once**; use ``token_id`` to list or revoke it.
         """
         body: Dict[str, Any] = {"label": label}
         if expires_in_days is not None:
             body["expires_in_days"] = expires_in_days
         if max_agents is not None:
             body["max_agents"] = max_agents
+        if agent_type is not None:
+            body["agent_type"] = agent_type
         return self._post("/agent-tokens", json=body)
 
     def list_agent_tokens(self) -> Dict[str, Any]:
         """``GET /agent-tokens`` — every token's state, never a token or a hash.
 
-        Returns ``{"tokens": [{"token_id", "label", "bound", "agent_id",
-        "created_at", "expires_at", "expired", "max_agents", "agents_used",
-        "last_seen_at", "revoked_at", "active"}], "count": n}``. ``agents_used`` and
-        ``max_agents`` are the cap as an operator reads it ("3 of 15"); ``expires_at:
-        null`` means never.
+        Returns ``{"tokens": [{"token_id", "label", "agent_type", "bound",
+        "agent_id", "created_at", "expires_at", "expired", "max_agents",
+        "agents_used", "last_seen_at", "revoked_at", "active"}], "count": n}``.
+        ``agents_used`` and ``max_agents`` are the cap as an operator reads it ("3 of
+        15"); ``expires_at: null`` means never. ``agent_type`` (#144) is the profile
+        the token's snippet was minted for, or ``None`` when the minter did not say —
+        a label for the operator, not a rule the server applies.
         """
         return self._get("/agent-tokens")
 

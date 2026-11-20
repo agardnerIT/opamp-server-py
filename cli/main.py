@@ -1867,6 +1867,14 @@ def agent_tokens_create(
         "-m",
         help="How many agents may use this token. Omit for unlimited",
     ),
+    agent_type: Optional[str] = typer.Option(
+        None,
+        "--agent-type",
+        help=(
+            "Which agent type the snippet is written for: otelcol, osquery, "
+            "fluentbit or generic. Omit for the server's default (otelcol block)"
+        ),
+    ),
     raw: bool = typer.Option(False, "--raw", help="Print just the token (for $(...) use)"),
 ) -> None:
     """Mint a fleet token — admin, live server only.
@@ -1877,10 +1885,19 @@ def agent_tokens_create(
     `--expires-in-days` bounds how long a leak is useful. The token is shown once;
     the response also carries `token_id` (use it to list or revoke) and a
     `collector_snippet` to paste.
+
+    `--agent-type` (#144) picks the shape of that snippet: `opampctl agent-tokens
+    create --agent-type osquery` prints the osquery-opamp quickstart with the endpoint
+    and token filled in, which is more useful than collector YAML for a fleet that is
+    not collectors. It is recorded on the token and never enforced — an unknown name
+    is refused (422) rather than quietly rendered as `generic`.
     """
     _run(
         lambda oc: oc.create_fleet_token(
-            label=label, expires_in_days=expires_in_days, max_agents=max_agents
+            label=label,
+            expires_in_days=expires_in_days,
+            max_agents=max_agents,
+            agent_type=agent_type,
         ),
         raw_field="token" if raw else None,
     )

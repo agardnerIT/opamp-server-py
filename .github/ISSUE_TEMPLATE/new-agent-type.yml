@@ -1,0 +1,141 @@
+name: "Add a new agent type (profile)"
+description: "Propose a new agent type this server should recognise — one YAML profile in server/profiles/data/ (see docs/new-agent-type.md)"
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This server knows what an agent *is* from a profile file in `server/profiles/data/`
+        (see [docs/agent-profiles.md](../blob/main/docs/agent-profiles.md)). Adding a type can
+        be one file and a restart — no server code, unless your product needs its config
+        structure judged.
+
+        **Read [docs/new-agent-type.md](../blob/main/docs/new-agent-type.md) first** — it explains
+        every field below and why it is asked. The short version: the single most valuable
+        thing you can attach is a **real captured OpAMP payload** from your running agent.
+        Fixtures invented from documentation have historically hidden exactly the bugs this
+        project tests for.
+
+  - type: input
+    id: product
+    attributes:
+      label: Product name and what it is
+      description: "e.g. 'Fluent Bit — a log/trace forwarder supervised by the opamp-core OpAMP agent'"
+      placeholder: "name, one-line description, and how agents of it are deployed"
+    validations:
+      required: true
+
+  - type: textarea
+    id: integration
+    attributes:
+      label: How it speaks OpAMP
+      description: |
+        Which OpAMP implementation the product uses (the Collector's `opampextension`, the
+        opamp-core supervisor, an in-house client, …) and its version. Different
+        implementations report different things: `AvailableComponents`, config content
+        types, capabilities. Include the agent's own `service.name` / `service.type`
+        conventions if you know them.
+    validations:
+      required: true
+
+  - type: textarea
+    id: captured-payload
+    attributes:
+      label: Captured real OpAMP payload(s)
+      description: |
+        Paste (or attach) a real status report from a running agent — ideally the
+        `AgentDescription` attributes, the capabilities it advertises, and a
+        `config_state`/status after the server has pushed a config. Redact secrets;
+        endpoint URLs and structure are what matter. This becomes the profile's test fixture.
+      render: yaml
+    validations:
+      required: true
+
+  - type: textarea
+    id: config-formats
+    attributes:
+      label: Config format(s)
+      description: |
+        The MIME content type(s) the agent reports its config as (e.g. `text/yaml`,
+        `application/json` — osquery also declares an object key). Is any of them
+        *distinctive* to this product? What filename should a downloaded config get?
+    validations:
+      required: true
+
+  - type: textarea
+    id: inventory
+    attributes:
+      label: Components / inventory
+      description: |
+        Does the product have a "components" concept at all? If yes: does the agent report
+        `AvailableComponents`, or can the inventory be read from its config document (like
+        osquery's scheduled queries or Fluent Bit's plugins)? If no: say so — the UI will
+        honestly report "unsupported" rather than a fake zero.
+    validations:
+      required: true
+
+  - type: textarea
+    id: telemetry
+    attributes:
+      label: Telemetry reported to the server
+      description: |
+        Does the agent send OTLP metrics to this server? If yes, give the metric names or a
+        prefix (e.g. `otelcol_receiver_accepted_log_records`) and the metric namespace of
+        the product itself (e.g. `fluentbit_*`, `osquery_*`). If no, leave this out of the
+        profile — the UI will say the profile does not report telemetry, which is true.
+    validations:
+      required: false
+
+  - type: textarea
+    id: snippets
+    attributes:
+      label: Working config snippets
+      description: |
+        Two things, with the placeholders `{endpoint}`, `{token}`, `{scheme}` (`ws`/`http`)
+        and `{auth}` where the credential goes:
+        1. the fragment an existing config gains (the OpAMP extension block), and
+        2. the complete config for a brand-new agent, if the product has a form the server
+           can write from nothing.
+      render: yaml
+    validations:
+      required: true
+
+  - type: textarea
+    id: guidance
+    attributes:
+      label: Behaviour under a pushed config
+      description: |
+        What the product does with a pushed config (applies immediately? needs restart?
+        hot-reloads?) and with a *bad* one (stays down? keeps the old config? partial
+        apply?). This becomes the profile's Help-page text — claims made here are shown
+        to operators as facts about their product, so be precise.
+
+  - type: checkboxes
+    id: structure
+    attributes:
+      label: Should the server judge this config's structure?
+      description: |
+        If yes, a validation engine must be written (Python, `server/profiles/<name>.py`)
+        and the profile must also declare how to read its inventory — that is the price
+        of judging a config. If no, config pushes are accepted as opaque bytes and
+        approving them requires an explicit "unchecked structure" acknowledgement.
+      options:
+        - label: "Yes — I am willing to write or review the structure engine"
+        - label: "No — opaque bytes, with the acknowledgement gate"
+
+  - type: textarea
+    id: collisions
+    attributes:
+      label: Priority and possible collisions
+      description: |
+        Anything that might make this profile collide with the shipped ones: an identity
+        signal (`service.name` prefix, an attribute namespace) that another product could
+        also match, or a content type you want to claim as *distinctive* that another
+        profile may already claim. Distinctive-content-type and priority ties are load
+        errors, so this is worth thinking about before the PR.
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: "Links to the product's OpAMP docs, whether it is built with the OpenTelemetry Collector Builder, willingness to maintain the profile, questions."

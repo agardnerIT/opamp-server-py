@@ -179,7 +179,11 @@ otelcol-contrib
 # Ignore notes and temporary files
 notes.txt
 notes.md
-*temp*
+*.tmp
+*.temp
+temp/
+tmp/
+.tmp*
 .DS_Store
 bin/*
 etc/*

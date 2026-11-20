@@ -203,6 +203,7 @@ the full variable list is in [configuration.md](docs/configuration.md).
 | [docs/groups.md](docs/groups.md) | Named SQL selectors as push targets |
 | [docs/sql-agent-queries.md](docs/sql-agent-queries.md) | The SQL language, schema, examples, errors |
 | [docs/agent-profiles.md](docs/agent-profiles.md) | The agent-type dictionary and its guardrails |
+| [docs/new-agent-type.md](docs/new-agent-type.md) | Proposing a new agent type: what to bring, and why |
 | [docs/api-reference.md](docs/api-reference.md) | Every endpoint, its role and its failure codes |
 | [docs/cli.md](docs/cli.md) | `opampctl`: commands, configuration, offline mode |
 | [docs/mcp.md](docs/mcp.md) | The MCP server and which tools an AI may have |

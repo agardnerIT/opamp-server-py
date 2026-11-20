@@ -54,7 +54,10 @@ class FakeClient:
         return self.response
 
 
-def _ok(tag="v0.2.0", **extra):
+# The default "latest" must be newer than whatever the server currently
+# declares, or every release would have to re-touch this fake: a clearly-future
+# stable tag keeps the "newer stable release exists" assertions true forever.
+def _ok(tag="v99.0.0", **extra):
     return FakeResponse(200, {"tag_name": tag, "draft": False, "prerelease": False, **extra})
 
 
@@ -83,10 +86,10 @@ def test_check_sends_only_the_anonymous_request_and_saves_state():
         )
     ]
     assert "0.1.0" not in str(client.calls)
-    assert state["latest_tag"] == "v0.2.0"
+    assert state["latest_tag"] == "v99.0.0"
     assert state["update_available"] is True
     assert state["checked_at"] == NOW.isoformat()
-    assert updates.load_state()["latest_tag"] == "v0.2.0"
+    assert updates.load_state()["latest_tag"] == "v99.0.0"
 
 
 def test_older_and_prerelease_latest_do_not_offer_an_update():
@@ -104,7 +107,7 @@ def test_failure_keeps_the_last_known_tag_and_retries_in_an_hour():
     updates.check_once(client=FakeClient(_ok()), now=NOW)
     later = NOW + timedelta(hours=2)
     state = updates.check_once(client=FakeClient(FakeResponse(500)), now=later)
-    assert state["latest_tag"] == "v0.2.0"
+    assert state["latest_tag"] == "v99.0.0"
     assert state["error"] == "http:500"
     assert state["next_check_at"] == (later + timedelta(hours=1)).isoformat()
 

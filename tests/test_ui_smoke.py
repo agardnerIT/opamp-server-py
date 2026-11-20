@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import base64
 import json
+from urllib.parse import quote_plus
 
 import pytest
 import requests
@@ -192,6 +193,10 @@ class FakeServer:
                 "token": self.minted_token,
                 "token_id": "agtok_smoke",
                 "label": body.get("label") or "",
+                # #144: echo the choice back, the way the server canonicalises it, so
+                # the page can render the snippet from the response and a test can
+                # assert the page sent what the operator picked.
+                "agent_type": body.get("agent_type"),
                 "created_at": "2026-01-01T00:00:00+00:00",
                 "expires_at": None,
                 "max_agents": body.get("max_agents"),
@@ -202,6 +207,7 @@ class FakeServer:
                 {
                     "token_id": minted["token_id"],
                     "label": minted["label"],
+                    "agent_type": minted["agent_type"],
                     "agent_id": None,
                     "bound": False,
                     "created_at": minted["created_at"],
@@ -825,6 +831,7 @@ def token_row(**overrides):
     row = {
         "token_id": "agtok_abc123",
         "label": "prod",
+        "agent_type": None,
         "agent_id": None,
         "bound": False,
         "created_at": "2026-01-01T00:00:00+00:00",
@@ -910,6 +917,63 @@ def test_the_token_page_mints_a_replacement_after_a_revocation(server):
     assert any(
         method == "POST" and url.endswith("/agent-tokens") for method, url in server.calls
     ), "minting must go through the shared admin transport"
+
+
+def test_the_mint_form_asks_for_an_agent_type_and_sends_it(server):
+    """#144: every mint used to end in collector YAML, whatever the fleet was.
+
+    The choice has to reach the server — the *server* owns the profile dictionary and
+    canonicalises the name, so the page sending its own guess would be a second
+    spelling of the same decision.
+    """
+    app = signed_in(AGENT_TOKENS_PAGE, role="admin").run()
+    assert not app.exception, app.exception
+
+    types = [box for box in app.selectbox if box.label == "Agent type"]
+    assert types, "the form never asks which agent type the token is for"
+    # AppTest reports the *formatted* options, so the assertion is on the label the
+    # operator reads (`🔎 osquery`), which is the one the dictionary supplies (#134).
+    assert any("osquery" in option for option in types[0].options), list(types[0].options)
+
+    types[0].set_value("osquery").run()
+    [button for button in app.button if (button.label or "") == "Generate token"][0].click().run()
+    assert not app.exception, app.exception
+
+    assert server.body_for("/agent-tokens")["agent_type"] == "osquery"
+    shown = "\n".join(element.value for element in app.code)
+    # The osquery extension's quickstart, not a collector block: this is the whole point.
+    assert "osquery_opamp" in shown
+    assert "extensions:" not in shown
+
+
+def test_the_default_type_is_the_dictionary_default(server):
+    """No selection must behave exactly as the form did before #144 existed."""
+    app = signed_in(AGENT_TOKENS_PAGE, role="admin").run()
+    box = [box for box in app.selectbox if box.label == "Agent type"][0]
+    assert box.value == "otelcol"
+
+    [button for button in app.button if (button.label or "") == "Generate token"][0].click().run()
+    assert not app.exception, app.exception
+    assert server.body_for("/agent-tokens")["agent_type"] == "otelcol"
+    shown = "\n".join(element.value for element in app.code)
+    assert "extensions:\n  opamp:" in shown
+
+
+def test_the_token_table_says_which_type_each_token_is_for(server):
+    """A token per product needs a column, or the label is the only memory."""
+    server.agent_tokens = [
+        token_row(token_id="agtok_col", agent_type="otelcol"),
+        token_row(token_id="agtok_osq", agent_type="osquery"),
+        token_row(token_id="agtok_old"),
+    ]
+    app = signed_in(AGENT_TOKENS_PAGE, role="admin").run()
+    assert not app.exception, app.exception
+    table = app.dataframe[0].value
+    assert list(table["For"]) == [
+        "🧩 OpenTelemetry Collector",
+        "🔎 osquery",
+        "—",  # minted before the choice existed, so no guess is made
+    ]
 
 
 def test_the_token_page_always_offers_minting(server):
@@ -1512,10 +1576,8 @@ def test_a_submitted_agent_query_filters_the_table(server):
     first = fake_agent("ab" * 16)
     second = fake_agent("cd" * 16)
     server.agents = [first, second]
-    app = signed_in(
-        AGENTS_PAGE,
-        agents_active_query="SELECT * FROM agents WHERE id = '" + second["id"] + "'",
-    )
+    app = signed_in(AGENTS_PAGE)
+    app.query_params["q"] = "SELECT * FROM agents WHERE id = '" + second["id"] + "'"
     app.run()
     assert not app.exception, app.exception
     body = texts(app)
@@ -1526,7 +1588,8 @@ def test_a_submitted_agent_query_filters_the_table(server):
 
 def test_a_refused_agent_query_is_explained(server):
     server.agents = [fake_agent()]
-    app = signed_in(AGENTS_PAGE, agents_active_query="DELETE FROM agents")
+    app = signed_in(AGENTS_PAGE)
+    app.query_params["q"] = "DELETE FROM agents"
     app.run()
     assert not app.exception, app.exception
     body = texts(app)
@@ -1567,7 +1630,8 @@ def save_form_name(app, name):
 
 def test_the_query_can_be_saved_as_a_group_from_the_agent_list(server):
     server.agents = [fake_agent("ab" * 16), fake_agent("cd" * 16)]
-    app = signed_in(AGENTS_PAGE, agents_active_query=QUERY)
+    app = signed_in(AGENTS_PAGE)
+    app.query_params["q"] = QUERY
     app.run()
     assert not app.exception, app.exception
     assert "Save this query as a group" in "\n".join(
@@ -1590,7 +1654,8 @@ def test_the_query_can_be_saved_as_a_group_from_the_agent_list(server):
 def test_saving_prompts_for_the_password_after_the_click_not_before(server):
     """Unsigned: the list is searchable, and the prompt appears only on save."""
     server.agents = [fake_agent("ab" * 16)]
-    app = unsigned_agents_page(agents_active_query=QUERY)
+    app = unsigned_agents_page()
+    app.query_params["q"] = QUERY
     app.run()
     assert not app.exception, app.exception
     assert "Admin sign-in required" not in texts(app), "browsing must not require a password"
@@ -1619,7 +1684,8 @@ def test_saving_prompts_for_the_password_after_the_click_not_before(server):
 def test_a_bad_group_name_is_refused_before_the_password_prompt(server):
     """Two round trips (password, then 422) for a typo the UI can see is wasted."""
     server.agents = [fake_agent()]
-    app = unsigned_agents_page(agents_active_query=QUERY)
+    app = unsigned_agents_page()
+    app.query_params["q"] = QUERY
     app.run()
     click_save_this_query(app)
     save_form_name(app, "prod *")
@@ -1739,6 +1805,58 @@ def test_the_agent_table_link_cannot_mismatch_the_page_path(server):
     assert 'href="?agent_id=' in html
     assert "/Agents?agent_id=" not in html
     assert "/agents?agent_id=" not in html
+
+
+def test_an_agent_link_carries_the_active_query_through(server):
+    """#146: a selection that found the agent should survive the trip into its detail.
+
+    The link is a full page load, and a page load wipes session state — which is where
+    the query used to live. In the URL it rides along, so pressing back re-enters the
+    same selection instead of an unfiltered fleet.
+    """
+    server.agents = [fake_agent("ab" * 16), fake_agent("cd" * 16)]
+    app = signed_in(AGENTS_PAGE)
+    app.query_params["q"] = QUERY
+    app.run()
+    assert not app.exception, app.exception
+
+    html = "\n".join(str(element.value) for element in app.markdown)
+    assert f'href="?agent_id={"ab" * 16}&q={quote_plus(QUERY)}"' in html
+
+
+def test_the_detail_offers_a_way_back_in_the_main_area(server):
+    """#146: the only back affordance was a sidebar button — easy to miss, and
+    invisible with the sidebar collapsed on a narrow window."""
+    agent = fake_agent()
+    server.agents = [agent]
+    app = run(AGENTS_PAGE, server)
+    app.query_params["agent_id"] = agent["id"]
+    app.run()
+    assert not app.exception, app.exception
+
+    assert "← All agents" in "\n".join(b.label or "" for b in app.button), [
+        b.label for b in app.button
+    ]
+
+
+def test_going_back_restores_the_filtered_list(server):
+    """#146: back is a restore, not a restart — the SQL search lives in the URL, so
+    returning from an agent detail re-enters the same selection."""
+    server.agents = [fake_agent("ab" * 16), fake_agent("cd" * 16)]
+    app = run(AGENTS_PAGE, server)
+    app.query_params["agent_id"] = "ab" * 16
+    app.query_params["q"] = "SELECT * FROM agents WHERE id = '" + "cd" * 16 + "'"
+    app.run()
+    assert not app.exception, app.exception
+    assert "Agent Details" in texts(app) or "Agent ID" in texts(app)
+
+    app.button(key="back_to_agents_main").click().run()
+    assert not app.exception, app.exception
+    assert "agent_id" not in dict(app.query_params), "the detail param is cleared"
+    body = texts(app)
+    assert "Showing 1 of 2 agent(s) matching" in body, "the filter is still applied"
+    assert ("cd" * 16) in body
+    assert ("ab" * 16) not in body
 
 
 # --------------------------------------- the agent detail shows the running config

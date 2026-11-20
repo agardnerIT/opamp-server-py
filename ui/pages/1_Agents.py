@@ -3,6 +3,7 @@ import json
 import os
 import re
 import sys
+from urllib.parse import quote_plus
 import streamlit as st
 import pandas as pd
 
@@ -309,6 +310,11 @@ def _empty_fleet():
     usually minted before the first agent connects, so there is nothing to resolve yet
     and the dictionary answers which profile to show (`bootstrap_default`).
 
+    #144: this page no longer names the file to copy into, because it cannot know it.
+    The mint form asks which agent type the token is for and prints that profile's own
+    instructions, so the "copy this into `otelcol-config.yaml`" line that used to sit
+    here would be a lie the moment an operator picked osquery.
+
     The refresh button is not decoration: this state is entered before the agent
     exists, so by the time it connects the operator is looking at a page that has no
     reason to re-run. Streamlit only re-runs on interaction, and nothing on this
@@ -335,11 +341,6 @@ def _empty_fleet():
         st.caption(f"`GET {get_server_url()}/agents` failed: {data['error']}")
         return
     profile = profiles.bootstrap_default()
-    filename = profile.filename_for()
-    st.markdown(
-        f"Copy this into `{filename}`, start a **{profile.display_name}**, "
-        "and this page fills in within a poll interval:"
-    )
     in_container = st.toggle(
         "My agent runs in Docker",
         key="empty_fleet_in_container",
@@ -499,6 +500,19 @@ def _save_query_as_group(active_query):
         st.rerun()
 
 
+def _back_to_agents():
+    """#146: leave the detail view for the list, keeping the URL's context.
+
+    Both back affordances (sidebar and the breadcrumb at the top of the detail) call
+    this. Clearing only `agent_id` is what makes the return a *restore*: `q` (the SQL
+    search), `view_mode` and `group_by` stay in the query string, so the list comes
+    back exactly as it was left — no new search, no lost filter.
+    """
+    if "agent_id" in st.query_params:
+        del st.query_params["agent_id"]
+    st.rerun()
+
+
 agent_id_param = st.query_params.get("agent_id")
 
 if agent_id_param:
@@ -512,10 +526,18 @@ if agent_id_param:
         opa_available = False
     
     with st.sidebar:
-        if st.button("← Back to Agents", key="back_to_agents", use_container_width=True):
-            if "agent_id" in st.query_params:
-                del st.query_params["agent_id"]
-            st.rerun()
+        if st.button(
+            "← Back to Agents",
+            key="back_to_agents",
+            use_container_width=True,
+        ):
+            _back_to_agents()
+    
+    # #146: the sidebar button was the only way back, and it is easy to miss — and
+    # invisible with the sidebar collapsed on a narrow window. A breadcrumb at the top
+    # of the *main* area means the affordance is where the operator is already looking.
+    if st.button("← All agents", key="back_to_agents_main"):
+        _back_to_agents()
     
     data = get_agents()
     agents = data.get("agents", [])
@@ -928,7 +950,10 @@ else:
         schema = {}
 
     if "agents_sql" not in st.session_state:
-        st.session_state["agents_sql"] = ""
+        # #146: a first run on a URL that still carries `q` — coming back from an agent
+        # detail (a full page load), or a shared/bookmarked filtered list — starts with
+        # the query the result list is running, not an empty box over a filtered table.
+        st.session_state["agents_sql"] = st.query_params.get("q") or ""
     if "agents_sql_revision" not in st.session_state:
         # Bumped every time Python sets the query itself. The editor only adopts a
         # pushed-down `value` that carries a new revision, so the rerun after a submit
@@ -958,7 +983,13 @@ else:
         st.session_state["agents_sql_revision"] = (
             int(st.session_state.get("agents_sql_revision") or 0) + 1
         )
-        st.session_state["agents_active_query"] = text.strip() or None
+        # #146: the query also lives in the URL. That is what makes going back from an
+        # agent detail a restore (the list re-runs the same filter) and a filtered list
+        # shareable. An empty submit clears it, exactly as it cleared the session copy.
+        if text.strip():
+            st.query_params["q"] = text.strip()
+        elif "q" in st.query_params:
+            del st.query_params["q"]
         st.rerun()
     elif search_result.get("text") and search_result["text"] != st.session_state.get("agents_sql"):
         # A blur sends the text without submitting, so a later rerun (view mode,
@@ -972,7 +1003,9 @@ else:
         "you mean, save it as a group below."
     )
 
-    active_query = st.session_state.get("agents_active_query")
+    # #146: the URL carries the query, not session state — a page load (an agent link,
+    # a bookmark) wipes the session but not the address bar.
+    active_query = st.query_params.get("q") or None
     agents = all_agents
     if active_query:
         matched, error = _run_agent_query(active_query)
@@ -1031,8 +1064,11 @@ else:
             # reachable on hover: the name is a label, the id is the address.
             agent_id = html.escape(str(a.get("id") or ""), quote=True)
             label = html.escape(labels.get(a.get("id")) or str(a.get("id") or ""), quote=True)
+            # #146: the query rides along, so arriving at the detail and pressing back
+            # re-enters the same selection. URL-encoded: the query is SQL in a href.
+            carry = f"&q={quote_plus(active_query)}" if active_query else ""
             link = (
-                f'<a href="?agent_id={agent_id}" target="_self" title="{agent_id}" '
+                f'<a href="?agent_id={agent_id}{carry}" target="_self" title="{agent_id}" '
                 f'style="color:#0066cc;text-decoration:underline;cursor:pointer">{label}</a>'
             )
             rows.append({
@@ -1130,7 +1166,10 @@ else:
                 label = _markdown_link_text(
                     labels.get(agent.get("id")) or agent.get("id") or ""
                 )
+                # #146: same carried query as the table view — every way into a detail
+                # returns to the selection that listed it.
+                carry = f"&q={quote_plus(active_query)}" if active_query else ""
                 st.markdown(
-                    f"**{health_icon}** [{label}](?agent_id={agent['id']})"
+                    f"**{health_icon}** [{label}](?agent_id={agent['id']}{carry})"
                     f" — {agent_type_badge(agent)}"
                 )

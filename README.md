@@ -103,6 +103,16 @@ curl -s localhost:4320/agents | jq '.count, .agents[].id'   # → 1, then the id
 Ctrl-C stops the collector (`--rm` removes the container); run it again and it
 reconnects as the same agent, because `agent.name` identifies it, not the container.
 
+Clicking an agent opens its detail view, which keeps a way back in sight — at the top
+of the page, not only in the sidebar (#146):
+
+![Agent detail view with the ← All agents button at the top](assets/agent-detail-navigation.png)
+
+Going back restores the list exactly as you left it — the SQL search lives in the URL,
+so the filter and the search box survive the round trip (#146):
+
+![Agent list restored with its SQL filter after going back](assets/agents-list-restored.png)
+
 Two things to adjust if your setup differs:
 
 - **`ADMIN_PASSWORD` set in `.env`**: use it instead of the `docker exec … cat`, which

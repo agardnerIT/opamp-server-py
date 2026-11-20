@@ -61,7 +61,11 @@ name at mint time (`agent_type`): `osquery` gets the extension's own quickstart,
 collector gets the `extensions.opamp` block, `generic` gets plain text, and omitting it
 keeps this server's default profile. That choice is recorded on the token and shown in
 `GET /agent-tokens`, but it is **not enforced**: a fleet token is access, not identity,
-and at mint time there is no agent to check it against. The UI's connect
+and at mint time there is no agent to check it against. The response also names the
+endpoint the snippet advertises (`endpoint`): the server's own answer — `PUBLIC_URL`
+when set, else `http://localhost:4320` — so a UI that reaches the server by an internal
+name (a compose service hostname) never pastes that name into a config the operator
+runs on the host. The UI's connect
 snippet (Help page and the Agents empty state) is not hardcoded either: it reads
 `config_push.agent_auth` from `GET /health` and renders the `headers:` block. Agent
 auth is mandatory, so the snippet always carries a credential and the empty fleet

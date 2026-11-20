@@ -327,6 +327,37 @@ class TestTokenAgentType:
         assert "osquery_opamp" in bound["collector_snippet"]
 
 
+class TestMintedEndpoint:
+    """The mint response names the endpoint the snippet advertises.
+
+    A UI often reaches the server by a name only it can resolve (a compose service
+    name, an internal port). If it rebuilt the snippet from *its* view of the server,
+    the operator would paste an endpoint their collector cannot reach. The server's
+    answer — `PUBLIC_URL`, else localhost — is the one opinion that matters, so it
+    travels with the mint response next to the snippet it was used to build.
+    """
+
+    def test_the_mint_response_carries_the_endpoint(self, client):
+        minted = mint_fleet(client)
+        assert minted["endpoint"] == "http://localhost:4320/v1/opamp"
+        # And the snippet agrees with it — one opinion, not two.
+        assert minted["endpoint"] in minted["collector_snippet"]
+
+    def test_public_url_wins_over_localhost(self, client, monkeypatch):
+        monkeypatch.setenv("PUBLIC_URL", "https://opamp.example.com")
+        minted = mint_fleet(client)
+        assert minted["endpoint"] == "https://opamp.example.com/v1/opamp"
+        assert minted["endpoint"] in minted["collector_snippet"]
+
+    def test_a_bound_token_names_the_endpoint_too(self, client):
+        post(client, UID_A, mint_fleet(client)["token"])
+        bound = client.post(
+            f"/agents/{UID_A.hex()}/token", headers=admin_headers(), json={}
+        ).json()
+        assert bound["endpoint"] == "http://localhost:4320/v1/opamp"
+        assert bound["endpoint"] in bound["collector_snippet"]
+
+
 # --------------------------------------------------------------------- listing
 
 

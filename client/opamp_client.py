@@ -1144,7 +1144,9 @@ class OpampClient:
         agent. Returns ``{"agent_id", "token", "token_id", "label", "created_at",
         "expires_at", "collector_snippet", "note"}`` — the token is shown **once** and
         only its SHA-256 is stored, so keep it. ``collector_snippet`` is a paste-ready
-        ``extensions.opamp.server.<http|ws>.headers`` block.
+        ``extensions.opamp.server.<http|ws>.headers`` block. ``endpoint`` is the
+        OpAMP URL the snippet was written for (``PUBLIC_URL``, else
+        ``localhost:4320``).
 
         ``retire_previous=True`` revokes the agent's older credentials immediately;
         the default retires them on the first successful use of the new token, which
@@ -1185,8 +1187,10 @@ class OpampClient:
         a 422 rather than a silent fall back to ``generic``.
 
         Returns ``{"token", "token_id", "label", "agent_type", "created_at",
-        "expires_at", "max_agents", "collector_snippet", "note"}``. The token is shown
-        **once**; use ``token_id`` to list or revoke it.
+        "expires_at", "max_agents", "endpoint", "collector_snippet", "note"}``. The
+        token is shown **once**; use ``token_id`` to list or revoke it.
+        ``endpoint`` is the OpAMP URL the snippet was written for (``PUBLIC_URL``,
+        else ``localhost:4320``).
         """
         body: Dict[str, Any] = {"label": label}
         if expires_in_days is not None:

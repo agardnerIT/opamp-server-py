@@ -2541,6 +2541,11 @@ def create_fleet_token(
         "created_at": record.get("created_at"),
         "expires_at": record.get("expires_at"),
         "max_agents": record.get("max_agents"),
+        # The endpoint the snippet advertises (`PUBLIC_URL`, else localhost) — the
+        # server's own answer to "where should agents connect?", so a UI inside a
+        # compose network (SERVER_ADDRESS=<service>) cannot bake its internal
+        # service name into a config the operator pastes on the host.
+        "endpoint": agent_auth.snippet_endpoint(),
         "collector_snippet": agent_auth.collector_snippet(
             token, agent_type=record.get("agent_type")
         ),
@@ -2671,6 +2676,7 @@ def create_agent_token(
         "agent_type": record.get("agent_type"),
         "created_at": record.get("created_at"),
         "expires_at": record.get("expires_at"),
+        "endpoint": agent_auth.snippet_endpoint(),
         "collector_snippet": agent_auth.collector_snippet(
             token, agent_type=record.get("agent_type")
         ),

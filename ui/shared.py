@@ -343,8 +343,12 @@ def mint_agent_token_form(
     # fell back to its default, which is what this form showed before the choice existed.
     profile = profiles.get(minted.get("agent_type")) or profiles.bootstrap_default()
     if show_snippet:
+        # The endpoint is the server's answer (`PUBLIC_URL`, else localhost), from the
+        # mint response — not this UI's `SERVER_ADDRESS`. A UI container reaches the
+        # server by its compose service name (`server`), and pasting that into a
+        # config the operator runs on the host produces a block nothing can resolve.
         snippet = connect_snippet(
-            get_server_url(),
+            minted.get("endpoint") or get_server_url(),
             profile=profile,
             in_container=in_container,
             agent_auth="token",

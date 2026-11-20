@@ -452,6 +452,19 @@ def test_the_empty_fleet_shows_a_snippet_built_by_the_shared_helper():
     # in the helper test rather than trusted to prose.
 
 
+def test_a_minted_snippet_advertises_the_servers_endpoint_not_the_uis():
+    """The post-mint YAML names an endpoint the *collector* can reach.
+
+    The UI container talks to the server by its compose service name
+    (`SERVER_ADDRESS=server`), and `server` resolves nowhere outside that network.
+    The mint response therefore carries the server's own answer (`PUBLIC_URL`, else
+    `localhost:4320`) next to the snippet it was used to build, and the form renders
+    from that — falling back to its own URL only when talking to an older server.
+    """
+    shared = source(UI_DIR / "shared.py")
+    assert 'minted.get("endpoint") or get_server_url()' in shared
+
+
 def test_the_empty_fleet_snippet_is_runnable_yaml_for_this_server():
     pytest.importorskip("streamlit")
     yaml = pytest.importorskip("yaml")

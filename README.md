@@ -1,5 +1,8 @@
 # OpAMP Server
 
+![OpenTelemetry Collector supported](https://img.shields.io/badge/OpenTelemetry%20Collector-supported-blue?logo=opentelemetry)
+![osquery supported](https://img.shields.io/badge/osquery-supported-blue?logo=osquery)
+
 ![Warning: Entirely vibecoded](https://img.shields.io/badge/Warning-Entirely%20vibecoded-orange?style=for-the-badge)
 
 ![overview image](assets/overview-image.png)

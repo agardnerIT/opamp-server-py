@@ -513,15 +513,70 @@ def _render_flash(key):
     render(flash.get("message") or "")
 
 
+#: The fields `AdminSession` is built from, in declaring order (#149).
+SESSION_FIELDS = (
+    "token",
+    "name",
+    "role",
+    "expires_at",
+    "idle_timeout_seconds",
+    "method",
+    "extra",
+)
+
+
+def coerce_session(candidate):
+    """`candidate` as the **current** `AdminSession`, or None.
+
+    Sessions are recognised by what they are, not by the identity of the class that
+    made them (#149). Streamlit's hot reload evicts modules from `sys.modules`, and
+    the dev stack bind-mounts `./ui`, so this module can outlive the `AdminSession`
+    class it imported at startup: `admin_session.login()` then returns an instance of
+    the *new* class, `isinstance` against the stale one is False, and a perfectly
+    good sign-in raised `TypeError: set_session() expects an AdminSession`. The same
+    asymmetry logged an operator out on the rerun after a reload, because
+    `get_session()` rejected the session it had just been given.
+
+    A reload does not change the class's *definition*, only the class object, so a
+    session from a previous generation is rebuilt through the current class. This is
+    not a relaxation: the shape is still checked, and `AdminSession.__post_init__`
+    still refuses an empty token or an unknown role, so a dict, a string or a
+    stranger is not a session.
+    """
+    if candidate is None:
+        return None
+    current = admin_session.AdminSession
+    if isinstance(candidate, current):
+        return candidate
+    if type(candidate).__name__ != current.__name__:
+        return None
+    if type(candidate).__module__ != current.__module__:
+        return None
+    fields = {name: getattr(candidate, name) for name in SESSION_FIELDS if hasattr(candidate, name)}
+    try:
+        return current(**fields)
+    except (TypeError, ValueError):
+        return None
+
+
 def get_session():
-    """The current `AdminSession`, or None. Never a password."""
+    """The current `AdminSession`, or None. Never a password.
+
+    A session minted before a hot reload is re-stored as the current class, so
+    `st.session_state` cannot keep handing out objects from a previous generation of
+    `ui/session.py` (#149). Nothing else reads the key directly.
+    """
     _forget_legacy_password()
-    session = st.session_state.get(SESSION_KEY)
-    return session if isinstance(session, AdminSession) else None
+    stored = st.session_state.get(SESSION_KEY)
+    session = coerce_session(stored)
+    if session is not None and session is not stored:
+        st.session_state[SESSION_KEY] = session
+    return session
 
 
 def set_session(session):
-    if not isinstance(session, AdminSession):
+    session = coerce_session(session)
+    if session is None:
         raise TypeError("set_session() expects an AdminSession")
     st.session_state[SESSION_KEY] = session
     _forget_legacy_password()
@@ -615,6 +670,7 @@ def _login_form(status, required_role, replacing=None):
                 "The shared `ADMIN_PASSWORD` is configured, so any name (or none) will "
                 "do. Create a principal for per-person identity and roles."
             )
+            st.code("cat data/admin_password", language="bash")
         password = st.text_input(
             "Password", type="password", key=f"admin_login_password_{attempts}"
         )
@@ -636,7 +692,10 @@ def _login_form(status, required_role, replacing=None):
 
     try:
         session = admin_session.login(SERVER_URL, name, password)
-    except AuthError as exc:
+    except admin_session.AuthError as exc:
+        # Resolved through `admin_session`, not the name imported at startup: a hot
+        # reload replaces the class, and a stale binding here would let a refused
+        # login escape as a traceback instead of a sentence (#149).
         # The password is dropped here: it was never stored, and this local goes out
         # of scope on the rerun. Only the reason survives.
         st.session_state["admin_login_attempts"] = attempts + 1

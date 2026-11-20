@@ -15,7 +15,9 @@ the server (that is `tests/test_auth.py`'s job).
 from __future__ import annotations
 
 import base64
+import importlib
 import json
+import sys
 from urllib.parse import quote_plus
 
 import pytest
@@ -583,6 +585,23 @@ def test_unsigned_admin_page_renders_the_shared_login_form(server):
     assert server.methods_for("/alerts") == []
 
 
+def test_shared_password_login_hints_where_to_find_it(server):
+    # #147: in the legacy shared-password mode, the login form points at the
+    # generated file instead of leaving the operator to grep the docs.
+    server.auth_mode = "password"
+    app = run(ALERTS_PAGE, server)
+    assert not app.exception, app.exception
+    assert "Admin sign-in required" in texts(app)
+    assert not any(field.label == "Name" for field in app.text_input)
+    assert "cat data/admin_password" in [el.value for el in app.code]
+
+
+def test_principals_login_does_not_hint_at_the_password_file(server):
+    # The hint is only meaningful when the shared password is in play.
+    app = run(ALERTS_PAGE, server)
+    assert not any("admin_password" in (el.value or "") for el in app.code)
+
+
 def test_login_failure_message_survives_the_rerun(server):
     app = run(ALERTS_PAGE, server)
     server.login_status = 401
@@ -614,6 +633,98 @@ def test_successful_login_keeps_a_token_and_never_a_password(server):
     assert session.token == TOKEN
     # Every privileged call carried the bearer token, never HTTP Basic.
     assert all("Basic" not in str(call) for call in server.calls)
+
+
+# ------------------------------------------------- #149: the session survives a reload
+#
+# Streamlit's watcher evicts modules from `sys.modules` whenever a watched file
+# changes, and `docker-compose.dev.yml` bind-mounts `./ui`. `ui.shared` can therefore
+# keep a reference to the *previous* `AdminSession` class while `admin_session.login()`
+# hands back an instance of a newer one — a sign-in that succeeds on the server and
+# then dies locally, or a session that is dropped on the rerun after a reload.
+
+
+def test_a_login_survives_the_session_class_being_reloaded(server):
+    """#149: the reported `TypeError: set_session() expects an AdminSession`.
+
+    A hot reload re-executes `ui/session.py` while `ui/shared.py` stays resident, so
+    the page keeps the *previous* class while `admin_session.login()` returns an
+    instance of the new one. Signing in then died in `set_session` with a traceback
+    instead of showing the page, even though the server had said yes.
+    """
+    from ui import shared as ui_shared  # resident: it holds the older binding
+
+    session_before = ui_shared.admin_session.AdminSession
+    importlib.reload(ui_session)
+    assert ui_shared.admin_session.AdminSession is not session_before, (
+        "a reload must leave the page holding an older class — that is the state "
+        "#149 was reported in"
+    )
+
+    app = run(ALERTS_PAGE, server)
+    sign_in(app)
+
+    assert not app.exception, app.exception
+    assert "Alerts" in texts(app)
+    assert app.session_state["admin_session"].token == TOKEN
+
+
+def test_a_session_survives_the_page_module_being_reimported(server):
+    """The other half of #149: a reload must not sign the operator out.
+
+    When the watcher evicts and re-imports the modules, `st.session_state` still
+    holds the session the *previous* generation minted. `get_session()` judged it by
+    class identity, said None, and the next render asked a signed-in operator to sign
+    in again with no explanation.
+    """
+    from ui import shared as gen_one_shared  # noqa: F401 - resident before the sign-in
+
+    app = run(ALERTS_PAGE, server)
+    sign_in(app)
+    assert not app.exception, app.exception
+    assert "Alerts" in texts(app)
+
+    saved = {name: sys.modules.pop(name) for name in ("ui.shared", "ui.session")}
+    try:
+        reloaded = importlib.import_module("ui.shared")
+        assert sys.modules["ui.session"] is not saved["ui.session"]
+        app.run()
+        assert not app.exception, app.exception
+        assert "Admin sign-in required" not in texts(app), (
+            "the signed-in operator was sent back to the sign-in form"
+        )
+        session = app.session_state["admin_session"]
+        assert session.token == TOKEN
+        # Still an authorising session for the page's role, in whatever generation of
+        # the class the page module is holding.
+        assert session.can("operator")
+    finally:
+        sys.modules.update(saved)
+
+
+def test_a_non_session_is_still_refused():
+    """#149's tolerance is for the class, not for anything that looks like one."""
+    from ui import shared as ui_shared
+
+    for impostor in ({}, "admin", None, 42, object()):
+        assert ui_shared.coerce_session(impostor) is None
+
+    class AdminSession:  # the right name, the wrong module
+        token, name, role = "t", "a", "admin"
+
+    assert ui_shared.coerce_session(AdminSession()) is None
+
+    # The right name and module, but a role that makes the server refuse every call.
+    class Stand_in:
+        token, name, role = "t", "a", "root"
+
+    Stand_in.__name__ = "AdminSession"
+    Stand_in.__module__ = ui_shared.admin_session.AdminSession.__module__
+    assert ui_shared.coerce_session(Stand_in()) is None
+
+    # ... and the same shape with a valid role is rebuilt rather than rejected.
+    Stand_in.role = "admin"
+    assert ui_shared.coerce_session(Stand_in()).token == "t"
 
 
 def test_expired_session_returns_to_the_login_form_with_a_sentence(server):

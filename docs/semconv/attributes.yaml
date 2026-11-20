@@ -24,6 +24,28 @@ groups:
   id: registry.opamp.agent.fluentbit
   type: attribute_group
 - attributes:
+  - brief: The `service.name` value that identifies a osquery agent (osquery's profile, prefix match).
+    examples:
+    - osqueryd
+    id: opamp.agent.osquery.match.service_name
+    note: Projected from the profile dictionary by `scripts/semconv_project.py`; the dictionary is the
+      source of truth and this attribute is never emitted by an agent.
+    stability: development
+    type: string
+  - brief: Any `AgentDescription` attribute key prefixed `osquery.`, which identifies a osquery agent
+      (osquery's profile, attribute-key prefix match).
+    examples:
+    - osquery.
+    id: opamp.agent.osquery.match.attribute_prefix_osquery
+    note: Projected from the profile dictionary by `scripts/semconv_project.py`; the dictionary is the
+      source of truth and this attribute is never emitted by an agent.
+    stability: development
+    type: string
+  brief: Evidence the server uses to recognise a osquery agent, declared in `server/profiles/data/osquery.yaml`.
+  display_name: osquery identity
+  id: registry.opamp.agent.osquery
+  type: attribute_group
+- attributes:
   - brief: The `service.name` value that identifies a OpenTelemetry Collector agent (otelcol's profile,
       prefix match).
     examples:

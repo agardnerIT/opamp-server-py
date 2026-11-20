@@ -344,7 +344,9 @@ Rules that matter when acting on this:
 Check `agent_type` (and `components_status`) before reasoning about components,
 validation or reports. `otelcol` is judged by collector rules; `fluentbit` (Fluent Bit via
 `opamp-observe/opamp-core`) is judged by INI rules and its components come from its config;
-`generic` is stored and relayed as **opaque text** and its reports say "not applicable".
+`osquery` is judged by its JSON config shape (`schedule`/`packs`, object key `osquery.json`)
+and its scheduled queries are the inventory; `generic` is stored and relayed as **opaque
+text** and its reports say "not applicable".
 A `generic`/unchecked revision needs `confirm_unchecked_structure` on approve — that is the
 server asking a human to accept that nothing validated the body. Full model:
 `docs/agent-profiles.md`.

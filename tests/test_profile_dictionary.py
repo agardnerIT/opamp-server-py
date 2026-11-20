@@ -342,6 +342,62 @@ snippet: |
         assert profiles.get("fluentbit").telemetry is None
 
 
+class TestTheOsqueryProfile:
+    """#141: the first JSON product, and the first profile to match an attribute *key*.
+
+    The captured payload reports `service.name: osqueryd`, but the durable signal is the
+    extension's own `osquery.*` namespace: a renamed instance still reports it, and no
+    other product has a reason to.
+    """
+
+    def test_it_ships_and_declares_the_extension_s_contract(self):
+        osquery = profiles.get("osquery")
+        assert osquery is not None
+        assert osquery.filename_for("application/json") == "osquery.json"
+        assert osquery.validates_structure is True
+        assert osquery.structure.ENGINE == "osquery"
+        assert osquery.has_components is True
+        # Neither fleet report is a question this product can answer (#120).
+        assert osquery.reports == ("fleet", "agent")
+        # The schedule is an address in a merged config, as it is for a collector component.
+        assert osquery.address_sections == ("schedule", "packs")
+
+    def test_an_osquery_attribute_key_is_evidence_of_identity(self):
+        agent = _agent(
+            description={
+                "identifyingAttributes": [
+                    {"key": "service.name", "value": {"stringValue": "renamed"}}
+                ],
+                "nonIdentifyingAttributes": [
+                    {"key": "osquery.pid", "value": {"intValue": 3510}}
+                ],
+            }
+        )
+        assert (agent.profile.name, agent.type_info()["agent_type_source"]) == (
+            "osquery",
+            "declared",
+        )
+
+    def test_a_rename_of_service_name_does_not_need_a_server_release(self):
+        assert profiles.resolve(_named("osqueryd-5.24")).name == "osquery"
+
+    def test_an_attr_prefix_rule_may_not_also_carry_a_value_match(self, dictionary):
+        """Two kinds of match in one rule is an ambiguity, not a convenience."""
+        _write(
+            dictionary,
+            "mixed",
+            MINIMAL.format(name="mixed", display_name="Mixed", priority=1)
+            + "identity:\n"
+            "  match_any:\n"
+            "    - attr: service.name\n"
+            "      attr_prefix: osquery.\n"
+            "      prefix: [osqueryd]\n",
+        )
+        with pytest.raises(loader.ProfileLoadError) as caught:
+            loader.load_all(dictionary, strict=True)
+        assert "exactly one of attr / attr_prefix" in str(caught.value)
+
+
 class TestABadFileDoesNotTakeTheServerDown:
     def test_one_bad_file_leaves_the_others_and_the_fleet_served(self, dictionary):
         _write(dictionary, "good", MINIMAL.format(name="good", display_name="Good", priority=10))

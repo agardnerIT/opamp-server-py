@@ -1,0 +1,90 @@
+# osquery — the second non-collector profile, and the first that speaks JSON (#141).
+#
+# Written from the payload the issue recorded (osqueryd 5.24.0 through
+# `agardnerit/osquery-opamp` 0.1.0) plus the osquery facts this repository already
+# encodes: the extension reports its config as `application/json` under the object key
+# `osquery.json` (it refuses any other key), and `schedule.<query name>` is an address
+# that collides with a local config source (#131/#119).
+
+name: osquery
+display_name: osquery
+icon: "🔎"
+priority: 80
+summary: >-
+  osquery JSON: scheduled queries and packs are read from the config document the
+  extension reports, structural validation covers the JSON config shape, and the
+  collector-specific reports and telemetry views do not describe it.
+
+config_formats:
+  # `application/json` is what the extension declares. It is a *format*, not a product,
+  # so it is not distinctive: every agent may hand this server a JSON object, and only
+  # this profile's engine judges whether the object is an osquery config.
+  - content_types:
+      - application/json
+      - text/json
+    default_filename: osquery.json
+    distinctive: false
+
+# The rules are osquery's own (`schedule`, `packs`, `options`), and the inventory comes
+# from the live config because the extension reports no `AvailableComponents` (#141).
+validates_structure: true
+structure:
+  engine: osquery
+  # Two config sources scheduling the same query name is a merge conflict — osquery
+  # reports `config_conflict` rather than overriding, exactly like a duplicate component
+  # id in a collector (#119).
+  address_sections: [schedule, packs]
+components_engine: osquery
+
+identity:
+  match_any:
+    # The spec's convention: `service.name` names the agent type. The issue's captured
+    # payload reports `service.name: osqueryd`.
+    - attr: service.name
+      prefix:
+        - osqueryd
+    # And the extension labels its whole payload namespace `osquery.`. No other product
+    # has a reason to do that, so a single attribute key is evidence even when
+    # `service.name` is renamed — which is why the profile matches on the **key** here
+    # rather than enumerating a dozen values that will change between releases.
+    - attr_prefix: "osquery."
+
+# Neither fleet report applies: "heavy" counts *unused* components and every scheduled
+# query came from the live config, and "outdated" needs component versions osquery does
+# not report. Both skip this profile by declaration and say so (#120).
+reports: [fleet, agent]
+
+# No telemetry block: osquery does not push OTLP to this server, and a panel of empty
+# tiles would be a lie (#121/#122).
+
+guidance: >-
+  The extension, not this server, owns the daemon: it reports what osquery is running
+  and hands it a merged config. The object name is part of the contract — a push must
+  use **`osquery.json`** with `application/json`; the extension refuses any other key and
+  reports FAILED, which pauses the rollout. Structural checks here are best effort: the
+  rules read the JSON document's shape (`schedule`, `packs`, `options`), but this server
+  cannot run `osqueryd --config_check` on the agent host, so an approver is the last
+  check. osquery merges every config source it is handed, so a query name already
+  scheduled by a local file is a conflict, not an override: remove it from one source
+  before pushing.
+
+# There is no `onboarding_snippet`: the endpoint and credential live in the OpAMP
+# extension's configuration, not in `osquery.json`, so this server has no complete file
+# it can honestly write for a new agent (#121). The bootstrap block below is what an
+# operator actually needs: where to point the extension and how to start osqueryd.
+snippet: |
+  # osquery does not speak OpAMP itself: the osquery-opamp extension does, and osqueryd
+  # must load and require it. Put this server's endpoint and credential in the
+  # extension's own configuration:
+  #
+  #   endpoint: {endpoint}
+  #   Authorization: Bearer {token}
+  #
+  # Then start osqueryd with the OpAMP config plugin (both flags are required — without
+  # --extensions_require osqueryd exits with "Unknown registry plugin: opamp"):
+  #
+  #   osqueryd --config_plugin=opamp \
+  #            --extensions_require=opamp --extensions_timeout=30
+  #
+  # A pushed config must be the object "osquery.json" (content type application/json),
+  # because that is the name the extension applies and reports.

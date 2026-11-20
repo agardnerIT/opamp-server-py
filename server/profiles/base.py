@@ -133,17 +133,26 @@ def flatten_description(description: Any) -> Dict[str, str]:
 
 @dataclass(frozen=True)
 class IdentityRule:
-    """One `AgentDescription` attribute test: `{attr, prefix: [...]}` or `{attr, equals: [...]}`.
+    """One `AgentDescription` attribute test.
 
-    Prefix rather than equality is the common case because `service.name` carries the
-    distro as well as the product (`otelcol`, `otelcol-contrib`,
-    `unknown_service:otelcol`), and a new distro must not need a server release.
-    Exactly one of the two may be set; the loader rejects a rule with both or neither.
+    Two kinds, both evidence the agent supplied about itself:
+
+    * `{attr, prefix: [...]}` / `{attr, equals: [...]}` reads an attribute's **value**.
+      Prefix rather than equality is the common case because `service.name` carries the
+      distro as well as the product (`otelcol`, `otelcol-contrib`,
+      `unknown_service:otelcol`), and a new distro must not need a server release.
+    * `{attr_prefix: "osquery."}` only asks whether **any attribute key** starts with the
+      prefix. That is how a product that names its whole attribute namespace identifies
+      itself; the alternative — enumerating a dozen `osquery.*` keys — would break the
+      moment the extension adds one.
+
+    Exactly one form is set; the loader rejects a rule that mixes them.
     """
 
-    attr: str
+    attr: str = ""
     prefix: Tuple[str, ...] = ()
     equals: Tuple[str, ...] = ()
+    attr_prefix: str = ""
 
     def matches(self, attrs: Mapping[str, str]) -> bool:
         """Case-insensitive, both sides (#123).
@@ -153,12 +162,17 @@ class IdentityRule:
         worked for lower-case entries would fail silently — the agent would just resolve
         to the fallback profile with no error anywhere.
         """
+        if self.attr_prefix:
+            wanted = self.attr_prefix.casefold()
+            return any(str(key).casefold().startswith(wanted) for key in attrs)
         value = (attrs.get(self.attr) or "").casefold()
         if self.prefix:
             return any(value.startswith(wanted.casefold()) for wanted in self.prefix)
         return value in {entry.casefold() for entry in self.equals}
 
     def to_dict(self) -> Dict[str, Any]:
+        if self.attr_prefix:
+            return {"attr_prefix": self.attr_prefix}
         rule: Dict[str, Any] = {"attr": self.attr}
         if self.prefix:
             rule["prefix"] = list(self.prefix)

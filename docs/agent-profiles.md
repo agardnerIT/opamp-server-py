@@ -32,12 +32,21 @@ fallback`; the winner and *why* are always reported (`agent_type_source`,
 |---|---|---|---|---|---|
 | `otelcol` | `service.name` prefixed `otelcol` / `io.opentelemetry.collector`; component sections | YAML/JSON | `server/profiles/otelcol.py` (pipelines, invariants, inventory) | from `AvailableComponents` + config | fleet, agent, heavy, outdated |
 | `fluentbit` | `service.type` prefixed `Fluent Bit`; `[SERVICE]` in the config | INI (`text/plain`) and YAML | `server/profiles/fluentbit.py` (best effort: `[SERVICE]`, ≥1 input/output, `Name` per plugin) | from the config document `opamp-core` reports | fleet, agent |
+| `osquery` | `service.name` prefixed `osqueryd`; any attribute key prefixed `osquery.` | JSON (`application/json`, object key `osquery.json`) | `server/profiles/osquery.py` (best effort: `schedule`/`packs` shape, a `query` per scheduled query, positive intervals) | from the config document: `schedule` queries and `packs` | fleet, agent |
 | `generic` | nothing matches | anything, opaque | none | none (`unsupported`) | none |
 
 `fluentbit` was written against real captured payloads (`opamp-observe/opamp-core` 0.6.0
 supervising Fluent Bit 5.1.5, see #123): identity comes from `service.type` because
 `service.name` is just `"Fluentbit"`, and the inventory comes from the INI document because
 the supervisor sends no `AvailableComponents` at all.
+
+`osquery` (#141) is the first JSON product: the OpAMP extension reports the running
+config as `application/json` under the object key `osquery.json` (it refuses any other
+key), so the profile claims that format, reads scheduled queries and packs as its
+inventory, and validates the JSON document's shape. Identity accepts the captured
+`service.name: osqueryd`, but the durable signal is the extension's own namespace: **any
+attribute key prefixed `osquery.`** is evidence, which is what `identity.match_any`'s
+`{attr_prefix: …}` form is for.
 
 ## The dictionary on disk
 
@@ -71,6 +80,8 @@ validates_structure: true      # requires `components` — see the guardrails
 identity:
   match_any:                   # evidence from AgentDescription
     - {attr: service.name, prefix: [otelcol, io.opentelemetry.collector]}
+    # Or, for a product that owns an attribute namespace: any key with this prefix.
+    - {attr_prefix: "osquery."}
   sniff:                       # evidence from the payloads
     component_sections_any: [receivers, exporters]
     config_sections_any: [receivers, service]
@@ -255,4 +266,4 @@ prevent.
 - `server/profiles/engines.py` — the closed engine registries.
 - `server/config_validation.py` — the format layer every profile shares.
 - #117 (the epic), #118/#134 (the dictionary), #119 (profile-owned validation), #120
-  (scoped reports), #123 (the Fluent Bit proof).
+  (scoped reports), #123 (the Fluent Bit proof), #141 (the osquery proof).

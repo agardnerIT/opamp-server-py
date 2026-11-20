@@ -32,6 +32,8 @@ agent's own `service.name` stays an existing semantic convention that a rule
 |---|---|---|---|
 | Fluent Bit | `opamp.agent.fluentbit.match.service_type` | prefix | `Fluent Bit`, `FluentBit`, `fluent-bit` |
 | Fluent Bit | `opamp.agent.fluentbit.match.service_name` | prefix | `fluent-bit`, `fluentbit` |
+| osquery | `opamp.agent.osquery.match.service_name` | prefix | `osqueryd` |
+| osquery | `opamp.agent.osquery.match.attribute_prefix_osquery` | attribute-key prefix | `osquery.` |
 | OpenTelemetry Collector | `opamp.agent.otelcol.match.service_name` | prefix | `io.opentelemetry.collector`, `opentelemetry-collector`, `otelcol` |
 
 ## Telemetry

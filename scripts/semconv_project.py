@@ -99,6 +99,38 @@ def identity_attributes(profiles: Iterable[Any]) -> List[Dict[str, Any]]:
     for profile in sorted(profiles, key=lambda item: item.name):
         attributes: List[Dict[str, Any]] = []
         for rule in profile.identity_match_any:
+            if rule.attr_prefix:
+                attribute_id = (
+                    f"{NAMESPACE}.{_slug(profile.name)}.match.attribute_prefix_"
+                    f"{_slug(rule.attr_prefix)}"
+                )
+                check_key(attribute_id)
+                if attribute_id in seen:
+                    raise ProjectionError(
+                        f"duplicate attribute id {attribute_id!r} "
+                        f"(profiles {seen[attribute_id]!r} and {profile.name!r})"
+                    )
+                seen[attribute_id] = profile.name
+                attributes.append(
+                    {
+                        "id": attribute_id,
+                        "type": "string",
+                        "stability": "development",
+                        "brief": (
+                            f"Any `AgentDescription` attribute key prefixed "
+                            f"`{rule.attr_prefix}`, which identifies a "
+                            f"{profile.display_name} agent ({profile.name}'s profile, "
+                            "attribute-key prefix match)."
+                        ),
+                        "note": (
+                            "Projected from the profile dictionary by "
+                            "`scripts/semconv_project.py`; the dictionary is the source "
+                            "of truth and this attribute is never emitted by an agent."
+                        ),
+                        "examples": [rule.attr_prefix],
+                    }
+                )
+                continue
             if not (rule.prefix or rule.equals):
                 continue
             attribute_id = f"{NAMESPACE}.{_slug(profile.name)}.match.{_slug(rule.attr)}"
@@ -270,7 +302,12 @@ def render_doc(profiles: Iterable[Any]) -> str:
     for group in attribute_groups:
         profile = group["display_name"].replace(" identity", "")
         for attribute in group["attributes"]:
-            rule_kind = "prefix" if "match." in attribute["id"] else "equal"
+            if ".match.attribute_prefix_" in attribute["id"]:
+                rule_kind = "attribute-key prefix"
+            elif "match." in attribute["id"]:
+                rule_kind = "prefix"
+            else:
+                rule_kind = "equal"
             values = ", ".join(f"`{value}`" for value in attribute["examples"])
             lines.append(
                 f"| {profile} | `{attribute['id']}` | {rule_kind} | {values} |"

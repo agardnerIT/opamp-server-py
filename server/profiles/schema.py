@@ -24,6 +24,7 @@ Top-level shape, with the `otelcol` file as the worked example
       match_any:
         - attr: service.name
           prefix: ["otelcol", "io.opentelemetry.collector"]
+        - attr_prefix: "osquery."     # any attribute key with this prefix
       sniff:
         component_sections_any: [receivers, exporters]
         config_sections_any: [receivers, service]
@@ -116,14 +117,34 @@ class ConfigFormatDocument(_Strict):
 
 
 class IdentityRuleDocument(_Strict):
-    """`{attr, prefix: [...]}` or `{attr, equals: [...]}` — exactly one."""
+    """One identity test: `{attr, prefix|equals}` or `{attr_prefix}`.
 
-    attr: str
+    The first form reads an attribute's **value**. The second only asks whether the
+    agent reports *any* attribute whose key starts with a prefix (`osquery.`), which is
+    evidence from the payload rather than from a product-name convention — no other
+    product has a reason to emit another product's namespace.
+    """
+
+    attr: str = ""
+    attr_prefix: str = ""
     prefix: Tuple[str, ...] = ()
     equals: Tuple[str, ...] = ()
 
     @model_validator(mode="after")
     def _exactly_one(self):
+        if bool(self.attr) == bool(self.attr_prefix):
+            raise ValueError(
+                "identity.match_any entry needs exactly one of attr / attr_prefix"
+            )
+        if self.attr_prefix:
+            if self.prefix or self.equals:
+                raise ValueError(
+                    "an attr_prefix rule matches the attribute *key*, so prefix/equals "
+                    "do not apply to it"
+                )
+            if not self.attr_prefix.strip():
+                raise ValueError("identity.match_any attr_prefix may not be blank")
+            return self
         if bool(self.prefix) == bool(self.equals):
             raise ValueError("identity.match_any entry needs exactly one of prefix/equals")
         if not self.attr.strip():

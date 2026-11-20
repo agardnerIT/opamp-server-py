@@ -98,7 +98,12 @@ def compile_document(document: ProfileDocument) -> AgentProfile:
     )
 
     rules = tuple(
-        IdentityRule(attr=rule.attr, prefix=rule.prefix, equals=rule.equals)
+        IdentityRule(
+            attr=rule.attr,
+            prefix=rule.prefix,
+            equals=rule.equals,
+            attr_prefix=rule.attr_prefix,
+        )
         for rule in document.identity.match_any
     )
 

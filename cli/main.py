@@ -1519,19 +1519,43 @@ def agents_list(
         help="SQL selection (#132), e.g. \"SELECT * FROM agents WHERE host_arch = 'amd64'\". "
         "Wins over --healthy/--status/--attr. See `agents query-schema`.",
     ),
+    group: Optional[str] = typer.Option(
+        None, "--group", "-g",
+        help="A saved selector (#148), by name or id. Wins over --healthy/--status/--attr; "
+        "combine with --query is refused. List saved selectors with `opampctl groups list`.",
+    ),
 ) -> None:
-    """List agents with optional health/status/metadata filters, or a SQL selection.
+    """List agents with optional health/status/metadata filters, a SQL selection or a saved group.
 
     Each entry carries `name` (#137): the `agent.name` the agent declared, or null.
     It is a label, not an identity — pass the agent's `id` to every other command.
     """
+    if group is not None and query is not None:
+        raise typer.BadParameter(
+            "--query and --group are both selectors; pass one, not both"
+        )
     if _settings.offline:
         from server import agent_query
         from server.agent_auth import credential_summaries
-        from server.state import SQLiteCredentialStore
+        from server.groups import resolve_members
+        from server.state import GroupError, SQLiteCredentialStore, SQLiteGroupStore
 
         states = _offline_states()
-        if query is not None:
+        group_result = None
+        if group is not None:
+            record = SQLiteGroupStore(_settings.db).find(group)
+            if record is None:
+                _fail(
+                    "HTTP 404",
+                    data={"detail": f"group {group!r} not found in {_settings.db}"},
+                )
+            try:
+                group_result = resolve_members(record, states)
+            except GroupError as exc:
+                _fail(f"HTTP {exc.status_code}", data={"detail": exc.detail})
+            members = set(group_result["members"])
+            states = [state for state in states if state.agent_id in members]
+        elif query is not None:
             try:
                 states = agent_query.run(query, states)["agents"]
             except agent_query.AgentQueryError as exc:
@@ -1561,7 +1585,15 @@ def agents_list(
             "count": len(dicts),
             "filters": {"offline_db": str(_settings.db)},
         }
-        if query is not None:
+        if group_result is not None:
+            payload["group"] = {
+                "name": record.get("name"),
+                "kind": group_result["base"],
+                "query": group_result["query"],
+                "definition": group_result["definition"] or None,
+                "count": group_result["count"],
+            }
+        elif query is not None:
             payload["query"] = query
         _emit(payload)
         return
@@ -1572,7 +1604,7 @@ def agents_list(
     for item in attr:
         key, _, value = item.partition("=")
         kwargs.setdefault(key, []).append(value)
-    _run(lambda oc: oc.list_agents(healthy=healthy, status=status, **kwargs))
+    _run(lambda oc: oc.list_agents(healthy=healthy, status=status, group=group, **kwargs))
 
 
 @agents_app.command("query-schema")

@@ -211,6 +211,7 @@ def list_agents(
     status: Optional[str] = None,
     attributes: Optional[Dict[str, Any]] = None,
     query: Optional[str] = None,
+    group: Optional[str] = None,
 ) -> str:
     """List connected agents, optionally filtered.
 
@@ -227,12 +228,16 @@ def list_agents(
             "SELECT * FROM agents WHERE host_arch = 'amd64'". Wins over the other
             arguments. Read `agent_query_schema` first for the columns and the
             values live agents actually report.
+        group: A saved selector (#148), by name or id. Resolves the group's
+            definition or query plus its pins against the live fleet and returns
+            exactly its members. Wins over the other arguments; combine with
+            `query` is refused (400). List the saved selectors with `list_groups`.
     """
     def call(oc: OpampClient):
         attrs = attributes or {}
         if query is not None:
             return oc.query_agents(query)
-        return oc.list_agents(healthy=healthy, status=status, **attrs)
+        return oc.list_agents(healthy=healthy, status=status, group=group, **attrs)
     return _tool(call)
 
 

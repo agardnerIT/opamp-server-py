@@ -81,6 +81,7 @@ opampctl agents compliance <agent-id>
 |------|----------|----------|-----|
 | List/filter agents | `agents list [--healthy] [--status] [--attr k=v]` | `list_agents` | `GET /agents` |
 | Select agents with SQL | `agents list --query "SELECT ..."` | `query_agents` | `GET /agents?q=...` |
+| Filter agents by a saved group (#148) | `agents list --group <name>` | `list_agents(group=...)` | `GET /agents?group=<name>` |
 | Columns + values to write SQL against | `agents query-schema` | `agent_query_schema` | `GET /agents/query/schema` |
 | Agent details | `agents get <id>` | `get_agent` | `GET /agent/{id}` |
 | Agent metrics | `agents metrics <id>` | `get_agent_metrics` | `GET /agent/{id}/metrics` |

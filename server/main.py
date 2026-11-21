@@ -2219,10 +2219,20 @@ def list_agents(
             "healthy/status/attribute parameters; see GET /agents/query/schema."
         ),
     ),
+    group: Optional[str] = Query(
+        default=None,
+        description=(
+            "A saved group (#111/#148) — name or id. Resolves the selector live "
+            "(plus its include/exclude pins) and returns exactly its members. "
+            "Wins over the healthy/status/attribute parameters; combine with `q` "
+            "is refused (400). See GET /groups for the saved selectors."
+        ),
+    ),
 ):
     """List agents, optionally filtered.
 
-    Reserved query params: ``healthy``, ``status`` (alias ``remote_config_status``).
+    Reserved query params: ``healthy``, ``status`` (alias ``remote_config_status``),
+    ``q`` (#132) and ``group`` (#148).
     Any other query param filters on the agent's OpAMP description metadata
     (identifyingAttributes + nonIdentifyingAttributes), e.g. ``?environment=prod``.
     Repeated params match any value (OR): ``?environment=prod&environment=staging``.
@@ -2231,6 +2241,11 @@ def list_agents(
     ``q`` runs a read-only SQL selection over a throwaway in-memory table built from
     live agents (#132); the other filter parameters are ignored when it is present.
     The schema and live values for writing a query are at ``GET /agents/query/schema``.
+
+    ``group`` names a saved selector (#148): the members are what the group's
+    definition or query matches *now*, plus its include/exclude pins — the same
+    resolution a group-scoped push runs, so the list and the blast radius can
+    never disagree. An archived group is a 409, exactly as a push target is.
 
     Unauthenticated. Returns `{"agents": [...], "count": n, "filters": {...}}`.
     Every entry carries `name` (#137) — the `agent.name` the agent declared in its
@@ -2243,6 +2258,18 @@ def list_agents(
     """
     remote_config_status = remote_config_status if remote_config_status is not None else status
     query_result: Optional[Dict[str, Any]] = None
+    group_result: Optional[Dict[str, Any]] = None
+    if q is not None and group is not None:
+        # Two selectors cannot both be the selector. Refusing beats inventing an
+        # intersection whose semantics nobody could predict from reading either one.
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "provide one selector: 'q' (SQL) or 'group', not both",
+                "hint": "to re-run a group's query with edits, GET the group first "
+                "(its query is in the payload) and pass that as 'q'",
+            },
+        )
     if q is not None:
         # A SQL query is the selector; mixing it with the ad-hoc params would mean two
         # filters whose combination nobody can predict from reading either one.
@@ -2252,8 +2279,31 @@ def list_agents(
             raise HTTPException(status_code=exc.status_code, detail=exc.detail)
         selected = list(query_result["agents"])
         attr_filters = {}
+    elif group is not None:
+        # #148: a saved group is a selector over the live fleet, resolved the same
+        # way a group-scoped push resolves it — definition or query, plus the pins.
+        # Reusing one resolver is the point: the list and the push blast radius
+        # cannot disagree about what the group means.
+        record = _require_group(group)
+        try:
+            resolved = groups.resolve_members(record, AGENT_REGISTRY.list_all())
+        except GroupError as exc:
+            raise _group_error(exc)
+        members = set(resolved["members"])
+        selected = [agent for agent in AGENT_REGISTRY.list_all() if agent.agent_id in members]
+        attr_filters = {}
+        group_result = {
+            "group_id": record.get("group_id"),
+            "name": record.get("name"),
+            "kind": resolved["base"],
+            "query": resolved["query"],
+            "definition": resolved["definition"] or None,
+            "count": resolved["count"],
+            "sources": resolved["sources"],
+            "unknown_pins": resolved["unknown_pins"],
+        }
     else:
-        reserved = {"healthy", "status", "remote_config_status", "q"}
+        reserved = {"healthy", "status", "remote_config_status", "q", "group"}
         attr_filters = {}
         for key, value in request.query_params.multi_items():
             if key not in reserved:
@@ -2276,9 +2326,9 @@ def list_agents(
         agents.append(entry)
 
     filters = {}
-    # `q` wins over the ad-hoc parameters, so reporting them as applied would be a
-    # lie about how the result was selected.
-    if query_result is None:
+    # `q` and `group` win over the ad-hoc parameters, so reporting them as applied
+    # would be a lie about how the result was selected.
+    if query_result is None and group_result is None:
         if healthy is not None:
             filters["healthy"] = healthy
         if remote_config_status is not None:
@@ -2290,6 +2340,8 @@ def list_agents(
     if query_result is not None:
         response["query"] = query_result["query"]
         response["query_columns"] = query_result["columns"]
+    if group_result is not None:
+        response["group"] = group_result
     return response
 
 

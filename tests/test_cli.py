@@ -328,6 +328,37 @@ class TestOffline:
         assert by_id["bbbb2222bbbb2222"]["agent_type"] == "generic"
         assert by_id["bbbb2222bbbb2222"]["agent_type_warning"]
 
+    def test_agents_list_group_resolves_the_saved_selector(self, offline_db):
+        """#148: `--group` names a saved selector; offline it resolves against the
+        same db the agents live in, so the list and the blast radius agree."""
+        from server.state import SQLiteGroupStore
+
+        store = SQLiteGroupStore(offline_db)
+        store.create(
+            name="applied-only",
+            definition={"remote_config_status": "applied"},
+            created_by="test",
+        )
+        data = parse(run("--db", str(offline_db), "agents", "list", "--group", "applied-only"))
+        assert data["count"] == 1
+        assert data["agents"][0]["id"] == "aaaa1111aaaa1111"
+        assert data["group"]["name"] == "applied-only"
+        assert data["group"]["kind"] == "definition"
+
+    def test_agents_list_group_refuses_an_unknown_group(self, offline_db):
+        result = run("--db", str(offline_db), "agents", "list", "--group", "no-such")
+        assert result.exit_code != 0
+        assert "not found" in result.output
+
+    def test_agents_list_query_and_group_are_both_selectors(self, offline_db):
+        result = run(
+            "--db", str(offline_db), "agents", "list",
+            "--query", "SELECT * FROM agents",
+            "--group", "some-group",
+        )
+        assert result.exit_code != 0
+        assert "one" in result.output.lower()
+
     def test_agents_get_with_metrics(self, offline_db):
         data = parse(run("--db", str(offline_db), "agents", "get", "aaaa1111aaaa1111"))
         # Same shape as the API: data['metrics'] is the persisted entry.

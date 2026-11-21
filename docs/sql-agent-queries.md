@@ -11,7 +11,10 @@ live fleet. The same statement can be:
   push targets.
 
 A group is a *saved query*, not a member list. Membership is evaluated when the group
-is read or used, so it cannot drift from the fleet.
+is read or used, so it cannot drift from the fleet — and the group can itself be the
+filter: `GET /agents?group=<name>` (#148), `opampctl agents list --group <name>`,
+`list_agents(group=...)`, or the saved-group picker on the Agents page. It resolves
+the same way a group-scoped push does, so the list and the blast radius agree.
 
 This document is the language reference. If you are an agent asked to "write a
 selection filter for macOS machines in Australia", read the **Schema** section, call

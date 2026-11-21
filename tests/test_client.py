@@ -228,6 +228,31 @@ class TestAgents:
         data = oc.list_agents(environment="prod")
         assert data["count"] == 0  # agent has no such attribute
 
+    def test_list_agents_group_param_reaches_the_url(self):
+        """#148: `group` is sent as `?group=`, and attribute filters are not sent
+        alongside it (the server ignores them; sending both would lie)."""
+        seen = {}
+
+        def handler(request):
+            seen["url"] = str(request.url)
+            return httpx.Response(
+                200,
+                json={"agents": [], "count": 0, "filters": {}, "group": {"name": "prod"}},
+            )
+
+        c = OpampClient(base_url="http://t", transport=httpx.MockTransport(handler))
+        try:
+            c.list_agents(group="prod", environment="prod")
+            assert "group=prod" in seen["url"]
+            assert "environment" not in seen["url"]
+        finally:
+            c.close()
+
+    def test_list_agents_unknown_group_raises_404(self, oc):
+        with pytest.raises(OpampApiError) as exc:
+            oc.list_agents(group="no-such-group")
+        assert exc.value.status_code == 404
+
     def test_get_agent_404(self, oc):
         with pytest.raises(OpampApiError) as exc:
             oc.get_agent("missing")

@@ -398,6 +398,7 @@ class OpampClient:
         status: Optional[str] = None,
         remote_config_status: Optional[str] = None,
         query: Optional[str] = None,
+        group: Optional[str] = None,
         **attributes: Any,
     ) -> Dict[str, Any]:
         """``GET /agents`` — list agents, optionally filtered.
@@ -413,6 +414,11 @@ class OpampClient:
             query: SQL selection (#132), e.g.
                 ``"SELECT * FROM agents WHERE host_arch = 'amd64'"``. Wins over
                 the other filter arguments. See :meth:`agent_query_schema`.
+            group: A saved selector (#148), by name or id. Resolves the group's
+                definition or query plus its pins against the live fleet and
+                returns exactly its members. Wins over the other filter
+                arguments; combining with ``query`` is refused (400) — list the
+                saved selectors with :meth:`groups`.
             **attributes: Any other keyword filters on agent description
                 metadata, e.g. ``environment="prod"`` (repeated values pass a
                 list: ``environment=["prod", "staging"]``).
@@ -420,13 +426,15 @@ class OpampClient:
         params: Dict[str, Any] = {}
         if query is not None:
             params["q"] = query
+        if group is not None:
+            params["group"] = group
         if healthy is not None:
             params["healthy"] = healthy
         if remote_config_status is not None:
             params["remote_config_status"] = remote_config_status
         elif status is not None:
             params["status"] = status
-        if query is None:
+        if query is None and group is None:
             for key, value in attributes.items():
                 params[key] = value if isinstance(value, list) else [value]
         return self._get("/agents", params=params or None)

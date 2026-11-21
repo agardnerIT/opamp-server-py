@@ -18,6 +18,7 @@ from ui.config_view import (
 )
 from ui.shared import (
     ROLE_OPERATOR,
+    ROLE_VIEWER,
     SERVER_URL,
     agent_labels,
     agent_type_badge,
@@ -380,6 +381,52 @@ def _run_agent_query(sql):
         return [], str(detail or f"HTTP {response.status_code}")
     except Exception as exc:
         return [], str(exc)
+
+
+def _run_group_query(name):
+    """Return `(agents, error, group_payload)` for a saved-group filter (#148).
+
+    The same request the agent client makes (`GET /agents?group=...`); the extra
+    `group` block in the response is what lets the page show *which* selector the
+    list is running and offer to edit it in the search box.
+    """
+    try:
+        response = requests.get(
+            f"{SERVER_URL}/agents", params={"group": name}, timeout=10
+        )
+        try:
+            payload = response.json()
+        except Exception:
+            payload = {}
+        if response.status_code == 200:
+            return payload.get("agents") or [], None, payload.get("group") or {}
+        detail = payload.get("detail") if isinstance(payload, dict) else payload
+        if isinstance(detail, dict):
+            detail = detail.get("message") or json.dumps(detail)
+        return [], str(detail or f"HTTP {response.status_code}"), {}
+    except Exception as exc:
+        return [], str(exc), {}
+
+
+def _group_query_button(name, group_payload):
+    """Offer the group's SQL in the search box, so a saved group stays editable.
+
+    A query-kind group carries its SQL in the `/agents?group=` payload; a definition
+    group has no SQL to hand over, so the button only appears when there is one.
+    """
+    query = group_payload.get("query")
+    if not query:
+        return
+    if st.button(f"Run this query in the search box", key=f"group_to_search_{name}"):
+        st.session_state["agents_sql"] = query
+        st.session_state["agents_sql_revision"] = (
+            int(st.session_state.get("agents_sql_revision") or 0) + 1
+        )
+        st.query_params["q"] = query
+        if "group" in st.query_params:
+            del st.query_params["group"]
+        st.session_state["saved_group_filter"] = ""
+        st.rerun()
 
 
 #: Same rule the store enforces (`SQLiteGroupStore.NAME_PATTERN`), checked here only so
@@ -988,6 +1035,10 @@ else:
         # shareable. An empty submit clears it, exactly as it cleared the session copy.
         if text.strip():
             st.query_params["q"] = text.strip()
+            # #148: one selector at a time — the server refuses `q` and `group`
+            # together, so a new search also drops a saved-group filter.
+            if "group" in st.query_params:
+                del st.query_params["group"]
         elif "q" in st.query_params:
             del st.query_params["q"]
         st.rerun()
@@ -1003,11 +1054,91 @@ else:
         "you mean, save it as a group below."
     )
 
+    # --------------------------------------------------- saved-group filter (#148)
+    # A saved group is a *name for a selection*. Picking one filters this list
+    # through GET /agents?group=... — the same resolution a group-scoped push runs,
+    # so the list and the blast radius can never disagree. Listing the groups needs
+    # a viewer session (GET /groups), so an anonymous visitor gets no picker rather
+    # than a control that cannot work.
+    _session = get_session()
+    saved_group_names = []
+    if _session is not None and not _session.expired():
+        # `admin_request` is the only place that attaches the session token; gated
+        # on a live session so an anonymous visitor gets no picker (a bare call
+        # would render the sign-in form and stop the page).
+        groups_response = admin_request("GET", "/groups", required_role=ROLE_VIEWER)
+        if groups_response is not None and groups_response.status_code == 200:
+            saved_group_names = sorted(
+                entry.get("name")
+                for entry in (groups_response.json() or {}).get("groups", [])
+                if entry.get("name")
+            )
+
+    if saved_group_names:
+        st.markdown("**Filter by saved group**")
+
+        def _on_saved_group_change():
+            # One selector at a time, in the URL as well as the server call: a
+            # bookmarked group-filtered list re-runs the same filter (#146 did the
+            # same for `q`). Selecting a group clears the SQL query and vice versa —
+            # the server refuses both anyway (400), so the page never sends them together.
+            name = st.session_state.get("saved_group_filter")
+            if name:
+                st.query_params["group"] = name
+                if "q" in st.query_params:
+                    del st.query_params["q"]
+                if "agents_sql" in st.session_state:
+                    st.session_state["agents_sql"] = ""
+                    st.session_state["agents_sql_revision"] = (
+                        int(st.session_state.get("agents_sql_revision") or 0) + 1
+                    )
+            elif "group" in st.query_params:
+                del st.query_params["group"]
+
+        if "saved_group_filter" not in st.session_state:
+            st.session_state["saved_group_filter"] = st.query_params.get("group") or ""
+        if st.session_state["saved_group_filter"] and st.session_state[
+            "saved_group_filter"
+        ] not in saved_group_names:
+            # The group was deleted or archived since the last visit; keep showing
+            # the stale name (the server will explain with a 404/409) instead of
+            # silently switching the list to a different selector.
+            pass
+        st.selectbox(
+            "Saved group",
+            [""] + saved_group_names,
+            key="saved_group_filter",
+            on_change=_on_saved_group_change,
+            label_visibility="collapsed",
+            help="#148: resolves the group's definition or query plus its pins "
+            "against the live fleet — the same resolution a push to the group runs",
+        )
+
     # #146: the URL carries the query, not session state — a page load (an agent link,
     # a bookmark) wipes the session but not the address bar.
     active_query = st.query_params.get("q") or None
+    active_group = st.query_params.get("group") or None
     agents = all_agents
-    if active_query:
+    if active_group:
+        matched, error, group_payload = _run_group_query(active_group)
+        if error:
+            st.error(f"Group filter refused: {error}")
+            st.stop()
+        agents = matched
+        kind = (group_payload or {}).get("kind") or "group"
+        st.caption(
+            f"Showing {len(agents)} of {len(all_agents)} agent(s) in group "
+            f"`{active_group}` ({kind} selector)"
+        )
+        _group_query_button(active_group, group_payload or {})
+        if not agents:
+            st.info(
+                "No agents matched. The group's selector resolves live: if the "
+                "attributes it filters on are no longer reported, the group is "
+                "empty until the agents report them again."
+            )
+            st.stop()
+    elif active_query:
         matched, error = _run_agent_query(active_query)
         if error:
             st.error(f"SQL search refused: {error}")
@@ -1066,7 +1197,12 @@ else:
             label = html.escape(labels.get(a.get("id")) or str(a.get("id") or ""), quote=True)
             # #146: the query rides along, so arriving at the detail and pressing back
             # re-enters the same selection. URL-encoded: the query is SQL in a href.
-            carry = f"&q={quote_plus(active_query)}" if active_query else ""
+            # #148: a saved-group filter rides along the same way.
+            carry = ""
+            if active_query:
+                carry += f"&q={quote_plus(active_query)}"
+            if active_group:
+                carry += f"&group={quote_plus(active_group)}"
             link = (
                 f'<a href="?agent_id={agent_id}{carry}" target="_self" title="{agent_id}" '
                 f'style="color:#0066cc;text-decoration:underline;cursor:pointer">{label}</a>'
@@ -1167,8 +1303,12 @@ else:
                     labels.get(agent.get("id")) or agent.get("id") or ""
                 )
                 # #146: same carried query as the table view — every way into a detail
-                # returns to the selection that listed it.
-                carry = f"&q={quote_plus(active_query)}" if active_query else ""
+                # returns to the selection that listed it. #148: the group too.
+                carry = ""
+                if active_query:
+                    carry += f"&q={quote_plus(active_query)}"
+                if active_group:
+                    carry += f"&group={quote_plus(active_group)}"
                 st.markdown(
                     f"**{health_icon}** [{label}](?agent_id={agent['id']}{carry})"
                     f" — {agent_type_badge(agent)}"

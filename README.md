@@ -27,6 +27,20 @@ agents.
 
 Want to learn more about OpAMP? [Read the spec](https://opentelemetry.io/docs/specs/opamp/).
 
+## Agent support
+
+This server speaks standard OpAMP and nothing else. Support follows the agent, not the
+other way round: any agent with a standard-OpAMP client can connect; agents without one
+cannot — we do not build vendor-protocol shims.
+
+| Agent | Supported | Note |
+|---|---|---|
+| OpenTelemetry Collector | ✅ | Any distro shipping `extension/opampextension`, or the OpAMP Supervisor ([distro matrix](docs/connect-collectors.md)) |
+| Grafana Alloy | ✅ | Via the stock upstream OpAMP supervisor (`alloy otel-supervisor` manual mode) |
+| Fluent Bit | ✅ | [Profile included](docs/agent-profiles.md) |
+| osquery | ✅ | [Profile included](docs/agent-profiles.md), built with [osquery-opamp](https://github.com/agardnerit/osquery-opamp) |
+| Vector | ❌ | No standard-OpAMP client exists in Vector yet — tracked upstream in [vectordotdev/vector#23752](https://github.com/vectordotdev/vector/issues/23752). We'll add a profile when Vector speaks OpAMP. |
+
 ## Architecture
 
 ```

@@ -875,3 +875,63 @@ host *was* fixed: `osquery.config_plugin=opamp`, exactly one `battery_stats` in
   which fail identically on a clean `main` (verified by stashing: same three), so they
   are a pre-existing drift in the fixture, not this change. Worth regenerating in their
   own commit, not silently inside this one.
+
+## Falco support shipped end to end, 2026-11-21
+
+- **The candidates file's premise was stale.** `agent-candidates.md` said Falco was
+  "missing config push + status"; Falco 0.45.0 (2026-09-21, PR #4005) shipped
+  reload control — `POST /reload` (Unix socket, `reload_control.enabled`) +
+  `GET /reload` generations, plus `/healthz`, `/versions`, Prometheus `/metrics`.
+  Re-check upstream state before trusting a verdict written even weeks earlier.
+  Full scope + live capture answers: `falco-scope.md`.
+- **The agent is `github.com/agardnerIT/falco-opamp`** (check out at
+  `/Users/agardner/falco-opamp`): an external Go sidecar on `opamp-go`, no Falco
+  core changes, the osquery-opamp pattern at roughly half the cost (all HTTP, no
+  IPC layer, config persistence free because the config is on disk). The sidecar
+  owns `falco.yaml` + a managed rules file; push contract = config_map keys
+  `falco.yaml`/`rules.yaml` (`application/yaml`); apply = write → `POST /reload`
+  → poll `GET /reload` → APPLIED/FAILED; withdrawal (empty config_map) restores
+  the startup snapshot; a push that would disable `reload_control` is refused
+  unless `--require-reload-control=false` (the `-o` override deployment shape).
+- **opamp-go v0.25 wire facts that cost debugging:** the agent must advertise
+  BOTH `AcceptsRemoteConfig` (bit 2 — the server gates delivery on it) AND
+  `ReportsRemoteConfig` (bit 4096 — opamp-go refuses `SetRemoteConfigStatus`
+  without it); every `RemoteConfigStatus` must carry `LastRemoteConfigHash`
+  (else "LastRemoteConfigHash is nil"); transports are chosen by constructor
+  (`NewHTTP`/`NewWebSocket`) — the `Capabilities` field in StartSettings is
+  deprecated (cosmetic warning only).
+- **Falco's reload POST contract:** explicit `Content-Length: 0` header required
+  (httplib 400s a headerless empty body), no query string; socket dir must
+  pre-exist, mode 0700/0750, owned by Falco's effective uid (a 0755 dir is
+  refused at startup — a pre-created named volume works). GET /reload is
+  generation numbers only; the human-readable rejection reason is in Falco's
+  stderr logs, not the API. `watch_config_files` must be false: the watcher
+  double-fires reloads against the POST/GET protocol.
+- **Profile mechanics (new lessons):** the engine registry in
+  `server/profiles/engines.py` is closed — a new engine module must be added to
+  BOTH lazy import lists (`components_engine_from` and `structure_from`) or the
+  profile silently fails to load ("unknown components engine"). Two profiles
+  sharing a priority silently drops the OTHER one (falco took 80, osquery
+  vanished — falco now sits at 70). After adding a profile run
+  `python3 scripts/semconv_project.py` or
+  `test_the_committed_projection_is_not_stale` fails. The revision/validate
+  verdict JSON uses key `ok`, not `valid`.
+- **Sidecar identity across restarts:** `--instance-uid-file` is mandatory, not
+  optional — without it every restart mints a new agent, ghosts eat the fleet
+  token's `max_agents`, and the next connect gets 403 `agent_limit`. The stale
+  reaper (#69) removes ghosts eventually; it already worked, we just watched it.
+  Fix was `MkdirAll` before the uid write — the "obviously fine" flag had never
+  actually worked.
+- **Falco container ops (nodriver, no --privileged):** mount `/proc` at
+  `/host/proc:ro` (even in nodriver mode, else Falco exits) and `/etc` at
+  `/host/etc:ro`; port 8765 was already taken on this host by a stray
+  `python -m http.server` — map `-p 18765:8765`. The sidecar must run INSIDE the
+  falco container (control socket + config file locality; a host bind-mount
+  fails the 0700 ownership validation), and `docker cp` needs the target dir to
+  exist first.
+- **Dev-stack state right now:** the live agent (`beaf6c49…`) is typed `falco`
+  with an APPLIED push; a fresh fleet token (`agtok_65535b…`, label
+  falco-sidecar, agent_type falco — minting it emitted the profile's falco
+  snippet with endpoint/token substituted, the #144 path working for a second
+  product). Admin password in `/tmp/opamp-admin-pw`, capture payloads in
+  `/tmp/falco-capture/payloads/` (both tmp — gone after reboot).

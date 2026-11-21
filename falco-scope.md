@@ -176,14 +176,20 @@ Once the sidecar works against this server:
 
 ## 4. Risks / open questions the capture must answer
 
-| # | Question | Why it matters |
+**Live capture performed 2026-11-22** against `falcosecurity/falco:0.45.2`
+(`engine.kind=nodriver`, webserver on, `reload_control` enabled; payloads in
+`/tmp/falco-capture/payloads/`). Answers in the right-hand column:
+
+| # | Question | Answer from the capture |
 | --- | --- | --- |
-| 1 | What exactly does one reload re-read — full `falco.yaml` (outputs, engine settings) or rules only? | Defines what a push may safely change. Some settings may still require a process restart; the scope must state which. |
-| 2 | Rejection reason granularity in `GET /reload`'s JSON | Determines whether `RemoteConfigStatus.FAILED` can carry a useful error or just a generation number. |
-| 3 | `reload_control` is Linux-only and Incubating | macOS/BSDFalco deployments get TCP `GET /reload` observation only (no POST) — a degraded mode to either support or refuse explicitly. |
-| 4 | Socket permissions: dedicated dir, `0700`/`0750`, sidecar in Falco's group; K8s emptyDir guidance exists | Deployment packaging; a mis-permissioned socket is a silent failure mode. |
-| 5 | Two writers problem: Falco Operator and/or falcoctl follower writing the same dirs | Ownership discipline: the sidecar must own its rules dir exclusively and declare the conflict (osquery-opamp's `config_conflict` lesson, #131/#119). |
-| 6 | Does `watch_config_files` racing the sidecar cause double reloads? | Protocol should prefer POST/GET and treat the watcher as fallback; needs one live observation. |
+| 1 | What does one reload re-read — full `falco.yaml` or rules only? | **The full config set.** Changing `time_format_iso8601` in `falco.yaml` plus a fixed rules file applied (gen 5→9); a broken rules file rejects the *whole* reload (gen 7 rejected). All files are validated together; one bad file rejects everything. |
+| 2 | Rejection reason granularity in `GET /reload`'s JSON | **Generation numbers only** (`instance_id`, `started/applied/rejected`, `ready`). The human-readable reason is only in Falco's stderr logs (`Critical Falco internal: hot restart failure: <file>: Invalid`). The sidecar must read Falco's log stream for the reason text; `FAILED` status can carry a coarse reason only. |
+| 3 | `reload_control` is Linux-only and Incubating | Unchanged (docs-level); container capture was Linux. |
+| 4 | Socket permissions | Confirmed strict: a 0755 socket dir is refused at startup (`socket directory must be owned by Falco, without group write or other access`); must pre-exist, 0700/0750, owned by Falco's effective UID. A pre-created empty named volume works. |
+| 5 | Two writers problem | Not exercised live; ownership discipline stands as designed. |
+| 6 | `watch_config_files` racing the sidecar | **Real.** With the watcher on, generation numbers jumped 2 per change (watcher reload + POST reload both fire). The sidecar protocol should either run with `watch_config_files: false` (the PR states manual reloads work without it) or treat the baseline check as tolerant of extra generations. |
+| — | (new) POST wire contract | The handler (`userspace/falco/reload_control.cpp`) 400s a POST **without a `Content-Length: 0` header** (httplib rejects the headerless empty body) and any body or query string. The client must send an explicitly zero-length body. |
+| — | (new) Process identity | `instance_id` is stable across reloads and changes only on restart — a clean restart signal for the client, as the docs promise. |
 
 ## 5. Effort shape
 

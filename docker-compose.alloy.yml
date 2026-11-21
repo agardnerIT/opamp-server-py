@@ -1,0 +1,39 @@
+# Grafana Alloy workbench (#150). Explicitly named — never an override file:
+#
+#   export COMPOSE_FILE=docker-compose.yml:docker-compose.dev.yml:docker-compose.alloy.yml
+#   export OPAMP_AGENT_TOKEN=opamp_agent_...   # mint: opampctl agent-tokens create
+#   docker compose up -d alloy
+#
+# Runs `alloy otel-supervisor` in manual mode (NOT the Grafana-Cloud-only
+# simple mode env vars) against this stack's server. What it manages is
+# Alloy's embedded OTel Engine (`alloy otel`) — the OpAMP path — not the River
+# configuration, which Alloy does not serve over OpAMP (grafana/alloy#1236).
+
+services:
+  alloy:
+    image: grafana/alloy:v1.22.0
+    container_name: opamp-alloy
+    entrypoint: ["/bin/sh", "-c"]
+    # The image's entrypoint is `alloy`; replace it so the supervisor config can
+    # be rendered from the template (the token must not live in a committed
+    # file) and the YAML comments stripped before exec.
+    command:
+      - |
+        sed -e 's|{endpoint}|ws://server:4320/v1/opamp|' \
+            -e "s|{token}|$${OPAMP_AGENT_TOKEN}|" \
+            /etc/alloy/supervisor.yaml.tmpl | grep -v '^#' > /tmp/supervisor.yaml
+        exec alloy otel-supervisor --config=/tmp/supervisor.yaml
+    environment:
+      - OPAMP_AGENT_TOKEN
+    volumes:
+      - ./docker/alloy/supervisor.yaml:/etc/alloy/supervisor.yaml.tmpl:ro
+      - ./docker/alloy/agent-base.yaml:/etc/alloy/agent-base.yaml:ro
+      - alloy-data:/var/lib/alloy
+    networks:
+      - opamp-network
+    restart: unless-stopped
+
+volumes:
+  alloy-data:
+
+# `opamp-network` is declared by docker-compose.yml; Compose merges the files.

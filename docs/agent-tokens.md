@@ -58,7 +58,8 @@ Tokens carry two limits, both optional and both enforced on every message:
 
 The token response also carries a paste-ready snippet, written for the agent type you
 name at mint time (`agent_type`): `osquery` gets the extension's own quickstart, the
-collector gets the `extensions.opamp` block, `generic` gets plain text, and omitting it
+collector gets the `extensions.opamp` block, `alloy` gets the `alloy otel-supervisor`
+config file, `generic` gets plain text, and omitting it
 keeps this server's default profile. That choice is recorded on the token and shown in
 `GET /agent-tokens`, but it is **not enforced**: a fleet token is access, not identity,
 and at mint time there is no agent to check it against. The response also names the

@@ -9,8 +9,9 @@
 
 OpenTelemetry OpAMP server in Python (FastAPI + Streamlit UI), with optional
 [Open Policy Agent](https://www.openpolicyagent.org) compliance. It manages any OpAMP
-agent — OpenTelemetry Collectors, Fluent Bit, or anything else that speaks the
-protocol — and can be driven by humans, scripts or AI agents.
+agent — OpenTelemetry Collectors, Fluent Bit, Grafana Alloy (its OTel Engine), or
+anything else that speaks the protocol — and can be driven by humans, scripts or AI
+agents.
 
 - **Select agents with SQL** — `SELECT * FROM agents WHERE host_arch = 'amd64'`, saved
   as named groups ([guide](docs/sql-agent-queries.md))

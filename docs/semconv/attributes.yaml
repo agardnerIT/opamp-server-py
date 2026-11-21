@@ -1,5 +1,19 @@
 groups:
 - attributes:
+  - brief: The `service.name` value that identifies a Grafana Alloy agent (alloy's profile, prefix match).
+    examples:
+    - alloy
+    - grafana.alloy
+    id: opamp.agent.alloy.match.service_name
+    note: Projected from the profile dictionary by `scripts/semconv_project.py`; the dictionary is the
+      source of truth and this attribute is never emitted by an agent.
+    stability: development
+    type: string
+  brief: Evidence the server uses to recognise a Grafana Alloy agent, declared in `server/profiles/data/alloy.yaml`.
+  display_name: Grafana Alloy identity
+  id: registry.opamp.agent.alloy
+  type: attribute_group
+- attributes:
   - brief: The `service.type` value that identifies a Fluent Bit agent (fluentbit's profile, prefix match).
     examples:
     - Fluent Bit

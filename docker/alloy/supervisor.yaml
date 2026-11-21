@@ -1,0 +1,48 @@
+# Grafana Alloy — OpAMP supervisor config (manual mode) for the #150 workbench.
+#
+# `alloy otel-supervisor --config=...` runs the stock upstream opampsupervisor,
+# which manages Alloy's embedded OTel Engine (`alloy otel`). This is the OpAMP
+# path: everything the server pushes is otelcol YAML. It is NOT the River
+# configuration — `remotecfg` (Grafana's proprietary ConnectRPC API) is Option B
+# (grafana/alloy#1236 is still open) and is out of scope for #150.
+#
+# `{endpoint}` and `{token}` are substituted by docker-compose.alloy.yml at
+# container start; they are the same placeholders the profile snippet uses.
+#
+# `agent.executable` is forced to the Alloy binary by the supervisor itself, so
+# it is not set here. `agent.args` are the arguments the engine is started with.
+server:
+  endpoint: {endpoint}
+  headers:
+    Authorization: "Bearer {token}"
+
+capabilities:
+  reports_effective_config: true
+  accepts_remote_config: true
+  # `reports_remote_config: true` crashes this build of the supervisor before it
+  # logs anything (silent exit 1, reproducible on v1.22.0) — captured in #150,
+  # so the server cannot ask the agent to acknowledge remote configs.
+  reports_health: true
+  accepts_restart_command: true
+
+agent:
+  description:
+    identifying_attributes:
+      # THE identity decision (#150): left at the supervisor's default, this
+      # server would classify a running Alloy as an otelcol. Naming the product
+      # here is what makes the `alloy` profile match instead.
+      service.name: "alloy"
+      service.version: "1.22.0"
+  args:
+    - otel
+    # The supervisor passes its generated `opamp` config as another --config
+    # file and confmap merges them; without a pipeline of our own the engine
+    # refuses to start (`-service.AllowNoPipelines` is off in this distribution).
+    - --config
+    - file:/etc/alloy/agent-base.yaml
+
+storage:
+  # Under Compose `/var/lib/alloy` is a named volume owned by root, so the
+  # supervisor (which runs as the image's `alloy` user) cannot create its
+  # directory there and exits before logging anything. `/tmp` always works.
+  directory: /tmp/alloy/supervisor-data

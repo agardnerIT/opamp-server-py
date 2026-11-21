@@ -1,7 +1,8 @@
 # Proposing a new agent type (#145)
 
 This server recognises an agent through a **profile** — one YAML file in
-`server/profiles/data/`. `otelcol`, `fluentbit` and `osquery` are files, not code paths;
+`server/profiles/data/`. `otelcol`, `fluentbit`, `osquery` and `alloy` are files, not
+code paths;
 `generic` is the built-in fallback. A new type can therefore be one file and a restart,
 and the mechanics are in [docs/agent-profiles.md](agent-profiles.md) ("Adding a profile").
 

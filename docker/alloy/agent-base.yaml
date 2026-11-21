@@ -1,0 +1,21 @@
+# The engine's own base config. The supervisor generates the `opamp` extension
+# block itself and passes both files to `alloy otel`; without a pipeline here the
+# engine refuses to start ("service must have at least one pipeline" — the
+# `-service.AllowNoPipelines` gate is disabled in this distribution).
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 127.0.0.1:4317
+      http:
+        endpoint: 127.0.0.1:4318
+processors:
+  batch:
+exporters:
+  debug:
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]

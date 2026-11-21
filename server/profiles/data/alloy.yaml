@@ -1,0 +1,167 @@
+# Grafana Alloy — the OTel Engine inside it, supervised by `alloy otel-supervisor` (#150).
+#
+# Written from a live capture of grafana/alloy v1.22.0 running
+# `alloy otel-supervisor --config=...` (manual mode) against this server, not from
+# the documentation. What the capture recorded:
+#
+#   service.name    = "alloy"                    (set by us in the supervisor config —
+#                                                the one identity decision; see below)
+#   service.version = "1.22.0"                   (verbatim from the same block, plus the
+#                                                supervisor's own service.instance.id)
+#   non-identifying = host.arch / host.name / os.description / os.type (supervisor adds)
+#   capabilities    = ReportsStatus | AcceptsRemoteConfig | ReportsEffectiveConfig |
+#                     ReportsHealth | AcceptsRestartCommand (+ Own Metrics/Heartbeat tags)
+#   effective config: ONE object, key "", content_type "text/yaml", body = otelcol YAML
+#   remote config: pushed body is written as the supervisor's PRIMARY config file and
+#                  applied (RemoteConfigStatuses_APPLIED); a bad body crashes the engine
+#                  and the supervisor reports FAILED and keeps restart-looping it
+#   AvailableComponents: none (the extension block reports reports_available_components: false)
+#   metrics: none reach this server (engine telemetry metrics level: none by default)
+#
+# SCOPE HONESTY: this profile manages **the OTel Engine embedded in Alloy** —
+# otelcol YAML pipelines — through the stock upstream OpAMP supervisor. It does
+# NOT manage Alloy's River configuration: Alloy does not speak OpAMP for its own
+# config (grafana/alloy#1236 has been open since 2024-07); the River path uses
+# Grafana's proprietary `remotecfg` ConnectRPC API, which is a separate, larger
+# project. "The agent looks like a collector" is accurate here in a way it is not
+# for other products: the thing this server controls literally is a collector.
+
+name: alloy
+display_name: Grafana Alloy
+icon: "⚙️"
+
+# Above `otelcol` (100) on purpose: an Alloy engine reports a collector-shaped
+# effective config (receivers/exporters/service), so the otelcol profile's *sniff*
+# matches every Alloy agent. Without the higher priority the winner would be the
+# collector and the UI would be quietly wrong about the product.
+priority: 110
+
+summary: >-
+  Alloy's embedded OTel Engine, run under `alloy otel-supervisor`. Configs are
+  otelcol YAML applied by the supervisor; the inventory is empty (no
+  AvailableComponents) and no metrics reach this server.
+
+config_formats:
+  # What the engine reports: one unnamed object as text/yaml — same MIME story as
+  # the collector, so `distinctive: false`; the format never identifies the product.
+  - content_types:
+      - ""
+      - application/x-yaml
+      - application/yaml
+      - text/plain
+      - text/x-yaml
+      - text/yaml
+    default_filename: alloy-config.yaml
+    distinctive: false
+
+# Honest by omission: no `validates_structure`, no `structure` engine, no
+# `components` block. Two capture facts drive this, not laziness:
+#
+# 1. The supervisor *generates* the `opamp` extension block and merges it into
+#    whatever is pushed, so the collector engine's "push must carry the opamp
+#    extension" invariant would reject every correct push.
+# 2. There is no AvailableComponents, and an inventory read from the reported
+#    config would show the supervisor's merged view, not the operator's intent.
+#
+# A push is therefore format-checked (size, encoding, duplicate keys, redaction)
+# but not structurally judged: the approver is the last check before a rollout.
+
+identity:
+  match_any:
+    # The one identity decision (#150): the supervisor presents whatever
+    # `agent.description.identifying_attributes` says. Left at its default this
+    # build reports the engine underneath, and the agent would resolve to
+    # `otelcol` — right about the YAML, wrong about the product. The committed
+    # workbench config (`docker/alloy/supervisor.yaml`) sets service.name, and
+    # this profile matches it. `grafana.alloy` covers operators who prefer the
+    # reverse-FQDN convention the OpAMP spec recommends.
+    - attr: service.name
+      prefix:
+        - alloy
+        - grafana.alloy
+  # No config sniff on purpose: the engine's effective config IS collector YAML —
+  # `receivers:`/`exporters:` sections would make every Alloy agent sniff as a
+  # bare collector. The declared attribute is the only durable signal here.
+
+# No heavy report (nothing to count as unused: the inventory is empty by design)
+# and no outdated report (no component versions are reported). Both skip by
+# declaration and say so (#120).
+reports: [fleet, agent]
+
+# No telemetry view: the engine's internal telemetry is at `metrics level: none`
+# by default and nothing arrives at POST /v1/metrics (captured on #150). A panel
+# of empty tiles would be a lie (#121/#122).
+telemetry: null
+
+guidance: |
+  What this profile manages is **the OTel Engine inside Alloy** (`alloy otel`),
+  supervised by `alloy otel-supervisor` in manual mode — otelcol YAML pipelines,
+  not River. Alloy's River configuration is served over Grafana's proprietary
+  `remotecfg` API, not OpAMP (grafana/alloy#1236 open); this server does not
+  speak it.
+
+  The supervisor owns the control channel: it generates the `opamp` extension
+  block, writes what you push as its primary config file, and runs the engine
+  with its own generated block merged in. A pushed config therefore **does not
+  need an `opamp` extension or a `service.extensions` entry** — the supervisor
+  adds both. Pushing a body that includes its own `opamp` block is a mistake
+  here even though the collector rules would demand one.
+
+  A config the engine refuses (unknown receiver, bad endpoint) crashes it, and
+  the supervisor reports FAILED and keeps **restart-looping the agent** — the
+  fleet shows unhealthy until the bad revision is withdrawn or replaced, unlike
+  a bare collector, which stays down silently. Withdrawing the push heals the
+  agent by itself. Rollout staging and the health gate are not optional.
+
+  Restart works: the supervisor advertises `AcceptsRestartCommand` and restarts
+  the engine process when the server sends the command.
+
+  Do **not** set `reports_remote_config: true` in the supervisor's capabilities
+  block: on v1.22.0 that crashes `alloy otel-supervisor` before it logs anything
+  (silent exit 1, captured on #150). The other capabilities in the workbench
+  template are safe.
+
+  There is no component inventory (no AvailableComponents) and no internal
+  metrics reach this server — the agent page says so rather than showing empty
+  panels. Structural checks are the approver's job: `alloy otel validate` runs
+  where the engine runs, not here.
+
+# The snippet is the supervisor's own configuration file (the Fluent Bit
+# precedent: the OpAMP settings live in the supervisor's config, not in a file we
+# push). Runnable as:
+#
+#   alloy otel-supervisor --config=/etc/alloy/supervisor.yaml
+#
+# with the engine's base config (at least one pipeline — the distribution ships
+# with `-service.AllowNoPipelines` off) passed through `agent.args`.
+snippet: |
+  # Grafana Alloy, via the stock upstream OpAMP supervisor:
+  #   alloy otel-supervisor --config=/etc/alloy/supervisor.yaml
+  #
+  # This manages the OTel Engine inside Alloy (`alloy otel`) — otelcol YAML, not
+  # River pipelines. `agent.executable` is forced to the Alloy binary by the
+  # supervisor itself.
+  server:
+    endpoint: {endpoint}
+    headers:
+      Authorization: "Bearer {token}"
+
+  capabilities:
+    reports_effective_config: true
+    accepts_remote_config: true
+    # reports_remote_config: true crashes v1.22.0 — do not enable it (#150).
+    reports_health: true
+    accepts_restart_command: true
+
+  agent:
+    description:
+      identifying_attributes:
+        service.name: "alloy"          # without this the agent resolves to otelcol
+        service.version: "1.22.0"
+    args:
+      - otel
+      - --config
+      - file:/etc/alloy/agent-base.yaml   # engine config with >= 1 pipeline
+
+  storage:
+    directory: /var/lib/alloy/supervisor-data

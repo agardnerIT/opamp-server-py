@@ -14,6 +14,28 @@ groups:
   id: registry.opamp.agent.alloy
   type: attribute_group
 - attributes:
+  - brief: The `service.name` value that identifies a Falco agent (falco's profile, prefix match).
+    examples:
+    - falco
+    id: opamp.agent.falco.match.service_name
+    note: Projected from the profile dictionary by `scripts/semconv_project.py`; the dictionary is the
+      source of truth and this attribute is never emitted by an agent.
+    stability: development
+    type: string
+  - brief: Any `AgentDescription` attribute key prefixed `falco.`, which identifies a Falco agent (falco's
+      profile, attribute-key prefix match).
+    examples:
+    - falco.
+    id: opamp.agent.falco.match.attribute_prefix_falco
+    note: Projected from the profile dictionary by `scripts/semconv_project.py`; the dictionary is the
+      source of truth and this attribute is never emitted by an agent.
+    stability: development
+    type: string
+  brief: Evidence the server uses to recognise a Falco agent, declared in `server/profiles/data/falco.yaml`.
+  display_name: Falco identity
+  id: registry.opamp.agent.falco
+  type: attribute_group
+- attributes:
   - brief: The `service.type` value that identifies a Fluent Bit agent (fluentbit's profile, prefix match).
     examples:
     - Fluent Bit

@@ -31,6 +31,8 @@ agent's own `service.name` stays an existing semantic convention that a rule
 | Profile | Attribute | Match | Values |
 |---|---|---|---|
 | Grafana Alloy | `opamp.agent.alloy.match.service_name` | prefix | `alloy`, `grafana.alloy` |
+| Falco | `opamp.agent.falco.match.service_name` | prefix | `falco` |
+| Falco | `opamp.agent.falco.match.attribute_prefix_falco` | attribute-key prefix | `falco.` |
 | Fluent Bit | `opamp.agent.fluentbit.match.service_type` | prefix | `Fluent Bit`, `FluentBit`, `fluent-bit` |
 | Fluent Bit | `opamp.agent.fluentbit.match.service_name` | prefix | `fluent-bit`, `fluentbit` |
 | osquery | `opamp.agent.osquery.match.service_name` | prefix | `osqueryd` |

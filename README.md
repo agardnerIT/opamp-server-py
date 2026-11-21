@@ -2,6 +2,7 @@
 
 [![OpenTelemetry Collector supported](https://img.shields.io/badge/OpenTelemetry%20Collector-supported-blue?logo=opentelemetry)](https://opentelemetry.io/docs/collector)
 [![osquery supported](https://img.shields.io/badge/osquery-supported-blue?logo=osquery)](https://github.com/agardnerit/osquery-opamp)
+[![Falco supported](https://img.shields.io/badge/Falco-supported-blue?logo=falco)](https://github.com/agardnerIT/falco-opamp)
 [![Grafana Alloy supported](https://img.shields.io/badge/Grafana%20Alloy-supported-blue?logo=grafana)](https://grafana.com/docs/alloy/)
 
 ![Warning: Entirely vibecoded](https://img.shields.io/badge/Warning-Entirely%20vibecoded-orange?style=for-the-badge)
@@ -39,6 +40,7 @@ cannot — we do not build vendor-protocol shims.
 | Grafana Alloy | ✅ | Via the stock upstream OpAMP supervisor (`alloy otel-supervisor` manual mode) |
 | Fluent Bit | ✅ | [Profile included](docs/agent-profiles.md) |
 | osquery | ✅ | [Profile included](docs/agent-profiles.md), built with [osquery-opamp](https://github.com/agardnerit/osquery-opamp) |
+| Falco | ✅ | [Profile included](docs/agent-profiles.md), built with [falco-opamp](https://github.com/agardnerIT/falco-opamp) — applied through Falco's own reload-control API (0.45+) |
 | Telegraf | ❌ | No OpAMP client in Telegraf yet — remote config is tracked upstream in [influxdata/telegraf#16356](https://github.com/influxdata/telegraf/issues/16356). We'll add a profile when Telegraf speaks OpAMP. |
 | Vector | ❌ | No standard-OpAMP client exists in Vector yet — tracked upstream in [vectordotdev/vector#23752](https://github.com/vectordotdev/vector/issues/23752). We'll add a profile when Vector speaks OpAMP. |
 

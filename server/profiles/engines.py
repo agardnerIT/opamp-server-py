@@ -311,7 +311,7 @@ def components_engine_from(name: Optional[str]) -> Optional[Callable[[Any], Dict
     """
     if not name:
         return None
-    from server.profiles import fluentbit, osquery  # noqa: F401  (register themselves)
+    from server.profiles import falco, fluentbit, osquery  # noqa: F401  (register themselves)
 
     engine = COMPONENTS_ENGINES.get(name)
     if engine is None:
@@ -339,7 +339,7 @@ def structure_from(name: Optional[str]) -> Optional[Callable[..., bool]]:
     """
     if not name:
         return None
-    from server.profiles import osquery, otelcol  # noqa: F401  (register themselves)
+    from server.profiles import falco, osquery, otelcol  # noqa: F401  (register themselves)
 
     engine = STRUCTURE_ENGINES.get(name)
     if engine is None:

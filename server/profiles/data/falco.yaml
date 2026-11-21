@@ -1,0 +1,119 @@
+# Falco — the first security-agent profile, and the first one managed through the
+# product's own reload-control API rather than an embedded OpAMP client.
+#
+# Written from the live capture of `agardnerIT/falco-opamp` against a real
+# `falcosecurity/falco` 0.45.2 (see falco-scope.md and the capture payloads):
+# the sidecar reports `service.name: falco`, its own `falco.*` attribute
+# namespace, and applies pushes through `POST /reload` on Falco's Unix socket,
+# verified over `GET /reload` generations (#4005 shipped that API in 0.45.0).
+
+name: falco
+display_name: Falco
+icon: "🦅"
+priority: 70
+summary: >-
+  Falco config managed through the falco-opamp sidecar: the main config and the
+  managed rules file are applied with Falco's own reload-control API, structural
+  validation covers the YAML shapes of both object keys, and the inventory is the
+  rules files loaded and the rules declared.
+
+config_formats:
+  # `application/yaml` is what the sidecar declares for both objects. It is a
+  # *format*, not a product, so it is not distinctive: only this profile's engine
+  # judges whether an object is a Falco config or a rulesfile.
+  - content_types:
+      - application/yaml
+      - text/yaml
+    default_filename: falco.yaml
+    distinctive: false
+
+# The rules are Falco's own (`rules_files`, `rules`, `watch_config_files`,
+# `reload_control`), and the inventory comes from the pushed documents because the
+# sidecar reports no `AvailableComponents`.
+validates_structure: true
+structure:
+  engine: falco
+components_engine: falco
+
+identity:
+  match_any:
+    # The spec's convention: `service.name` names the agent type. The capture
+    # reports `service.name: falco` exactly.
+    - attr: service.name
+      prefix:
+        - falco
+    # And the sidecar labels its whole payload namespace `falco.` — `falco.version`,
+    # `falco.instance_id`, `falco.plugins`, `falco.host`. No other product has a
+    # reason to do that, so a single attribute key is evidence even when
+    # `service.name` is renamed — which is why the profile matches on the **key**
+    # here rather than enumerating values that will change between releases.
+    - attr_prefix: "falco."
+
+# Neither fleet report applies: "heavy" counts *unused components* and every rule
+# came from the pushed documents, and "outdated" needs component versions the
+# sidecar does not report per component (the agent's own `falco.version` attribute
+# names the daemon, not each rules file). Both skip this profile by declaration.
+reports: [fleet, agent]
+
+# No telemetry block: the sidecar does not push OTLP to this server, and a panel
+# of empty tiles would be a lie (#121/#122).
+
+guidance: >-
+  The sidecar, not this server, owns the files: a push writes `falco.yaml` and the
+  managed `rules.yaml`, then applies them through Falco's `POST /reload` and
+  verifies over `GET /reload`. The object keys are part of the contract — push the
+  main config as **`falco.yaml`** and rules as **`rules.yaml`** (content type
+  `application/yaml`); a push with other keys is refused by the sidecar and
+  reported FAILED, which pauses the rollout. A push that would set
+  `reload_control.enabled: false` is refused unless the sidecar runs with
+  `--require-reload-control=false` (for deployments that start Falco with
+  `-o reload_control.enabled=true`). An empty push is a withdrawal: the sidecar
+  restores the config it found on disk at startup — it never writes an empty file,
+  because a `falco.yaml` is mandatory. Structural checks here are best effort:
+  `APPLIED` means Falco validated and applied the config, **not** that the rules
+  behave; a rejected push keeps the previous config running and the human-readable
+  load error is in Falco's own logs, not in this server's status. Run the agent
+  with `watch_config_files: false` so the reload with feedback is the only one.
+
+# The endpoint and credential live in the sidecar's own flags, not in falco.yaml,
+# so this server has no complete file it can honestly write for a new agent (#121).
+# The bootstrap block below is what an operator actually needs, and since #144 it
+# is the sidecar's own quickstart (github.com/agardnerIT/falco-opamp) with the
+# endpoint and token substituted — not a paraphrase of it. That is the point of
+# choosing an agent type when minting a token: a Falco fleet is handed Falco
+# instructions.
+snippet: |
+  # Falco does not speak OpAMP itself: the falco-opamp sidecar does, and Falco
+  # keeps running its own config files. The sidecar owns falco.yaml and a managed
+  # rules file, and applies pushes through Falco's reload-control API (0.45+).
+  #
+  #   go install github.com/agardnerIT/falco-opamp@latest
+  #   falco-opamp \
+  #        --endpoint {endpoint} \
+  #        --header 'Authorization: Bearer {token}' \
+  #        --config /etc/falco/falco.yaml \
+  #        --rules /etc/falco/opamp/rules.yaml \
+  #        --control-socket /run/falco/control.sock \
+  #        --webserver http://localhost:8765
+  #
+  # `--header` is how the credential is presented, and the endpoint's scheme picks
+  # the transport: http:// polls, ws:// lets this server push without waiting for
+  # a poll.
+  #
+  # Bootstrap (once, in falco.yaml): enable the webserver (health/versions/reload
+  # observation) and reload_control (the Unix socket that applies pushes). The
+  # socket directory must already exist, be 0700, and be owned by Falco's uid.
+  #
+  #   webserver:
+  #     enabled: true
+  #   reload_control:
+  #     enabled: true
+  #     socket: /run/falco/control.sock
+  #
+  # Add the managed rules file to `rules_files` so pushed rules are loaded, and
+  # run Falco with `watch_config_files: false` so the apply protocol with
+  # feedback is the only reload. Add `--falco-bin /usr/bin/falco` to the sidecar
+  # to pre-check pushed rules with `falco --validate` before a reload.
+  #
+  # A push must be the objects `falco.yaml` and/or `rules.yaml` (content type
+  # application/yaml), because those are the names the sidecar applies and reports.

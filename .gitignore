@@ -212,3 +212,6 @@ cloudflare/**/.dev.vars
 # Update-check runtime state (#46)
 data/update-check.json
 data/update-settings.json
+
+# Local strategy notes (not committed)
+agent-candidates.md

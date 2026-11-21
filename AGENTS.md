@@ -19,6 +19,29 @@ the row), and never accept a body containing `<redacted>` (a redacted push wipes
 fleet credentials). `AgentState.to_dict()` is the API choke point — redaction
 happens there, not per route.
 
+## Nothing Proprietary (standing decision, 2026-11-21, #150)
+
+**This project does not — and will never — implement, speak, or support a
+proprietary interface.** If a tool or agent wants support, it MUST implement
+OpAMP according to the OpenTelemetry spec standards. Nothing justifies building
+for proprietary surfaces.
+
+What this means in practice:
+
+- Agent support is a **profile** (`server/profiles/data/*.yaml`) plus, at most,
+  standard-OpAMP client configuration templates — never a new transport or
+  protocol code path.
+- Vendor SDKs/agents that only speak a vendor's own API are **out of scope
+  permanently** — do not scope, spike, or capture for them. Example: Grafana
+  Alloy's River configuration is served over Grafana's proprietary `remotecfg`
+  ConnectRPC API (grafana/alloy#1236 open); it stays unsupported. What IS
+  supported is the same product's standard-OpAMP path (`alloy otel-supervisor`
+  manual mode, stock upstream supervisor).
+- A vendor's "simple mode"/cloud-only configuration that bypasses standard
+  OpAMP is also out of scope (e.g. Alloy's GCLOUD_* simple mode).
+- If a product has no standard-OpAMP path, the answer is "open an issue on
+  their repo", not "add a shim here".
+
 ## Non-Interactive Shell Commands
 
 **ALWAYS use non-interactive flags** with file operations to avoid hanging on confirmation prompts.

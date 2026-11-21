@@ -94,9 +94,7 @@ schema = _payload(
     admin_request("GET", "/agents/query/schema", required_role=ROLE_VIEWER), {}
 ) or {}
 groups_payload = _payload(
-    admin_request(
-        "GET", "/groups", required_role=ROLE_VIEWER, params={"include_archived": True}
-    ),
+    admin_request("GET", "/groups", required_role=ROLE_VIEWER),
     {},
 ) or {}
 group_rows = groups_payload.get("groups") or []
@@ -292,9 +290,6 @@ else:
                 "health-defined": ", ".join(row.get("health_defined") or []) or "",
                 "owner": row.get("owner") or "",
                 "updated": format_local_time(row.get("updated_at")),
-                "archived": format_local_time(row.get("archived_at"))
-                if row.get("archived_at")
-                else "",
             }
             for row in group_rows
         ],
@@ -360,31 +355,16 @@ else:
                 st.code(_detail(response))
     with detail_cols[2]:
         st.write("")
-        if selected.get("archived_at"):
-            if st.button("Restore", key="groups_restore"):
-                response = admin_request(
-                    "POST",
-                    f"/groups/{selected_name}/restore",
-                    required_role=ROLE_OPERATOR,
-                    json={},
-                )
-                if response is not None and response.status_code == 200:
-                    st.success(f"Restored `{selected_name}`.")
-                    st.rerun()
-                else:
-                    st.error(f"Restore refused ({getattr(response, 'status_code', 'transport')}):")
-                    st.code(_detail(response))
-        else:
-            if st.button("Archive", key="groups_archive"):
-                response = admin_request(
-                    "DELETE", f"/groups/{selected_name}", required_role=ROLE_OPERATOR
-                )
-                if response is not None and response.status_code == 200:
-                    st.success(f"Archived `{selected_name}`.")
-                    st.rerun()
-                else:
-                    st.error(f"Archive refused ({getattr(response, 'status_code', 'transport')}):")
-                    st.code(_detail(response))
+        if st.button("Delete group", key="groups_delete"):
+            response = admin_request(
+                "DELETE", f"/groups/{selected_name}", required_role=ROLE_OPERATOR
+            )
+            if response is not None and response.status_code == 200:
+                st.success(f"Deleted `{selected_name}` — the name is free for reuse.")
+                st.rerun()
+            else:
+                st.error(f"Delete refused ({getattr(response, 'status_code', 'transport')}):")
+                st.code(_detail(response))
 
     with st.form("groups_edit_form"):
         st.markdown("**Edit the query** — future pushes only; a revision keeps its snapshot.")

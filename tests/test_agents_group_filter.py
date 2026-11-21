@@ -6,8 +6,8 @@ closes the loop: the group is usable *as* the list filter, through the same
 never disagree about what the group means.
 
 Refusals are tested through the API because that is where an operator meets them:
-an unknown group is a 404, an archived group a 409, and `q` + `group` together a
-400 (two selectors cannot both be the selector).
+an unknown group is a 404, and `q` + `group` together a 400 (two selectors
+cannot both be the selector).
 """
 
 from __future__ import annotations
@@ -217,13 +217,13 @@ def test_an_unknown_group_is_a_404_with_the_groups_hint(client):
     assert "GET /groups" in response.text
 
 
-def test_an_archived_group_is_a_409_not_a_silent_empty_list(client):
+def test_a_deleted_group_is_a_404_not_a_silent_empty_list(client):
     describe(UID, "prod", "amd64")
     created = create_group(client, "prod-agents", definition={"environment": "prod"})
     group_id = created.json()["group_id"]
-    archived = client.delete(f"/groups/{group_id}", headers=admin_headers())
-    assert archived.status_code == 200, archived.text
+    deleted = client.delete(f"/groups/{group_id}", headers=admin_headers())
+    assert deleted.status_code == 200, deleted.text
 
     response = client.get("/agents", params={"group": "prod-agents"})
-    assert response.status_code == 409
-    assert "archived" in response.text
+    assert response.status_code == 404
+    assert "not found" in response.text

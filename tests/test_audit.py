@@ -626,8 +626,7 @@ AUDITED_ROUTES = {
     # "changed" is not something an auditor can act on.
     ("POST", "/groups"): "group.create",
     ("PUT", "/groups/{group_id}"): "group.update",
-    ("DELETE", "/groups/{group_id}"): "group.archive",
-    ("POST", "/groups/{group_id}/restore"): "group.restore",
+    ("DELETE", "/groups/{group_id}"): "group.delete",
     # #46: both are admin actions. The check spends an outbound request; the
     # setting changes whether the server will ever spend one again.
     ("POST", "/updates/check"): "updates.check",

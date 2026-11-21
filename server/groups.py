@@ -137,7 +137,6 @@ def snapshot(record: Mapping[str, Any]) -> Dict[str, Any]:
         "description": record.get("description"),
         "owner": record.get("owner"),
         "updated_at": record.get("updated_at"),
-        "archived_at": record.get("archived_at"),
     }
 
 
@@ -249,7 +248,6 @@ def preview(
     result = {
         "group_id": record.get("group_id"),
         "name": record.get("name"),
-        "archived": bool(record.get("archived_at")),
         "definition": resolved["definition"],
         "query": resolved.get("query"),
         "include": list(record.get("include") or []),
@@ -304,15 +302,6 @@ def expand_scope(
             {
                 "message": f"group {raw!r} not found",
                 "hint": "list the saved selectors with GET /groups",
-            },
-        )
-    if record.get("archived_at"):
-        raise GroupError(
-            409,
-            {
-                "message": f"group {record['name']!r} is archived",
-                "archived_at": record.get("archived_at"),
-                "hint": "restore it (POST /groups/{id}/restore) or use an attribute filter",
             },
         )
 
@@ -549,8 +538,6 @@ def view(
         "created_at": record.get("created_at"),
         "updated_by": record.get("updated_by"),
         "updated_at": record.get("updated_at"),
-        "archived_at": record.get("archived_at"),
-        "archived_by": record.get("archived_by"),
         "member_count": resolved["count"],
         "members": resolved["members"],
         "sources": resolved["sources"],

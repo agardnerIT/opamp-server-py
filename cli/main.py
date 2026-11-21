@@ -301,7 +301,6 @@ def _group_targets(agent: str, agents: Optional[str], attr: List[str], group: Li
 
 @groups_app.command("list")
 def groups_list(
-    include_archived: bool = typer.Option(False, "--all", help="Include archived groups"),
 ) -> None:
     """Saved selectors with their **live** member count (viewer).
 
@@ -314,7 +313,7 @@ def groups_list(
         from server.state import SQLiteGroupStore
 
         agents = _offline_states()
-        records = SQLiteGroupStore(_settings.db).list(include_archived=include_archived)
+        records = SQLiteGroupStore(_settings.db).list()
         items = [
             groups_module.view(record, agents, include_history=False) for record in records
         ]
@@ -326,7 +325,7 @@ def groups_list(
             }
         )
         return
-    _run(lambda oc: oc.groups(include_archived=include_archived))
+    _run(lambda oc: oc.groups())
 
 
 @groups_app.command("show")
@@ -465,25 +464,16 @@ def groups_update(
     _run(lambda oc: oc.update_group(group, **body))
 
 
-@groups_app.command("archive")
-def groups_archive(
+@groups_app.command("delete")
+def groups_delete(
     group: str = typer.Argument(..., help="Group name or id (grp-…)"),
 ) -> None:
-    """Archive a group (operator) — there is no delete.
+    """Delete a group (operator) — it is gone; the name becomes free for reuse.
 
-    Revisions, rollouts and the audit log reference the id, so history stays readable.
-    A live rollout approved against the group refuses with 409. An archived group is
-    absent from pickers, refuses edits and pushes, and `groups restore` brings it back.
+    History does not need the row: every revision carries its own snapshot. A live
+    rollout approved against the group refuses with 409.
     """
-    _run(lambda oc: oc.archive_group(group))
-
-
-@groups_app.command("restore")
-def groups_restore(
-    group: str = typer.Argument(..., help="Group name or id (grp-…)"),
-) -> None:
-    """Un-archive a group (operator). The definition comes back unchanged."""
-    _run(lambda oc: oc.restore_group(group))
+    _run(lambda oc: oc.delete_group(group))
 
 
 @groups_app.command("preview")
@@ -869,7 +859,7 @@ def _resolve_targets_preview(
                 "include": record.get("include") or [],
                 "exclude": record.get("exclude") or [],
                 "health_defined": record.get("health_defined") or [],
-                "archived": bool(record.get("archived_at")),
+                
             },
             "agents": record.get("member_count", len(record.get("members") or [])),
             "targets": record.get("members") or [],

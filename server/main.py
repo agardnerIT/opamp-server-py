@@ -396,7 +396,7 @@ PROM_UID_HEADER_PROBLEMS = prom_client.Counter(
 # label is the group *name* (operator-controlled, few), never an agent id.
 PROM_GROUPS = prom_client.Gauge(
     "opamp_groups_total",
-    "Collector groups (saved selectors), by archive state",
+    "Collector groups (saved selectors)",
     ["state"],
 )
 PROM_GROUP_MEMBERS = prom_client.Gauge(
@@ -2245,7 +2245,7 @@ def list_agents(
     ``group`` names a saved selector (#148): the members are what the group's
     definition or query matches *now*, plus its include/exclude pins — the same
     resolution a group-scoped push runs, so the list and the blast radius can
-    never disagree. An archived group is a 409, exactly as a push target is.
+    never disagree. An unknown group is a 404, exactly as a push target is.
 
     Unauthenticated. Returns `{"agents": [...], "count": n, "filters": {...}}`.
     Every entry carries `name` (#137) — the `agent.name` the agent declared in its
@@ -4039,8 +4039,8 @@ def _group_error(exc: GroupError) -> HTTPException:
     return HTTPException(status_code=exc.status_code, detail=exc.detail)
 
 
-def _require_group(name_or_id: str, *, include_archived: bool = False) -> Dict[str, Any]:
-    """Resolve a group by name or id, 404 when absent, 409 when archived (#111)."""
+def _require_group(name_or_id: str) -> Dict[str, Any]:
+    """Resolve a group by name or id, 404 when absent."""
     record = COLLECTOR_GROUPS.find(name_or_id)
     if record is None:
         raise HTTPException(
@@ -4050,28 +4050,16 @@ def _require_group(name_or_id: str, *, include_archived: bool = False) -> Dict[s
                 "hint": "list the saved selectors with GET /groups",
             },
         )
-    if record.get("archived_at") and not include_archived:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "message": f"group {record['name']!r} is archived",
-                "archived_at": record.get("archived_at"),
-                "hint": "POST /groups/{id}/restore first; an archived group is history, "
-                "not a target",
-            },
-        )
     return record
 
 
 def _publish_group_metrics(records: Optional[List[Dict[str, Any]]] = None) -> None:
     """Refresh the two group gauges. Cheap: one list + one resolve per group."""
-    records = records if records is not None else COLLECTOR_GROUPS.list(include_archived=True)
-    live = [record for record in records if not record.get("archived_at")]
-    archived = [record for record in records if record.get("archived_at")]
-    PROM_GROUPS.labels(state="active").set(len(live))
-    PROM_GROUPS.labels(state="archived").set(len(archived))
+    records = records if records is not None else COLLECTOR_GROUPS.list()
+    PROM_GROUPS.labels(state="active").set(len(records))
+    PROM_GROUPS.labels(state="archived").set(0)
     agents = AGENT_REGISTRY.list_all()
-    for record in live:
+    for record in records:
         resolved = groups.resolve_members(record, agents)
         PROM_GROUP_MEMBERS.labels(group=record["name"]).set(resolved["count"])
 
@@ -4097,7 +4085,6 @@ def list_group_attribute_keys(request: Request):
 @app.get("/groups", tags=["groups"], summary="List collector groups with live member counts (viewer)")
 def list_groups(
     request: Request,
-    include_archived: bool = Query(False, description="Include archived groups"),
 ):
     """Saved selectors with their **live** member count. Requires `viewer`.
 
@@ -4107,7 +4094,7 @@ def list_groups(
     """
     require_roles(request, ROLE_VIEWER)
     agents = AGENT_REGISTRY.list_all()
-    records = COLLECTOR_GROUPS.list(include_archived=include_archived)
+    records = COLLECTOR_GROUPS.list()
     items = [groups.view(record, agents, include_history=False) for record in records]
     _publish_group_metrics()
     return {
@@ -4178,7 +4165,7 @@ def get_group(group_id: str, request: Request):
     behind "resolution changed 3 times since".
     """
     require_roles(request, ROLE_VIEWER)
-    record = _require_group(group_id, include_archived=True)
+    record = _require_group(group_id)
     view = groups.view(record, AGENT_REGISTRY.list_all())
     _publish_group_metrics()
     return view
@@ -4246,26 +4233,26 @@ def update_group(
     return view
 
 
-@app.delete("/groups/{group_id}", tags=["groups"], summary="Archive a group (operator)")
-def archive_group(
+@app.delete("/groups/{group_id}", tags=["groups"], summary="Delete a group (operator)")
+def delete_group(
     group_id: str,
     request: Request,
-    _audit=Depends(require_audit("group.archive")),
+    _audit=Depends(require_audit("group.delete")),
 ):
-    """**Archive** a group. Requires `operator`. There is no delete.
+    """**Delete** a group. Requires `operator`. A group either exists or it is gone.
 
-    Revisions, rollouts and the audit log all reference `group_id`, so a hard delete
-    would leave history pointing at nothing. An archived group is absent from
-    pickers, refuses edits and pushes, and can be restored.
+    Nothing needs the live row after deletion: every revision carries
+    `group_snapshot_json`, the include_future sweep re-runs the snapshot's
+    selector, and the resolution history ("it used to be 12 agents") keys off the
+    id without a foreign key. Deleting is safe on history and frees the name for
+    reuse.
 
     A **live rollout** that was approved against this group refuses with 409 first:
-    archiving it mid-flight would hide the definition from the operator who has to
+    deleting it mid-flight would hide the definition from the operator who has to
     explain what is being delivered.
     """
     principal = require_roles(request, ROLE_OPERATOR)
-    current = _require_group(group_id, include_archived=True)
-    if current.get("archived_at"):
-        return groups.view(current, AGENT_REGISTRY.list_all())
+    current = _require_group(group_id)
     live = rollout.live_rollouts_for_group(current["group_id"])
     if live:
         raise HTTPException(
@@ -4274,40 +4261,19 @@ def archive_group(
                 "message": f"group {current['name']!r} is in use by a live rollout",
                 "rollouts": live,
                 "hint": "let the rollout finish, abort it, or (for a stuck rollout) "
-                "cancel it, then archive",
+                "cancel it, then delete",
             },
         )
     audit_action(
         principal,
-        "group.archive",
+        "group.delete",
         target_kind="group",
         target_id=current["group_id"],
         group_name=current.get("name"),
     )
-    record = COLLECTOR_GROUPS.archive(current["group_id"], actor=principal.name)
+    record = COLLECTOR_GROUPS.delete(current["group_id"])
     _publish_group_metrics()
-    return groups.view(record, AGENT_REGISTRY.list_all())
-
-
-@app.post("/groups/{group_id}/restore", tags=["groups"], summary="Restore an archived group (operator)")
-def restore_group(
-    group_id: str,
-    request: Request,
-    _audit=Depends(require_audit("group.restore")),
-):
-    """Clear `archived_at`. Requires `operator`. The definition comes back unchanged."""
-    principal = require_roles(request, ROLE_OPERATOR)
-    current = _require_group(group_id, include_archived=True)
-    audit_action(
-        principal,
-        "group.restore",
-        target_kind="group",
-        target_id=current["group_id"],
-        group_name=current.get("name"),
-    )
-    record = COLLECTOR_GROUPS.restore(current["group_id"], actor=principal.name)
-    _publish_group_metrics()
-    return groups.view(record, AGENT_REGISTRY.list_all())
+    return {"deleted": record["group_id"], "name": record["name"]}
 
 
 @app.post("/groups/{group_id}/preview", tags=["groups"], summary="Preview a group's membership (viewer)")
@@ -4322,7 +4288,7 @@ def preview_group(group_id: str, request: Request):
     `use_stored_resolution` gets a membership to push to.
     """
     principal = require_roles(request, ROLE_VIEWER)
-    record = _require_group(group_id, include_archived=True)
+    record = _require_group(group_id)
     result = groups.preview(record, AGENT_REGISTRY.list_all(), actor=principal.name)
     PROM_GROUP_MEMBERSHIP_CHANGES.labels(reason=groups.REASON_PREVIEW).inc()
     _publish_group_metrics()

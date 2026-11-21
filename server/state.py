@@ -1969,10 +1969,12 @@ class SQLiteGroupStore:
     Two tables:
 
     ``collector_groups``
-        The definition (filters + `include`/`exclude` pins), its owner and the
-        lifecycle. Groups are **archived, never deleted**: revisions and rollouts
-        reference `group_id`, and the audit log is append-only, so a hard delete
-        would leave history pointing at nothing.
+        The definition (filters + `include`/`exclude` pins) and its owner. Groups
+        are **deleted, not archived**: nothing needs the live row after deletion —
+        revisions and rollouts carry `group_snapshot_json`, so history stays
+        readable, and the resolution history below keys off the id without a
+        foreign key. The legacy `archived_at` columns are still created (schema
+        stability) but never written; existing archived rows are cleared on open.
 
     ``collector_group_resolutions``
         What the group meant, when — `preview`, `push` and `propose` evaluations.
@@ -2047,6 +2049,14 @@ class SQLiteGroupStore:
                 "CREATE INDEX IF NOT EXISTS collector_group_resolutions_idx "
                 "ON collector_group_resolutions(group_id, evaluated_at DESC)"
             )
+            # Groups are deleted, not archived: the legacy archive columns stay in
+            # the schema (no migration step for an existing database), but every
+            # archived row is returned to service on open. Idempotent by
+            # construction — after the first open there is nothing to clear.
+            conn.execute(
+                "UPDATE collector_groups SET archived_at=NULL, archived_by=NULL "
+                "WHERE archived_at IS NOT NULL"
+            )
             # #132: a group may be a SQL selection instead of a filter document.
             # Added in place so an existing database upgrades without a migration
             # step; every pre-#132 row simply has no query and keeps resolving
@@ -2057,6 +2067,9 @@ class SQLiteGroupStore:
             }
             if "query" not in group_columns:
                 conn.execute("ALTER TABLE collector_groups ADD COLUMN query TEXT")
+            # Committed here so the schema changes land before `journal_mode` is
+            # touched — a pragma cannot run inside an open write transaction.
+            conn.commit()
             conn.execute("PRAGMA journal_mode=WAL")
 
     def _connect(self) -> sqlite3.Connection:
@@ -2398,14 +2411,6 @@ class SQLiteGroupStore:
         current = self.get(group_id)
         if current is None:
             raise GroupError(404, f"group {group_id} not found")
-        if current.get("archived_at"):
-            raise GroupError(
-                409,
-                {
-                    "message": f"group {current['name']!r} is archived",
-                    "hint": "restore it first: an archived group is history, not a target",
-                },
-            )
         updates, changes = self.compute_changes(
             current,
             name=name,
@@ -2433,34 +2438,21 @@ class SQLiteGroupStore:
             ) from exc
         return self.get(group_id) or {}, changes
 
-    def archive(self, group_id: str, *, actor: str) -> Dict[str, Any]:
-        """Archive, never delete: revisions and rollouts still reference the id."""
-        current = self.get(group_id)
-        if current is None:
-            raise GroupError(404, f"group {group_id} not found")
-        if current.get("archived_at"):
-            return current
-        with self._connect() as conn:
-            conn.execute(
-                "UPDATE collector_groups SET archived_at=?, archived_by=?, "
-                "updated_at=? WHERE group_id=?",
-                (utcnow().isoformat(), actor, utcnow().isoformat(), group_id),
-            )
-        return self.get(group_id) or {}
+    def delete(self, group_id: str) -> Dict[str, Any]:
+        """Remove a group outright. History does not need the live row.
 
-    def restore(self, group_id: str, *, actor: str) -> Dict[str, Any]:
+        Every revision carries `group_snapshot_json`, the include_future sweep
+        re-runs the snapshot's selector, and `record_push_resolution` already
+        tolerates a missing row — so deletion strands nothing. The one guard that
+        matters (a live rollout was approved against the group) lives at the route,
+        which is where an operator meets it.
+        """
         current = self.get(group_id)
         if current is None:
             raise GroupError(404, f"group {group_id} not found")
-        if not current.get("archived_at"):
-            return current
         with self._connect() as conn:
-            conn.execute(
-                "UPDATE collector_groups SET archived_at=NULL, archived_by=NULL, "
-                "updated_by=?, updated_at=? WHERE group_id=?",
-                (actor, utcnow().isoformat(), group_id),
-            )
-        return self.get(group_id) or {}
+            conn.execute("DELETE FROM collector_groups WHERE group_id=?", (group_id,))
+        return current
 
     @staticmethod
     def new_group_id() -> str:
@@ -2491,11 +2483,8 @@ class SQLiteGroupStore:
             ).fetchone()
         return self._row(row)
 
-    def list(self, *, include_archived: bool = False) -> List[Dict[str, Any]]:
-        query = "SELECT * FROM collector_groups"
-        if not include_archived:
-            query += " WHERE archived_at IS NULL"
-        query += " ORDER BY name"
+    def list(self) -> List[Dict[str, Any]]:
+        query = "SELECT * FROM collector_groups ORDER BY name"
         with self._connect() as conn:
             rows = conn.execute(query).fetchall()
         return [record for record in (self._row(row) for row in rows) if record]

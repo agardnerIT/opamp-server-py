@@ -297,8 +297,6 @@ class FakeServer:
                     "unknown_pins": [],
                 },
             )
-        if method == "POST" and url.endswith("/restore"):
-            return FakeResponse(200, {"group_id": "grp-1", "name": "prod"})
         if "/groups" in url:
             if method == "POST" and url.rstrip("/").endswith("/groups"):
                 body = kwargs.get("json") or {}
@@ -315,7 +313,7 @@ class FakeServer:
                     },
                 )
             if method == "DELETE":
-                return FakeResponse(200, {"group_id": "grp-1", "archived_at": "2026-01-01"})
+                return FakeResponse(200, {"deleted": "grp-1", "name": "prod"})
             return FakeResponse(200, {"groups": self.groups, "count": len(self.groups)})
         # #104: the Remote Config page. Deliberately dumb, like the rest of the fake.
         if url.endswith("/config/posture"):
@@ -1827,7 +1825,6 @@ def group_row(**overrides):
         "sources": {"definition": ["cd" * 16], "included": [], "excluded": ["ab" * 16]},
         "health_defined": [],
         "unknown_pins": [],
-        "archived_at": None,
         "updated_at": "2026-01-01T00:00:00+00:00",
         "last_resolution": None,
         "membership_changes": 0,

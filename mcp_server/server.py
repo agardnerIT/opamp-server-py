@@ -408,7 +408,7 @@ def get_config_rollout(rollout_id: str) -> str:
 
 
 @mcp.tool()
-def list_groups(include_archived: bool = False) -> str:
+def list_groups() -> str:
     """Saved selectors ("collector groups") with their live member count.
 
     A group is a **name for a filter document**, plus explicit `include`/`exclude`
@@ -417,7 +417,7 @@ def list_groups(include_archived: bool = False) -> str:
     group over a hand-typed filter when proposing: it is the same selector, spelled
     once.
     """
-    return _tool(lambda oc: oc.groups(include_archived=include_archived))
+    return _tool(lambda oc: oc.groups())
 
 
 @mcp.tool()

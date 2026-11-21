@@ -116,7 +116,7 @@ opampctl agents compliance <agent-id>
 | Propose to a saved selector | `config propose --file f.yaml --group prod-emea` | `propose_config` with `scope={"group": …}` | `POST /config/revisions` (`scope.group`) |
 | List/save groups | `groups list` / `groups create -n macos-au --query "SELECT ..."` | `list_groups` / `create_group` (write-gated) | `GET /groups` / `POST /groups` |
 | One group, its members and history | `groups show prod-emea` | `get_group` | `GET /groups/{id}` |
-| Edit / archive / restore a group (operator) | `groups update` / `groups archive` / `groups restore` | — | `PUT`/`DELETE`/`POST …/restore` |
+| Edit / delete a group (operator) | `groups update` / `groups delete` | — | `PUT`/`DELETE /groups/{id}` |
 | Who would a group hit now? | `groups preview prod-emea` | `preview_group` | `POST /groups/{id}/preview` |
 | Attribute keys the fleet reports | `groups keys` | `attribute_keys` | `GET /groups/attribute-keys` |
 | Revision history (metadata) | `config revisions [--agent] [--status]` | `list_config_revisions` | `GET /config/revisions` |
@@ -487,8 +487,8 @@ Four things that will otherwise bite you:
   Read the list; a renamed attribute looks exactly like this.
 - **Editing a group changes future pushes only.** Revisions keep their
   `group_snapshot`, and `config show` reports `group_definition_changed: true` when the
-  name no longer means what it did. Groups are archived, never deleted, and a live
-  rollout blocks the archive.
+  name no longer means what it did. Groups are deleted outright (history keeps its snapshots), and a live
+  rollout blocks the delete.
 
 ### What validation checks (#100)
 

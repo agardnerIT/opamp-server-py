@@ -1015,7 +1015,7 @@ class OpampClient:
 
     # ------------------------------------------------- collector groups (#111)
 
-    def groups(self, include_archived: bool = False) -> Dict[str, Any]:
+    def groups(self) -> Dict[str, Any]:
         """``GET /groups`` — saved selectors with **live** member counts (viewer).
 
         A group is a name for a filter document plus ``include``/``exclude`` pins;
@@ -1023,8 +1023,7 @@ class OpampClient:
         group meant when it was last evaluated, which is the baseline
         :meth:`preview_group` compares against.
         """
-        params = {"include_archived": True} if include_archived else None
-        return self._get("/groups", params=params)
+        return self._get("/groups")
 
     def group(self, group_id: str) -> Dict[str, Any]:
         """``GET /groups/{id}`` — definition, current members, resolution history (viewer).
@@ -1102,18 +1101,14 @@ class OpampClient:
                 body[key] = value
         return self._put(f"/groups/{group_id}", json=body)
 
-    def archive_group(self, group_id: str) -> Dict[str, Any]:
-        """``DELETE /groups/{id}`` — **archive** a group (operator). There is no delete.
+    def delete_group(self, group_id: str) -> Dict[str, Any]:
+        """``DELETE /groups/{id}`` — **delete** a group (operator). It is gone.
 
-        Revisions and rollouts reference the id, so history stays readable. A live
-        rollout approved against the group refuses with 409 first. Archived groups
-        cannot be pushed to or edited; :meth:`restore_group` brings one back.
+        History does not need the live row: every revision carries its own group
+        snapshot, and the resolution history survives. A live rollout approved
+        against the group refuses with 409 first. The name becomes free for reuse.
         """
         return self._request("DELETE", f"/groups/{group_id}")
-
-    def restore_group(self, group_id: str) -> Dict[str, Any]:
-        """``POST /groups/{id}/restore`` — un-archive a group (operator)."""
-        return self._post(f"/groups/{group_id}/restore", json={})
 
     def preview_group(self, group_id: str) -> Dict[str, Any]:
         """``POST /groups/{id}/preview`` — members now vs last resolution (viewer).

@@ -7,8 +7,10 @@ file follows the three rules that make the feature safe:
   group-scoped push resolves to exactly what the equivalent `filter` would);
 * **the definition that was approved is snapshotted onto the revision**, so editing a
   group changes future pushes only;
-* **the dangerous cases are refused by default**: a health-defined group, a group that
-  shrank silently, a push to an empty group, an archived group.
+* **the dangerous cases are refused by default**: a health-defined group, a group
+  that shrank silently, a push to an empty group, a group in use by a live rollout;
+* **deletion is guarded**: a live rollout keeps the definition readable until the
+  rollout is done, and nothing else needs the live row — snapshots do.
 
 The guards are tested through the API because that is where an operator meets them —
 a guard only the control-plane module enforces is a guard a route can forget.
@@ -347,7 +349,27 @@ def test_an_empty_group_is_valid_to_create_and_preview_but_not_to_push(client):
     assert "no members" in pushed.json()["detail"]["message"]
 
 
-def test_an_archived_group_is_hidden_refuses_edits_and_pushes_and_can_be_restored(client):
+def test_a_deleted_group_is_gone_and_its_name_is_reusable(client):
+    describe(UID, "prod")
+    created = create(client).json()
+    deleted = client.delete("/groups/prod-emea", headers=admin_headers())
+    assert deleted.status_code == 200
+    assert deleted.json()["deleted"] == created["group_id"]
+
+    assert client.get("/groups", headers=admin_headers()).json()["count"] == 0
+    refused_push = propose(client, {"group": "prod-emea"})
+    assert refused_push.status_code == 404
+    refused_edit = client.put(
+        "/groups/prod-emea", json={"owner": "someone"}, headers=admin_headers()
+    )
+    assert refused_edit.status_code == 404
+
+    # A group either exists or it is deleted — the name is free again.
+    assert create(client).status_code == 200
+    assert propose(client, {"group": "prod-emea"}).status_code == 200
+
+
+def test_deleting_is_refused_while_a_live_rollout_uses_the_group(client):
     describe(UID, "prod")
     created = create(client).json()
     archived = client.delete("/groups/prod-emea", headers=admin_headers())
@@ -375,7 +397,7 @@ def test_an_archived_group_is_hidden_refuses_edits_and_pushes_and_can_be_restore
     assert propose(client, {"group": "prod-emea"}).status_code == 200
 
 
-def test_archiving_is_refused_while_a_live_rollout_uses_the_group(client):
+def test_deleting_is_refused_while_a_live_rollout_uses_the_group(client):
     describe(UID, "prod")
     create(client)
     proposal_id = propose(client, {"group": "prod-emea"}).json()["proposal_id"]

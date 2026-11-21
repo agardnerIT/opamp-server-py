@@ -46,10 +46,11 @@ outage:
   membership recorded by a `preview` instead.
 - **Silent shrinkage is loud.** Resolving smaller than the last recorded resolution
   returns the `dropped` diff and requires `confirm_scope_change: true`.
-- **An empty group can be saved but not pushed to** (404), and an **archived** group
-  is absent from pickers, refuses edits and pushes (409), and stays readable because
-  revisions and the audit log still reference it. Archive is the only delete, and a
-  live rollout blocks it.
+- **An empty group can be saved but not pushed to** (404), and a group is
+  **deleted, not archived**: `DELETE /groups/{id}` removes it outright and frees the
+  name for reuse. History needs no live row — every revision carries its own
+  `group_snapshot` and the resolution history survives — but a live rollout that was
+  approved against the group blocks the delete (409).
 
 Edits change **future** pushes only: every revision records a `group_snapshot`, and
 `GET /config/revisions` reports `group_definition_changed: true` once the name no

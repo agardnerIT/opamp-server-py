@@ -2,6 +2,7 @@
 
 [![OpenTelemetry Collector supported](https://img.shields.io/badge/OpenTelemetry%20Collector-supported-blue?logo=opentelemetry)](https://opentelemetry.io/docs/collector)
 [![osquery supported](https://img.shields.io/badge/osquery-supported-blue?logo=osquery)](https://github.com/agardnerit/osquery-opamp)
+[![Grafana Alloy supported](https://img.shields.io/badge/Grafana%20Alloy-supported-blue?logo=grafana)](https://grafana.com/docs/alloy/)
 
 ![Warning: Entirely vibecoded](https://img.shields.io/badge/Warning-Entirely%20vibecoded-orange?style=for-the-badge)
 

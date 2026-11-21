@@ -1122,11 +1122,10 @@ def agent_type_badge(agent):
     label = f"{icon} {name}"
     if source and source != "fallback":
         label += f" ({source})"
-    # #134/#121: several profiles matched and this one won on priority. A tie is a
-    # decision nobody can audit, so the badge says so in one glyph — the detail page
-    # spells out the candidates (`agent_type_ambiguous`), because a table cell cannot.
-    if agent.get("agent_type_ambiguous"):
-        label += " ⚠️"
+    # #134/#121: several profiles matched and this one won on priority. The tie is
+    # recorded (`agent_type_ambiguous`) and spelled out on the detail page, but the
+    # badge stays clean: for products like Alloy the tie is permanent by construction,
+    # and an alarm glyph on every row reads as something being wrong.
     return label
 
 

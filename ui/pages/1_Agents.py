@@ -674,7 +674,16 @@ if agent_id_param:
             fleet_agent or {}
         ).get("agent_type_warning")
         if type_warning:
-            st.warning(type_warning)
+            # A profile reached by `sniffed`/`fallback` means the server is
+            # guessing — a warning is right. A `declared`/`pinned` match is the
+            # agent (or operator) naming itself, and the profile's no-checks
+            # stance is a documented design decision, not a defect: render it
+            # as information, not alarm (#150 alloy feedback).
+            source = (detailed_agent or fleet_agent or {}).get(
+                "agent_type_source", ""
+            )
+            renderer = st.info if source in ("declared", "pinned") else st.warning
+            renderer(type_warning)
         # #134: several profiles matched and priority picked one. The tie is worth a
         # sentence, because after #134 a wrong profile is a file someone dropped in.
         ambiguous = (detailed_agent or {}).get("agent_type_ambiguous") or (

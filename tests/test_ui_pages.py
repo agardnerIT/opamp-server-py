@@ -738,11 +738,12 @@ class TestAgentTypeBadge:
             {"agent_type": "generic", "agent_type_source": "fallback"}
         ) == "📦 generic"
 
-    def test_an_ambiguous_match_says_so(self, _shared):
-        """#134 leaves a tie visible on the payload; #121 renders it (#121).
-
-        The badge is a table cell, so it gets one glyph; the detail page names the
-        candidates. A tie nothing shows is a decision nobody can audit.
+    def test_an_ambiguous_match_does_not_alarm(self, _shared):
+        """#134 leaves a tie visible in the data, but the badge stays calm: for
+        products like Alloy the tie is *permanent by construction* (the config
+        sniff of the collector profile matches too), so an alarm glyph on every
+        row reads as something being wrong. The detail page names the
+        candidates and offers the pin.
         """
         assert (
             _shared.agent_type_badge(
@@ -752,7 +753,7 @@ class TestAgentTypeBadge:
                     "agent_type_ambiguous": ["otelcol", "fluentbit"],
                 }
             )
-            == "🧩 otelcol (declared) ⚠️"
+            == "🧩 otelcol (declared)"
         )
         # No tie, no glyph.
         assert (

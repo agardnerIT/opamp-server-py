@@ -39,6 +39,7 @@ cannot — we do not build vendor-protocol shims.
 | Grafana Alloy | ✅ | Via the stock upstream OpAMP supervisor (`alloy otel-supervisor` manual mode) |
 | Fluent Bit | ✅ | [Profile included](docs/agent-profiles.md) |
 | osquery | ✅ | [Profile included](docs/agent-profiles.md), built with [osquery-opamp](https://github.com/agardnerit/osquery-opamp) |
+| Telegraf | ❌ | No OpAMP client in Telegraf yet — remote config is tracked upstream in [influxdata/telegraf#16356](https://github.com/influxdata/telegraf/issues/16356). We'll add a profile when Telegraf speaks OpAMP. |
 | Vector | ❌ | No standard-OpAMP client exists in Vector yet — tracked upstream in [vectordotdev/vector#23752](https://github.com/vectordotdev/vector/issues/23752). We'll add a profile when Vector speaks OpAMP. |
 
 ## Architecture

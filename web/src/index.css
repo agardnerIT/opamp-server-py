@@ -236,10 +236,12 @@ kbd {
 
 /* A spark travelling the same path once the line has drawn (connectivity you
    can see is live, not a static diagram) — agent → server, like the reports
-   it stands in for. Rising dashoffset marches the dash toward the path start. */
+   it stands in for. The dash pattern repeats every 1 pathLength (0.09 + 0.91),
+   so a rising offset wraps the dash to the path end and sweeps it toward the
+   path start; the wrap happens during the 0→12% fade-in, so it never reads. */
 @keyframes topology-spark {
   0% {
-    stroke-dashoffset: 1;
+    stroke-dashoffset: 0;
     opacity: 0;
   }
   12%,
@@ -247,7 +249,7 @@ kbd {
     opacity: 0.9;
   }
   100% {
-    stroke-dashoffset: 0;
+    stroke-dashoffset: 1;
     opacity: 0;
   }
 }

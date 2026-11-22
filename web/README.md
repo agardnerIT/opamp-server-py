@@ -50,6 +50,20 @@ Latest screens (mock-mode fleet fixtures):
 |---|---|
 | ![Agents with session slot](../docs/screenshots/console-agents-session.png) | ![Login error](../docs/screenshots/console-login-error.png) |
 | Agents list + session slot (role, expiry, Extend, Sign out) | Login with the 401 message |
+| ![Nav parity with Admin section](../docs/screenshots/console-nav-admin.png) | |
+| Sidebar at nav parity (stage 4): main pages + role-gated Admin section | |
+
+## Navigation (stage 4)
+
+The sidebar mirrors `ui/app.py`'s `st.navigation` tree so every Streamlit page
+stays reachable during the migration: Agents (`/`, default), Reports, Groups,
+Remote Config, Help, plus an **Admin** section (Alerts, Compliance, Agent
+tokens, Sessions, Updates, Release emails) with flat URLs like Streamlit's.
+The Admin section and its admin-only items (Agent tokens, Sessions) are gated
+client-side by the role ladder in `src/lib/roles.ts` — a hint only; the
+server's `require_roles` is the authority. Pages not yet built render a
+`StubPage`; unknown URLs land on the root `NotFound`; route render crashes hit
+the `RootError` boundary.
 
 ## Regenerating the API types
 

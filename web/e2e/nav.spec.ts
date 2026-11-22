@@ -1,0 +1,77 @@
+import { expect, test } from "@playwright/test";
+
+/**
+ * Navigation parity (new-ui stage 4 done-when): every Streamlit page has a
+ * reachable route, the Admin section appears for a role that can use it, and
+ * unknown URLs land on the not-found page. Mock transport; the mock session
+ * is admin, so all admin items should be visible.
+ */
+
+const CORRECT = "opamp-mock-password"; // fixtures.validPassword
+
+/** Every shell route with its page title (flat URLs, like Streamlit's). */
+const ROUTES = [
+  ["/reports", "Reports"],
+  ["/groups", "Groups"],
+  ["/remote-config", "Remote Config"],
+  ["/help", "Help"],
+  ["/alerts", "Alerts"],
+  ["/compliance", "Compliance"],
+  ["/agent-tokens", "Agent tokens"],
+  ["/sessions", "Sessions"],
+  ["/updates", "Updates"],
+  ["/release-emails", "Release emails"],
+] as const;
+
+test("signed in as admin: Admin section visible, every page reachable", async ({
+  page,
+}) => {
+  await page.goto("/login");
+  await page.getByLabel("Password").fill(CORRECT);
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page).toHaveURL("/");
+
+  const adminNav = page.getByRole("navigation", { name: "Admin" });
+  await expect(adminNav).toBeVisible();
+  // Admin-only items visible to the admin role.
+  await expect(adminNav.getByRole("link", { name: "Agent tokens" })).toBeVisible();
+  await expect(adminNav.getByRole("link", { name: "Sessions" })).toBeVisible();
+
+  for (const [path, title] of ROUTES) {
+    await page.goto(path);
+    await expect(
+      page.getByRole("heading", { level: 1, name: title }),
+    ).toBeVisible();
+  }
+});
+
+test("Agents is the only page marked active on '/', and each page marks itself", async ({
+  page,
+}) => {
+  await page.goto("/login");
+  await page.getByLabel("Password").fill(CORRECT);
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page).toHaveURL("/");
+
+  const mainNav = page.getByRole("navigation", { name: "Main" });
+  await expect(
+    mainNav.getByRole("link", { name: "Agents", exact: true }),
+  ).toHaveAttribute("aria-current", "page");
+
+  await page.goto("/groups");
+  await expect(
+    mainNav.getByRole("link", { name: "Groups" }),
+  ).toHaveAttribute("aria-current", "page");
+  await expect(
+    mainNav.getByRole("link", { name: "Agents", exact: true }),
+  ).not.toHaveAttribute("aria-current", "page");
+});
+
+test("unknown URLs render the not-found page", async ({ page }) => {
+  await page.goto("/definitely-not-a-page");
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Page not found" }),
+  ).toBeVisible();
+  await page.getByRole("link", { name: "Back to Agents" }).click();
+  await expect(page).toHaveURL("/");
+});

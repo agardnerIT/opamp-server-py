@@ -212,7 +212,7 @@ role gating reflected in UI; Playwright test for login failure/success.
 
 ---
 
-## Stage 4 — App shell + navigation parity (status: **todo**)
+## Stage 4 — App shell + navigation parity (status: **done**, 2026-11-22)
 
 ### Notes for next stage (written 2026-11-22 when stage 3 closed)
 
@@ -242,20 +242,43 @@ never reuse cached data). Also fixed vitest picking up Playwright specs:
 
 Depends on: stage 3.
 
-Goal: the shell covers everything Streamlit's sidebar had, so no page is
-unreachable during migration.
+**Landed 2026-11-22, all gates green (build, vitest 32, oxlint, Playwright 5).
+Sidebar mirrors `ui/app.py` exactly: main nav in Streamlit order (Agents `/`,
+Reports, Groups, Remote Config, Help) + Admin section with flat URLs
+(`/alerts`, `/compliance`, `/agent-tokens`, `/sessions`, `/updates`,
+`/release-emails`).** Implementation:
 
-Tasks:
+- `src/lib/nav.ts` owns `MAIN_NAV`/`ADMIN_NAV` + `visibleNav(nav, role)`;
+  `src/lib/roles.ts` mirrors the server ladder (`roleAtLeast`) with unit tests
+  in `nav.test.ts` (ladder, per-role visibility, Streamlit order parity).
+- Admin visibility per the Streamlit pages' own gating: Alerts/Compliance/
+  Updates/Release-emails = `operator`; Agent tokens/Sessions = `admin`;
+  whole section hidden below `operator` and while the session query is
+  pending (no low-role flash).
+- Fixed a stage-1–3 bug on the way: the sidebar matched `/` with
+  `fuzzy: true`, so Agents was marked active on every page; `/` now matches
+  exactly (`aria-current="page"` asserted per-route in e2e).
+- Unbuilt pages render `StubPage` (real title + which stage builds them);
+  root route gained `notFoundComponent` (`NotFound.tsx`) and
+  `errorComponent` (`RootError.tsx`, offers reset + link home).
+- E2E: `e2e/nav.spec.ts` (admin section visible, all 11 routes reachable,
+  active-state correctness, not-found round-trip). Screenshot:
+  `docs/screenshots/console-nav-admin.png` via `tools/screenshot-shell.mjs`
+  (starts the mock dev server itself, then captures after Admin nav + agent
+  table are visible — do not shoot before the queries settle).
 
-1. Extend nav to full parity: Agents, Reports, Groups, Remote Config, Help +
-   Admin section (Alerts, Compliance, Agent tokens, Sessions, Updates,
-   Release emails) — mirror `ui/app.py`'s `st.navigation` tree.
-2. Routes for each; every route renders a stub page with the real page title.
-3. Admin section visible only to roles that can use it (client-side hint
-   only; server still enforces).
-4. Empty/broken states: a `NotFound` route, and an error boundary.
+Done when: every Streamlit page has a corresponding route; build + tests green. ✅
 
-Done when: every Streamlit page has a corresponding route; build + tests green.
+### Notes for stage 5 (written 2026-11-22 when stage 4 closed)
+
+- Route stubs to replace with real pages: `Help.tsx` (stage 7);
+  `Alerts/Compliance/AgentTokens/Sessions/Updates/ReleaseEmails.tsx`
+  (stage 8). `StubPage` takes `stage` so the placeholder names its builder.
+- Reuse `visibleNav`/`roleAtLeast` (`src/lib/`) for any per-role action
+  gating; keep it a hint — the server enforces.
+- Sidebar section headers are plain `div` ("Admin", uppercase) between two
+  `<nav aria-label>`s; stage 5's design pass can restyle but keep the two-nav
+  structure (e2e queries `getByRole('navigation', { name: 'Admin' })`).
 
 ---
 

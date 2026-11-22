@@ -1,0 +1,21 @@
+@import 'tailwindcss';
+
+/* Design tokens — dark-first ops console. Refined with the better-colors
+   skill once real screens exist; these are starting values, not doctrine. */
+:root {
+  --color-bg: #0b0e14;
+  --color-surface: #131722;
+  --color-border: #232a3b;
+  --color-text: #e6e9f0;
+  --color-muted: #8b93a7;
+  --color-accent: #4f8ff7;
+  --color-ok: #3fb27f;
+  --color-warn: #d9a441;
+  --color-danger: #e05252;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}

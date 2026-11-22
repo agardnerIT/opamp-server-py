@@ -143,6 +143,13 @@ passing, oxlint clean):
 - The demo Agents page renders `/agents` via TanStack Query with a real
   empty state; the live fleet was empty when this stage finished, so the
   populated-table view has only been seen against fixtures.
+- **CORRECTION (2026-11-22, stage 3):** the claim above that the demo page
+  rendered "real data from the live server" was wrong — the Vite proxy
+  shorthand (`'/api': 'http://…'`) preserves the full path, so every proxied
+  request hit `/<api>/…` on the server and answered FastAPI's 404
+  `{"detail":"Not Found"}`. Fixed in `vite.config.ts` with a `rewrite:` that
+  strips the `/api` prefix; **stage 10's nginx config must strip it the same
+  way** (the server serves unprefixed paths).
 
 ---
 

@@ -6,6 +6,7 @@ import {
 import Login from './routes/Login'
 import AppShell from './routes/AppShell'
 import Agents from './routes/Agents'
+import AgentDetail from './routes/AgentDetail'
 import Groups from './routes/Groups'
 import RemoteConfig from './routes/RemoteConfig'
 import Reports from './routes/Reports'
@@ -40,6 +41,20 @@ const agentsRoute = createRoute({
   getParentRoute: () => shellRoute,
   path: '/',
   component: Agents,
+  // The SQL selection rides in the URL (#146 parity): a detail page's back
+  // link re-enters the same selection, and a filtered list is shareable.
+  validateSearch: (search: Record<string, unknown>): { q?: string } => {
+    return typeof search.q === 'string' && search.q.trim() !== '' ? { q: search.q } : {};
+  },
+})
+const agentDetailRoute = createRoute({
+  getParentRoute: () => shellRoute,
+  path: '/agents/$agentId',
+  component: AgentDetail,
+  // The selection rides along (#146): the detail's back link re-enters it.
+  validateSearch: (search: Record<string, unknown>): { q?: string } => {
+    return typeof search.q === 'string' && search.q.trim() !== '' ? { q: search.q } : {};
+  },
 })
 const reportsRoute = createRoute({
   getParentRoute: () => shellRoute,
@@ -96,6 +111,7 @@ const routeTree = rootRoute.addChildren([
   loginRoute,
   shellRoute.addChildren([
     agentsRoute,
+    agentDetailRoute,
     reportsRoute,
     groupsRoute,
     remoteConfigRoute,

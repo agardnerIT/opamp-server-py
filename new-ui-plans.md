@@ -282,7 +282,7 @@ Done when: every Streamlit page has a corresponding route; build + tests green. 
 
 ---
 
-## Stage 5 — Agents list + agent detail, multi-type aware (status: **todo**)
+## Stage 5 — Agents list + agent detail, multi-type aware (status: **done**, 2026-11-22)
 
 Depends on: stages 2–4. This is pain point #3 from the owner and the biggest
 design task.
@@ -315,6 +315,45 @@ views; screenshots taken; Playwright covers list + one detail view.
 
 Notes: this stage produces the reusable primitives (StatusBadge,
 DataExplorer/SQL search surface — cf. `ui/sql_search.py`) later stages reuse.
+
+### Notes for next stage (written 2026-11-22 when stage 5 closed)
+
+All gates green: `npm run build` (tsc strict), vitest 52, oxlint, Playwright 11
+(auth 2, nav 3, agents 6 in `e2e/agents.spec.ts`). Screenshots:
+`docs/screenshots/console-agents-{list,agent-detail}.png` (mock fleet) via
+`tools/screenshot-agents.mjs`. **Still to do against a live server** (stages 9
+owns the live pass): connect ≥2 real agent types and confirm the type-aware
+detail end-to-end — everything here was verified against fixtures that mirror
+`AgentState.to_dict()` / `AgentProfile.describe()` byte-for-byte where it
+matters (panels, telemetry, capability tags).
+
+- **Where the primitives live** (reuse, do not re-invent):
+  `src/lib/deliveryStatus.ts` (`statusTone`/`statusLabel` — the server's
+  vocabulary, unit-tested), `src/components/StatusBadge.tsx`,
+  `src/components/AgentTypeBadge.tsx` (profile display name/icon + source),
+  `src/lib/sqlSuggestions.ts` (pure suggestion helper, unit-tested) +
+  `src/components/SqlSearch.tsx` (combobox, Tab/Enter),
+  `src/lib/configText.ts` (`configObjects` — display-only `configMap`
+  decoder; `<redacted>` passes through opaque),
+  `src/components/{Section,KeyValue,EmptyState}.tsx`.
+- `AgentDetail`/`AgentEntry` narrow interfaces in `src/api/endpoints.ts`
+  mirror `AgentState.to_dict()`; `capability_tags` are `{label, icon}` pairs
+  (an earlier `string[]` was wrong). Mock handlers now do parameterized paths
+  (`/agent/{id}`) and a minimal `q`/`healthy` selection stand-in — real SQL
+  stays server-side.
+- **Router gotchas** (cost two e2e failures): components under the shell
+  layout route must use `useParams`/`useSearch({ strict: false })` — the
+  root-relative match id (`from: "/agents/$agentId"`) throws "Could not find
+  an active match". Both list and detail routes validate `q` in the search
+  (`validateSearch`), so the SQL selection rides the URL (#146 parity).
+- **Not done (deliberately deferred):** saved-group filter on the list
+  (stage 7 owns Groups — the `group` param exists server-side); sorting/
+  pagination (the API has no sort param — `q` can ORDER BY; the server caps
+  selections at 10k rows); propose/edit config + compliance check buttons
+  (stage 6/8 mutations). The detail page is display-only by design.
+- Attribute columns are named exactly as agents report them (`host.arch`,
+  quoted as `"host.arch"` in SQL). Don't "fix" that spelling in fixtures —
+  the e2e suggestion test types `dep` and expects the quoted insert.
 
 ---
 

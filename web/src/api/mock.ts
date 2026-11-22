@@ -8,6 +8,7 @@
  */
 
 import { fixtures } from "./fixtures";
+import type { AgentEntry } from "./endpoints";
 
 export function mockApiEnabled(): boolean {
   return import.meta.env.VITE_USE_MOCK_API === "1";
@@ -15,18 +16,94 @@ export function mockApiEnabled(): boolean {
 
 type Handler = {
   method: string;
-  /** Path after the `/api` base, without a trailing slash. */
-  path: string;
+  /**
+   * Path after the `/api` base, without a trailing slash. A function receives
+   * the parsed path and returns match captures (stage 5: `/agent/{id}`).
+   */
+  path: string | ((path: string) => Record<string, string> | null);
   respond: (
     request: Request,
+    params: Record<string, string>,
   ) => { body: unknown; status?: number } | Promise<{ body: unknown; status?: number }>;
 };
+
+/**
+ * Minimal stand-in for `agent_query.run()` (#132): the two WHERE shapes the
+ * e2e suite and dev-without-server use. Anything else runs unfiltered — mock
+ * mode demos selection, it does not re-implement SQLite.
+ */
+function runSelection(query: string, agents: AgentEntry[]): AgentEntry[] {
+  const healthy = /healthy\s*=\s*(1|0)/i.exec(query);
+  const type = /(?:type|agent_type)\s*=\s*'([^']+)'/i.exec(query);
+  let selected = agents;
+  if (healthy) {
+    const wantHealthy = healthy[1] === "1";
+    selected = selected.filter((a) => (a.healthy === true) === wantHealthy);
+  }
+  if (type) {
+    const want = type[1].toLowerCase();
+    selected = selected.filter((a) => a.agent_type.toLowerCase() === want);
+  }
+  return selected;
+}
 
 const HANDLERS: Handler[] = [
   {
     method: "GET",
     path: "/agents",
-    respond: () => ({ body: fixtures.agents }),
+    respond: (request) => {
+      const url = new URL(request.url);
+      const q = url.searchParams.get("q");
+      // `q` wins over the ad-hoc parameters on the server, exactly as here;
+      // `group` is stage 7 territory (saved groups live on the Groups page).
+      if (q) {
+        const selected = runSelection(q, fixtures.agents.agents as AgentEntry[]);
+        return {
+          body: {
+            agents: selected,
+            count: selected.length,
+            filters: {},
+            query: q,
+          },
+        };
+      }
+      // Ad-hoc parameters: `healthy` is the one the list offers as chips.
+      const healthy = url.searchParams.get("healthy");
+      if (healthy === "true" || healthy === "false") {
+        const want = healthy === "true";
+        const selected = (fixtures.agents.agents as AgentEntry[]).filter(
+          (a) => (a.healthy === true) === want,
+        );
+        return {
+          body: {
+            agents: selected,
+            count: selected.length,
+            filters: { healthy },
+          },
+        };
+      }
+      return { body: fixtures.agents };
+    },
+  },
+  {
+    method: "GET",
+    path: "/agent/types",
+    respond: () => ({ body: fixtures.agentTypes }),
+  },
+  {
+    method: "GET",
+    // `/agent/{agent_id}` — captures must not swallow `/agent/types`, which is
+    // declared first for the same reason the server declares it first.
+    path: (path) => {
+      const m = /^\/agent\/([0-9a-f][0-9a-f-]+)$/i.exec(path);
+      return m ? { agent_id: m[1] } : null;
+    },
+    respond: (_request, params) => {
+      const detail = fixtures.agentDetails[params.agent_id];
+      return detail
+        ? { body: detail }
+        : { body: { detail: "Agent not found" }, status: 404 };
+    },
   },
   {
     method: "GET",
@@ -102,9 +179,10 @@ export const mockFetch: typeof fetch = async (input, init) => {
   }
   const url = new URL(request.url);
   const path = url.pathname.replace(/\/+$/, "").replace(/^\/api/, "") || "/";
-  const handler = HANDLERS.find(
-    (h) => h.method === request.method && h.path === path,
-  );
+  const handler = HANDLERS.find((h) => h.method === request.method &&
+    (typeof h.path === "string"
+      ? h.path === path
+      : h.path(path) !== null));
   await new Promise((resolve) => setTimeout(resolve, LATENCY_MS));
   if (!handler) {
     return Response.json(
@@ -112,7 +190,8 @@ export const mockFetch: typeof fetch = async (input, init) => {
       { status: 404 },
     );
   }
+  const params = typeof handler.path === "function" ? (handler.path(path) ?? {}) : {};
   // Handlers may be async (the login handler inspects the body).
-  const { body, status = 200 } = await handler.respond(request);
+  const { body, status = 200 } = await handler.respond(request, params);
   return Response.json(body, { status });
 };

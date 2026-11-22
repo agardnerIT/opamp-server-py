@@ -1,6 +1,31 @@
 import { useQuery } from "@tanstack/react-query";
-import { listAgents, type AgentEntry } from "../api/endpoints";
+import { Link, useNavigate, useSearch } from "@tanstack/react-router";
+import { useMemo, useState } from "react";
+import {
+  listAgents,
+  getQuerySchema,
+  getAgentTypes,
+  attrValue,
+  type AgentEntry,
+  type AgentTypeSummary,
+  type QuerySchemaColumn,
+} from "../api/endpoints";
 import { ApiError } from "../api/errors";
+import { EmptyState } from "../components/EmptyState";
+import { SqlSearch } from "../components/SqlSearch";
+import { StatusBadge } from "../components/StatusBadge";
+import { AgentTypeBadge } from "../components/AgentTypeBadge";
+
+/**
+ * Agents list (new-ui stage 5). Selection is server-side only (#132): the SQL
+ * search drives `GET /agents?q=...`, the quick health chips use the `healthy`
+ * parameter, and nothing is ever filtered in the browser. Columns come from
+ * `GET /agents/query/schema` — core columns plus the attributes this fleet
+ * actually reports — never from hard-coded collector fields.
+ */
+
+/** Columns shown until the operator picks others. All are schema core columns. */
+const DEFAULT_COLUMNS = ["agent_type", "healthy", "remote_config_status", "last_heartbeat"];
 
 function formatWhen(iso: string | null): string {
   if (!iso) return "—";
@@ -8,114 +33,306 @@ function formatWhen(iso: string | null): string {
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
 }
 
-function StatusDot({ on, label }: { on: boolean | null; label: string }) {
-  const tone = on === true ? "ok" : on === false ? "bad" : "muted";
+/** Render one schema column's cell for one agent. Unknown columns fall back raw. */
+function SchemaCell({
+  column,
+  agent,
+  profiles,
+}: {
+  column: QuerySchemaColumn;
+  agent: AgentEntry;
+  profiles: AgentTypeSummary[] | undefined;
+}) {
+  switch (column.name) {
+    case "name":
+    case "agent_name":
+      return <>{agent.name ?? "—"}</>;
+    case "healthy": {
+      const tone = agent.healthy === true ? "ok" : agent.healthy === false ? "danger" : "muted";
+      const label =
+        agent.healthy === true ? "Healthy" : agent.healthy === false ? "Unhealthy" : "Unknown";
+      return <StatusBadge tone={tone} label={label} />;
+    }
+    case "health_status":
+      return <StatusBadge status={agent.health_status} />;
+    case "remote_config_status":
+    case "status":
+      return <StatusBadge status={agent.remote_config_status} />;
+    case "agent_type":
+    case "type":
+      return (
+        <AgentTypeBadge agentType={agent.agent_type} source={agent.agent_type_source} profiles={profiles} />
+      );
+    case "compliant":
+    case "is_compliant": {
+      const c = agent.compliance;
+      const label = c?.opa_disabled ? "OPA off" : c?.compliant === true ? "Compliant" : c?.compliant === false ? "Non-compliant" : "Unknown";
+      const tone = c?.compliant === true ? "ok" : c?.compliant === false ? "danger" : "muted";
+      return <StatusBadge tone={tone} label={label} />;
+    }
+    case "last_heartbeat":
+      return <>{formatWhen(agent.last_heartbeat)}</>;
+    case "connected_at":
+      return <>{formatWhen(agent.connected_at)}</>;
+    case "capabilities":
+      return <>{agent.capabilities}</>;
+    case "capability_tags":
+      return <>{agent.capability_tags.length}</>;
+    case "service_name":
+    case "service.name":
+      return <>{attrValue(agent.description, "service.name") ?? "—"}</>;
+    case "service_version":
+    case "service.version":
+      return <>{attrValue(agent.description, "service.version") ?? "—"}</>;
+    default: {
+      const value = attrValue(agent.description, column.name);
+      return <>{value ?? "—"}</>;
+    }
+  }
+}
+
+/** `GET /agent/types` — profile display names/icons for the type badges. */
+function useAgentTypes() {
+  return useQuery({ queryKey: ["agent-types"], queryFn: getAgentTypes, staleTime: 5 * 60_000 });
+}
+
+function useAgents(q: string | undefined, healthy: "true" | "false" | undefined) {
+  return useQuery({
+    queryKey: ["agents", { q, healthy }],
+    queryFn: () => listAgents({ q, healthy }),
+  });
+}
+
+function HealthChips({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: "true" | "false" | undefined;
+  onChange: (v: "true" | "false" | undefined) => void;
+  disabled: boolean;
+}) {
+  const chips: { label: string; v: "true" | "false" | undefined }[] = [
+    { label: "All", v: undefined },
+    { label: "Healthy", v: "true" },
+    { label: "Unhealthy", v: "false" },
+  ];
   return (
-    <span className="inline-flex items-center gap-1.5 text-xs">
-      <span
-        aria-hidden
-        className={`h-2 w-2 rounded-full ${
-          tone === "ok"
-            ? "bg-[var(--color-ok)]"
-            : tone === "bad"
-              ? "bg-[var(--color-danger)]"
-              : "bg-[var(--color-muted)]"
-        }`}
-      />
-      {label}
-    </span>
+    <div role="group" aria-label="Filter by health" className="flex items-center gap-1">
+      {chips.map(({ label, v }) => {
+        const active = value === v;
+        return (
+          <button
+            key={label}
+            type="button"
+            disabled={disabled}
+            aria-pressed={active}
+            onClick={() => onChange(v)}
+            className={
+              "rounded-md border px-2 py-1 text-xs " +
+              (active
+                ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-text)]"
+                : "border-[var(--color-border)] text-[var(--color-muted)]") +
+              (disabled ? " opacity-50" : " hover:text-[var(--color-text)]")
+            }
+            title={disabled ? "A SQL query is the selector; the server ignores other filters while it runs" : undefined}
+          >
+            {label}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
-function AgentRow({ agent }: { agent: AgentEntry }) {
+function ColumnPicker({
+  columns,
+  selected,
+  onChange,
+}: {
+  columns: QuerySchemaColumn[];
+  selected: string[];
+  onChange: (next: string[]) => void;
+}) {
   return (
-    <tr className="border-b border-[var(--color-border)] last:border-0">
-      <td className="px-3 py-2">
-        <div className="font-medium">{agent.name ?? <em className="text-[var(--color-muted)]">unnamed</em>}</div>
-        <div className="font-mono text-[11px] text-[var(--color-muted)]">{agent.id}</div>
-      </td>
-      <td className="px-3 py-2 text-xs">
-        <div>{agent.agent_type}</div>
-        <div className="text-[var(--color-muted)]">{agent.agent_type_source}</div>
-      </td>
-      <td className="px-3 py-2">
-        <StatusDot on={agent.healthy} label={agent.health_status ?? (agent.healthy ? "healthy" : "unhealthy")} />
-        {agent.health_error && (
-          <div className="text-[11px] text-[var(--color-danger)]">{agent.health_error}</div>
-        )}
-      </td>
-      <td className="px-3 py-2 text-xs">
-        {agent.remote_config_status ?? "UNSET"}
-        {agent.remote_config_error && (
-          <div className="text-[11px] text-[var(--color-danger)]">{agent.remote_config_error}</div>
-        )}
-      </td>
-      <td className="px-3 py-2 text-xs">
-        {agent.credential.enrolled ? (
-          <>
-            {agent.credential.active > 0 ? "enrolled" : "revoked"}
-            <div className="text-[var(--color-muted)]">seen {formatWhen(agent.credential.last_seen_at)}</div>
-          </>
-        ) : (
-          <span className="text-[var(--color-muted)]">not enrolled</span>
-        )}
-      </td>
-      <td className="px-3 py-2 text-xs text-[var(--color-muted)]">{formatWhen(agent.last_heartbeat)}</td>
-    </tr>
+    <details className="relative">
+      <summary className="cursor-pointer list-none rounded-md border border-[var(--color-border)] px-2 py-1 text-xs text-[var(--color-muted)] hover:text-[var(--color-text)]">
+        Columns ({selected.length})
+      </summary>
+      <ul className="absolute right-0 z-10 mt-1 max-h-72 w-64 overflow-y-auto rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-2 text-xs shadow-lg">
+        {columns.map((c) => (
+          <li key={c.name}>
+            <label className="flex cursor-pointer items-start gap-2 rounded px-1.5 py-1 hover:bg-[var(--color-bg)]">
+              <input
+                type="checkbox"
+                className="mt-0.5"
+                checked={selected.includes(c.name)}
+                onChange={(e) =>
+                  onChange(
+                    e.target.checked
+                      ? [...selected, c.name]
+                      : selected.filter((n) => n !== c.name),
+                  )
+                }
+              />
+              <span className="min-w-0">
+                <span className="font-mono">{c.sql_name}</span>
+                <span className="ml-1.5 text-[10px] uppercase text-[var(--color-muted)]">
+                  {c.kind}
+                </span>
+              </span>
+            </label>
+          </li>
+        ))}
+      </ul>
+    </details>
   );
 }
 
 export default function Agents() {
-  const { data, error, isPending, isError, refetch } = useQuery({
-    queryKey: ["agents"],
-    queryFn: () => listAgents(),
-  });
+  const navigate = useNavigate();
+  // The route's validated search (see router.tsx): the query lives in the URL,
+  // so a detail page's back link re-enters the same selection (#146 parity).
+  // The route's validated search (see router.tsx). `strict: false` because the
+  // component sits under the shell layout route, not at the root match itself.
+  const search = useSearch({ strict: false }) as { q?: string } | undefined;
+  const activeQuery = search?.q ?? "";
+  const [healthy, setHealthy] = useState<"true" | "false" | undefined>(undefined);
+  const [selectedColumns, setSelectedColumns] = useState<string[]>(DEFAULT_COLUMNS);
+
+  const schema = useQuery({ queryKey: ["agents-query-schema"], queryFn: getQuerySchema });
+  const types = useAgentTypes();
+  const agents = useAgents(activeQuery || undefined, activeQuery ? undefined : healthy);
+
+  const columns = useMemo(() => {
+    const all = schema.data?.columns ?? [];
+    return all.filter((c) => c.kind !== "core" || !["id", "agent_id", "attributes", "stale"].includes(c.name));
+  }, [schema.data]);
+
+  const selectedSchema = useMemo(
+    () => columns.filter((c) => selectedColumns.includes(c.name)),
+    [columns, selectedColumns],
+  );
+
+  function runQuery(text: string) {
+    // One selector at a time (the server refuses q + group together): a new
+    // search clears any saved-group filter by simply not carrying it.
+    navigate({ to: "/", search: text ? { q: text } : {} });
+  }
+
+  const data = agents.data;
+  const total = data?.count ?? 0;
+  const filtered = activeQuery || healthy;
 
   return (
-    <section>
+    <section className="flex flex-col gap-4">
       <div className="flex items-baseline justify-between">
         <h1 className="text-lg font-semibold">Agents</h1>
-        {data && <span className="text-xs text-[var(--color-muted)]">{data.count} connected</span>}
+        <span className="text-xs text-[var(--color-muted)]">
+          {data ? `${total} connected` : ""}
+        </span>
       </div>
 
-      {isPending && <p className="mt-6 text-sm text-[var(--color-muted)]">Loading agents…</p>}
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div className="min-w-0 flex-1 md:max-w-2xl">
+          <SqlSearch
+            columns={columns}
+            value={activeQuery}
+            onSubmit={runQuery}
+          />
+        </div>
+        <div className="flex items-center gap-2">
+          <HealthChips
+            value={healthy}
+            onChange={setHealthy}
+            disabled={!!activeQuery}
+          />
+          {columns.length > 0 && (
+            <ColumnPicker columns={columns} selected={selectedColumns} onChange={setSelectedColumns} />
+          )}
+        </div>
+      </div>
 
-      {isError && (
-        <div className="mt-6 rounded-md border border-[var(--color-danger)] bg-[var(--color-surface)] p-4 text-sm">
-          <p className="font-medium">Could not load agents</p>
-          <p className="mt-1 text-[var(--color-muted)]">
-            {error instanceof ApiError ? error.message : String(error)}
-          </p>
-          <button onClick={() => refetch()} className="mt-3 rounded border border-[var(--color-border)] px-2 py-1 text-xs">
+      {filtered && (
+        <p className="text-xs text-[var(--color-muted)]">
+          {activeQuery
+            ? <>Selection: <code className="font-mono">{activeQuery}</code></>
+            : "Filtering by health (server-side)."}
+        </p>
+      )}
+
+      {agents.isPending && <p className="mt-2 text-sm text-[var(--color-muted)]">Loading agents…</p>}
+
+      {agents.isError && (
+        <EmptyState
+          title={agents.error instanceof ApiError && agents.error.kind === "client" ? "Query refused" : "Could not load agents"}
+          detail={
+            agents.error instanceof ApiError
+              ? agents.error.message
+              : String(agents.error)
+          }
+        >
+          <button
+            onClick={() => agents.refetch()}
+            className="rounded-md border border-[var(--color-border)] px-2 py-1 text-xs hover:text-[var(--color-text)]"
+          >
             Retry
           </button>
-        </div>
+        </EmptyState>
       )}
 
       {data && data.agents.length === 0 && (
-        <div className="mt-6 rounded-md border border-[var(--color-border)] p-6 text-sm text-[var(--color-muted)]">
-          No agents are connected. Point an OpAMP agent at this server and it will appear here.
-        </div>
+        <EmptyState
+          title="No agents matched"
+          detail={
+            activeQuery
+              ? "Check the attribute names in the suggestions — an unknown attribute matches nothing rather than failing the query."
+              : "No agents are connected. Point an OpAMP agent at this server and it will appear here."
+          }
+        />
       )}
 
       {data && data.agents.length > 0 && (
-        <table className="mt-4 w-full text-left text-sm">
-          <thead>
-            <tr className="border-b border-[var(--color-border)] text-xs uppercase tracking-wide text-[var(--color-muted)]">
-              <th className="px-3 py-2 font-medium">Agent</th>
-              <th className="px-3 py-2 font-medium">Type</th>
-              <th className="px-3 py-2 font-medium">Health</th>
-              <th className="px-3 py-2 font-medium">Remote config</th>
-              <th className="px-3 py-2 font-medium">Credential</th>
-              <th className="px-3 py-2 font-medium">Last heartbeat</th>
-            </tr>
-          </thead>
-          <tbody>
-            {data.agents.map((agent) => (
-              <AgentRow key={agent.id} agent={agent} />
-            ))}
-          </tbody>
-        </table>
+        <div className="overflow-x-auto rounded-lg border border-[var(--color-border)]">
+          <table className="w-full min-w-[48rem] text-left text-sm">
+            <thead>
+              <tr className="border-b border-[var(--color-border)] text-xs uppercase tracking-wide text-[var(--color-muted)]">
+                <th scope="col" className="px-3 py-2 font-medium">Agent</th>
+                {selectedSchema.map((c) => (
+                  <th scope="col" key={c.name} className="px-3 py-2 font-medium">
+                    {c.sql_name}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {data.agents.map((agent) => (
+                <tr
+                  key={agent.id}
+                  className="border-b border-[var(--color-border)] last:border-0 hover:bg-[var(--color-surface)]"
+                >
+                  <td className="px-3 py-2">
+                    <Link
+                      to="/agents/$agentId"
+                      params={{ agentId: agent.id }}
+                      search={activeQuery ? { q: activeQuery } : {}}
+                      className="font-medium hover:text-[var(--color-accent)] hover:underline"
+                      title={agent.id}
+                    >
+                      {agent.name ?? <em className="text-[var(--color-muted)]">unnamed</em>}
+                    </Link>
+                    <div className="font-mono text-[11px] text-[var(--color-muted)]">{agent.id}</div>
+                  </td>
+                  {selectedSchema.map((c) => (
+                    <td key={c.name} className="px-3 py-2 text-xs">
+                      <SchemaCell column={c} agent={agent} profiles={types.data?.types} />
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </section>
   );

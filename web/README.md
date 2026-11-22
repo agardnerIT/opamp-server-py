@@ -48,10 +48,41 @@ Latest screens (mock-mode fleet fixtures):
 
 | | |
 |---|---|
+| ![Agents list](../docs/screenshots/console-agents-list.png) | ![Agent detail](../docs/screenshots/console-agent-detail.png) |
+| Agents list (stage 5): server-side SQL selection, health chips, schema columns, type + provenance badges | Collector detail (stage 5): profile-declared telemetry panels, component inventory, masked config flagged |
 | ![Agents with session slot](../docs/screenshots/console-agents-session.png) | ![Login error](../docs/screenshots/console-login-error.png) |
 | Agents list + session slot (role, expiry, Extend, Sign out) | Login with the 401 message |
 | ![Nav parity with Admin section](../docs/screenshots/console-nav-admin.png) | |
 | Sidebar at nav parity (stage 4): main pages + role-gated Admin section | |
+
+## Agents (stage 5)
+
+The fleet views are agent-type-aware the same way the server is — nothing
+assumes a collector that the server did not say:
+
+- **Selection is server-side only** (#132): the one-box SQL search drives
+  `GET /agents?q=...`, the health chips use the `healthy` parameter, and
+  nothing is filtered in the browser. The query lives in the URL (`/?q=...`),
+  so a detail page's back link re-enters the same selection and a filtered
+  list is shareable. Columns come from `GET /agents/query/schema` (core
+  columns plus the attributes this fleet actually reports) via the column
+  picker — never hard-coded collector fields.
+- **Detail adapts to the type** (`/agents/$agentId`): identity/health are
+  common; the telemetry panels and the component inventory render from the
+  agent's profile (`GET /agent/types`, `server/profiles/data/*.yaml`), so a
+  `generic` agent gets the honest "this profile does not report telemetry"
+  fact instead of empty collector tiles.
+- **Status vocabulary is the server's** (`src/lib/deliveryStatus.ts`):
+  push `delivered|queued|unchanged`, assignment
+  `none|queued|delivered|applied|failed|poisoned|unconfirmed`, apply verdict
+  `UNSET|APPLYING|APPLIED|FAILED` — `StatusBadge` maps them to tokens; an
+  unknown value renders muted, never a new color.
+- **`<redacted>` is opaque**: masked config values render as-is with the
+  masked paths listed; they are never stripped, edited, or echoed back on a
+  save (editing arrives in stage 6).
+
+Screenshots: `tools/screenshot-agents.mjs` regenerates the stage-5 captures
+against the mock dev server (`VITE_USE_MOCK_API=1`, port 5199).
 
 ## Navigation (stage 4)
 

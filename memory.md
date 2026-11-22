@@ -82,6 +82,7 @@
 ## UI Changes
 
 - Whenever there are UI changes, take screenshots and add them to the README so users always see the latest and greatest UI
+- **New-UI stage 5 (agents, 2026-11-22)**: the browser fleet views are type-aware from `GET /agent/types` profiles — telemetry panels and the component inventory render from `panels`/`has_components`, never hard-coded collector fields. Primitives for later stages: `web/src/lib/deliveryStatus.ts` (the server's status vocabulary → tokens, never invent states), `SqlSearch` + `sqlSuggestions` (one-box SQL search; suggestions only from values the fleet reports), `configText.configObjects` (display-only; `<redacted>` stays opaque). Screens: `docs/screenshots/console-agents-{list,agent-detail}.png`. Server-side selection only — the list never filters in the browser (#132).
 - Before taking screenshots: start a collector (`~/tools/otelcol-contrib --config=collector/config.yaml`). Wait 5 seconds then start the UI. Disregard the initial collector error logs. That's expected as the collector cannot connect.
 
 ## Dependencies

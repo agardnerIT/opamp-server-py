@@ -1,63 +1,296 @@
 /**
  * Static fixtures for mock mode. Shaped exactly like the server payloads
  * (`AgentState.to_dict()` etc.) so the same code paths run against both.
+ *
+ * The fleet carries two agent types on purpose: stage 5's type-aware views
+ * are developed and tested offline against these. The `agentTypes` entries
+ * mirror `AgentProfile.describe()` (trimmed `identity`, full `panels` — the
+ * detail page renders from those, never from hard-coded collector fields).
  */
 
-import type { AgentEntry } from "./endpoints";
+import type { AgentEntry, AgentDetail, AgentTypeSummary } from "./endpoints";
 
 const CONNECTED_AT = "2026-12-01T09:15:00Z";
 const HEARTBEAT = "2026-12-01T09:44:12Z";
 
+const OTCOL_ID = "6b1f3a4c-9d2e-4f70-8a1b-2c3d4e5f6071";
+const GENERIC_ID = "0f2e8d7c-6b5a-4938-8271-6a5b4c3d2e10";
+
+const agentTypes: AgentTypeSummary[] = [
+  {
+    name: "otelcol",
+    display_name: "OpenTelemetry Collector",
+    icon: "🧩",
+    priority: 100,
+    summary:
+      "Collector YAML: components are read from AvailableComponents, structural validation applies, and the heavy/outdated reports and otelcol_* telemetry views are meaningful.",
+    guidance:
+      "**Remote config** is applied by the OpAMP Supervisor (`cmd/opampsupervisor`), not " +
+      "by `extension/opampextension`: a bare collector never advertises `AcceptsRemoteConfig`.",
+    validates_structure: true,
+    content_types: ["", "application/x-yaml", "application/yaml", "text/plain", "text/x-yaml", "text/yaml"],
+    default_filename: "otelcol-config.yaml",
+    reports: ["fleet", "agent", "heavy", "outdated"],
+    telemetry: {
+      title: "Collector Telemetry",
+      caption:
+        "Real-time metrics from the collector's internal telemetry. These show how data flows through the collector.",
+      raw_caption: "All available internal metrics from the collector:",
+      metric_prefix: "otelcol_",
+    },
+    detectable: true,
+    has_components: true,
+    has_onboarding_snippet: true,
+    panels: [
+      {
+        id: "data-flow-inputs",
+        widget: "metrics",
+        title: "Data Flow (Inputs)",
+        caption: "Data being received by the collector. Sudden drops may indicate connectivity issues.",
+        metrics: [
+          { label: "Logs In", metric: "otelcol_receiver_accepted_log_records", format: "number" },
+          { label: "Traces In", metric: "otelcol_receiver_accepted_spans", format: "number" },
+          { label: "Metrics In", metric: "otelcol_receiver_accepted_metric_points", format: "number" },
+          { label: "Refused", metric: "otelcol_receiver_refused_log_records", format: "number" },
+        ],
+      },
+      {
+        id: "data-flow-inputs-failed",
+        widget: "alert",
+        metric: "otelcol_receiver_failed_log_records",
+        when: "above_zero",
+        severity: "error",
+        message: "⚠️ Failed: {value}",
+      },
+      {
+        id: "data-flow-outputs",
+        widget: "metrics",
+        title: "Data Flow (Outputs)",
+        caption:
+          "Data being sent to downstream systems. If this drops but inputs are normal, check exporter connectivity.",
+        metrics: [
+          { label: "Logs Out", metric: "otelcol_exporter_sent_log_records", format: "number" },
+          { label: "Traces Out", metric: "otelcol_exporter_sent_spans", format: "number" },
+          { label: "Metrics Out", metric: "otelcol_exporter_sent_metric_points", format: "number" },
+        ],
+      },
+      {
+        id: "collector-health",
+        widget: "metrics",
+        title: "Collector Health",
+        caption: "Resource usage of the collector process itself.",
+        metrics: [
+          { label: "CPU (sec)", metric: "otelcol_process_cpu_seconds", format: "decimal" },
+          { label: "Memory (MB)", metric: "otelcol_process_memory_rss", format: "mebibytes" },
+          { label: "Heap (MB)", metric: "otelcol_process_runtime_heap_alloc_bytes", format: "mebibytes" },
+          { label: "Uptime (sec)", metric: "otelcol_process_uptime", format: "number" },
+        ],
+      },
+    ],
+    bootstrap_default: true,
+  },
+  {
+    name: "generic",
+    display_name: "Generic agent",
+    icon: "📦",
+    priority: 0,
+    summary:
+      "An agent whose configuration format this server does not interpret. Its config is stored, relayed and shown as opaque content, and the collector-specific reports and validation do not describe it.",
+    guidance:
+      "This server cannot validate, interpret or report on this agent's configuration: it stores " +
+      "the body, relays it and shows it as opaque text.",
+    validates_structure: false,
+    content_types: [],
+    default_filename: "config",
+    reports: [],
+    telemetry: null,
+    detectable: false,
+    has_components: false,
+    has_onboarding_snippet: false,
+    panels: [],
+    bootstrap_default: false,
+  },
+];
+
+const credential = { enrolled: true, active: 1, last_seen_at: HEARTBEAT, revoked_at: null };
+
+const collectorDescription = {
+  identifyingAttributes: [
+    { key: "service.name", value: { stringValue: "io.opentelemetry.collector" } },
+  ],
+  nonIdentifyingAttributes: [
+    { key: "service.version", value: { stringValue: "0.149.0" } },
+    { key: "deployment.environment", value: { stringValue: "prod" } },
+    { key: "host.arch", value: { stringValue: "amd64" } },
+  ],
+};
+
+const genericDescription = {
+  identifyingAttributes: [
+    { key: "service.name", value: { stringValue: "acme-forwarder" } },
+  ],
+  nonIdentifyingAttributes: [
+    { key: "deployment.environment", value: { stringValue: "lab" } },
+  ],
+};
+
+const collectorListEntry: AgentEntry = {
+  id: OTCOL_ID,
+  name: "shop-prod-collector",
+  healthy: true,
+  health_status: "ok",
+  health_error: null,
+  connected_at: CONNECTED_AT,
+  last_heartbeat: HEARTBEAT,
+  capabilities: 8,
+  capability_tags: [{ label: "Reports Status", icon: "📊" }],
+  remote_config_status: "APPLIED",
+  config_error: null,
+  remote_config_error: null,
+  agent_type: "otelcol",
+  agent_type_source: "sniffed",
+  agent_type_pinned: null,
+  agent_type_ambiguous: null,
+  agent_type_warning: null,
+  credential,
+};
+
+const genericListEntry: AgentEntry = {
+  id: GENERIC_ID,
+  name: "lab-generic-forwarder",
+  healthy: false,
+  health_status: "config_conflict",
+  health_error: "exporter endpoint unreachable",
+  connected_at: CONNECTED_AT,
+  last_heartbeat: HEARTBEAT,
+  capabilities: 2,
+  capability_tags: [{ label: "Reports Health", icon: "❤️" }],
+  remote_config_status: "FAILED",
+  config_error: null,
+  remote_config_error: "apply failed: unknown receiver type",
+  agent_type: "generic",
+  agent_type_source: "pinned",
+  agent_type_pinned: "generic",
+  agent_type_ambiguous: null,
+  agent_type_warning:
+    "this agent resolves to the 'generic' profile, so the server does not " +
+    "interpret its configuration: collector-specific checks, reports and " +
+    "telemetry views do not describe it",
+  credential,
+};
+
+const collectorDetail: AgentDetail = {
+  ...collectorListEntry,
+  report_interval_seconds: 5.2,
+  description: collectorDescription,
+  effective_config: {
+    configMap: {
+      configMap: {
+        "": {
+          body: "extensions:\n  opamp:\n    server:\n      ws:\n        endpoint: ws://127.0.0.1:4320/v1/opamp\n          headers:\n            Authorization: \"Bearer <redacted>\"\n\nreceivers:\n  otlp:\n    protocols:\n      grpc:\n        endpoint: 127.0.0.1:4317\n\nprocessors:\n  batch:\n\nexporters:\n  debug:\n    verbosity: normal\n\nservice:\n  extensions: [opamp]\n  pipelines:\n    traces:\n      receivers: [otlp]\n      processors: [batch]\n      exporters: [debug]\n",
+          contentType: "text/yaml",
+        },
+      },
+    },
+  },
+  effective_config_redacted: true,
+  redacted_paths: ['configMap.configMap."".headers.Authorization'],
+  config_error: null,
+  remote_config_error: null,
+  pending_command: null,
+  command_delivered_at: null,
+  custom_capabilities: [],
+  pending_custom_message: null,
+  custom_message_delivered_at: null,
+  uid_reissued_from: null,
+  uid_reissue_reason: null,
+  components_request_ignored: 0,
+  components: {
+    receivers: [
+      { id: "otlp", used: true, version: "0.149.0" },
+      { id: "prometheus", used: false, version: "0.149.0" },
+    ],
+    processors: [{ id: "batch", used: true, version: "0.149.0" }],
+    exporters: [
+      { id: "debug", used: true, version: "0.149.0" },
+      { id: "otlphttp", used: false, version: "0.149.0" },
+    ],
+    extensions: [{ id: "opamp", used: true, version: "0.149.0" }],
+  },
+  components_status: "reported",
+  compliance: {
+    compliant: true,
+    violations: [],
+    policy_results: [{ name: "require-batch-processor", status: "pass", violations: [] }],
+  },
+  metrics: {
+    metrics: {
+      otelcol_receiver_accepted_log_records: 15234,
+      otelcol_receiver_accepted_spans: 8721,
+      otelcol_receiver_accepted_metric_points: 40211,
+      otelcol_receiver_refused_log_records: 0,
+      otelcol_receiver_failed_log_records: 0,
+      otelcol_exporter_sent_log_records: 15234,
+      otelcol_exporter_sent_spans: 8721,
+      otelcol_exporter_sent_metric_points: 40210,
+      otelcol_process_cpu_seconds: 12.4,
+      otelcol_process_memory_rss: 78643200,
+      otelcol_process_runtime_heap_alloc_bytes: 25165824,
+      otelcol_process_uptime: 3125,
+    },
+    updated_at: HEARTBEAT,
+  },
+  stale_timeout_seconds: 120,
+};
+
+const genericDetail: AgentDetail = {
+  ...genericListEntry,
+  report_interval_seconds: 30,
+  description: genericDescription,
+  // An opaque JSON body: this profile's config is stored and shown as-is.
+  effective_config: {
+    configMap: {
+      configMap: {
+        "": {
+          body: '{"listen": "0.0.0.0:9999", "upstream": "collector:4317"}',
+          contentType: "application/json",
+        },
+      },
+    },
+  },
+  effective_config_redacted: false,
+  redacted_paths: [],
+  config_error: null,
+  remote_config_error: "apply failed: unknown receiver type",
+  pending_command: null,
+  command_delivered_at: null,
+  custom_capabilities: [],
+  pending_custom_message: null,
+  custom_message_delivered_at: null,
+  uid_reissued_from: null,
+  uid_reissue_reason: null,
+  components_request_ignored: 0,
+  components: null,
+  components_status: "none",
+  compliance: { compliant: null, violations: [], opa_disabled: true },
+  // A product fact, not a gap: this profile reports no telemetry to the server.
+  metrics: {},
+  stale_timeout_seconds: 300,
+};
+
+const agentDetails: Record<string, AgentDetail> = {
+  [OTCOL_ID]: collectorDetail,
+  [GENERIC_ID]: genericDetail,
+};
+
 export const fixtures = {
   agents: {
-    agents: [
-      {
-        id: "6b1f3a4c-9d2e-4f70-8a1b-2c3d4e5f6071",
-        name: "shop-prod-collector",
-        healthy: true,
-        health_status: "ok",
-        health_error: null,
-        connected_at: CONNECTED_AT,
-        last_heartbeat: HEARTBEAT,
-        capabilities: 8,
-        capability_tags: ["accepts_remote_config"],
-        remote_config_status: "APPLIED",
-        config_error: null,
-        remote_config_error: null,
-        agent_type: "otelcol",
-        agent_type_source: "sniffed",
-        agent_type_pinned: null,
-        agent_type_ambiguous: null,
-        agent_type_warning: null,
-        credential: { enrolled: true, active: 1, last_seen_at: HEARTBEAT, revoked_at: null },
-      } satisfies Partial<AgentEntry> as AgentEntry,
-      {
-        id: "0f2e8d7c-6b5a-4938-8271-6a5b4c3d2e10",
-        name: "lab-generic-forwarder",
-        healthy: false,
-        health_status: "config_conflict",
-        health_error: "exporter endpoint unreachable",
-        connected_at: CONNECTED_AT,
-        last_heartbeat: HEARTBEAT,
-        capabilities: 2,
-        capability_tags: ["reports_health"],
-        remote_config_status: "FAILED",
-        config_error: null,
-        remote_config_error: "apply failed: unknown receiver type",
-        agent_type: "generic",
-        agent_type_source: "pinned",
-        agent_type_pinned: "generic",
-        agent_type_ambiguous: null,
-        agent_type_warning:
-          "this agent resolves to the 'generic' profile, so the server does not " +
-          "interpret its configuration: collector-specific checks, reports and " +
-          "telemetry views do not describe it",
-        credential: { enrolled: true, active: 1, last_seen_at: HEARTBEAT, revoked_at: null },
-      } satisfies Partial<AgentEntry> as AgentEntry,
-    ],
+    agents: [collectorListEntry, genericListEntry],
     count: 2,
     filters: {},
   },
+  agentTypes: { types: agentTypes, count: agentTypes.length },
+  agentDetails,
   querySchema: {
     table: "agents",
     columns: [
@@ -70,6 +303,38 @@ export const fixtures = {
         agent_count: 0,
       },
       {
+        name: "name",
+        sql_name: "name",
+        kind: "core",
+        description: "The agent's declared agent.name (NULL when it declared none)",
+        values: ["shop-prod-collector", "lab-generic-forwarder"],
+        agent_count: 2,
+      },
+      {
+        name: "healthy",
+        sql_name: "healthy",
+        kind: "core",
+        description: "1 healthy, 0 unhealthy, NULL when the agent never reported health",
+        values: [1, 0],
+        agent_count: 2,
+      },
+      {
+        name: "health_status",
+        sql_name: "health_status",
+        kind: "core",
+        description: "ComponentHealth.status, e.g. ok or config_conflict",
+        values: ["ok", "config_conflict"],
+        agent_count: 2,
+      },
+      {
+        name: "remote_config_status",
+        sql_name: "remote_config_status",
+        kind: "core",
+        description: "Remote config status, e.g. UNSET, APPLIED, FAILED",
+        values: ["APPLIED", "FAILED"],
+        agent_count: 2,
+      },
+      {
         name: "agent_type",
         sql_name: "agent_type",
         kind: "core",
@@ -78,15 +343,41 @@ export const fixtures = {
         agent_count: 2,
       },
       {
-        name: "healthy",
-        sql_name: "healthy",
-        kind: "core",
-        description: "'yes', 'no' or 'unknown' from reported health",
-        values: ["yes", "no"],
+        name: "service.name",
+        sql_name: '"service.name"',
+        kind: "attribute",
+        description: "service.name description attribute",
+        values: ["io.opentelemetry.collector", "acme-forwarder"],
         agent_count: 2,
       },
+      {
+        name: "deployment.environment",
+        sql_name: '"deployment.environment"',
+        kind: "attribute",
+        description: "deployment.environment description attribute",
+        values: ["prod", "lab"],
+        agent_count: 2,
+      },
+      {
+        name: "host.arch",
+        sql_name: '"host.arch"',
+        kind: "attribute",
+        description: "host.arch description attribute",
+        values: ["amd64"],
+        agent_count: 1,
+      },
     ],
-    examples: ["SELECT * FROM agents WHERE healthy = 'no'"],
+    count: 9,
+    examples: [
+      "SELECT * FROM agents",
+      "SELECT * FROM agents WHERE healthy = 1",
+      "SELECT * FROM agents WHERE remote_config_status = 'APPLIED'",
+      "SELECT * FROM agents WHERE type = 'otelcol'",
+    ],
+    functions: {
+      attr: "attr('key') is shorthand for the attribute column named key",
+    },
+    operators: ["=", "!=", "LIKE", "IN", "IS NULL"],
   },
   authStatus: {
     password_required: true,

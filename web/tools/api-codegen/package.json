@@ -1,0 +1,13 @@
+{
+  "name": "opamp-console-api-codegen",
+  "private": true,
+  "type": "module",
+  "description": "Isolated environment for openapi-typescript. The project compiles with TypeScript 7 (native), but openapi-typescript still requires the TS 5.x compiler API at generation time, so the codegen tool runs against its own pinned typescript@5 here instead of the workspace root.",
+  "scripts": {
+    "gen": "openapi-typescript \"${OPENAPI_URL:-http://127.0.0.1:4320/openapi.json}\" -o ../../src/api/schema.d.ts"
+  },
+  "devDependencies": {
+    "openapi-typescript": "^7.13.0",
+    "typescript": "^5.9.0"
+  }
+}

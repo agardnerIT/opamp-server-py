@@ -96,7 +96,7 @@ single-`<h1>` files; Agents is the same but it is the default route.
 
 ---
 
-## Stage 2 — Typed API client (status: **todo**)
+## Stage 2 — Typed API client (status: **done**)
 
 Depends on: stage 1.
 
@@ -117,6 +117,32 @@ Tasks:
 
 Done when: `npm run build` green; a demo page (Agents) renders real data from
 the live server using the typed client; 401/403/429/503 normalized in one place.
+
+Notes for next stage (written 2026-12-01, all gates green — build, vitest 14
+passing, oxlint clean):
+
+- Layout: `src/api/client.ts` (openapi-fetch, baseUrl `/api`),
+  `schema.d.ts` (generated, 4.7k lines), `errors.ts` (ApiError +
+  `classifyError` + `unwrap` — mirrors `ui/session.py::classify_response`,
+  including the read-only 403 hint and Retry-After header/payload/fallback),
+  `endpoints.ts` (thin wrappers + narrow payload interfaces like `AgentEntry`
+  for the `Dict[str, Any]` responses the schema types as `unknown`),
+  `mock.ts`/`fixtures.ts` (fetch stub via `VITE_USE_MOCK_API=1`).
+- **TS7 gotcha**: the project compiles with TypeScript 7 (native) but
+  openapi-typescript needs the TS 5 compiler API at runtime, so codegen runs in
+  `web/tools/api-codegen/` (own package.json pinning TS 5.9). Use
+  `npm run gen-api`, never `npx openapi-typescript` from `web/`. Deps for the
+  toolchain had to be installed with `--legacy-peer-deps` for the same reason.
+- `npm run test` now exists (vitest); stage rules require it to stay green.
+- `tsconfig.app.json` now has `strict: true` (the decided constraint; stage 1
+  shipped without it). Everything currently compiles under strict.
+- Fixtures include two agent types (`otelcol` + pinned `generic`) so stage 5's
+  type-aware views can be developed offline.
+- oxlint treats any `use*` function as a React hook — avoid that prefix for
+  plain helpers (cost one rename already).
+- The demo Agents page renders `/agents` via TanStack Query with a real
+  empty state; the live fleet was empty when this stage finished, so the
+  populated-table view has only been seen against fixtures.
 
 ---
 

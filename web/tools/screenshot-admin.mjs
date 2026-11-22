@@ -16,7 +16,7 @@ await page.getByRole("button", { name: "Sign in" }).click();
 await page.waitForURL(`${BASE}/`, { timeout: 60_000 });
 
 const capture = async (nav, waitForText, path) => {
-  await page.getByRole("link", { name: nav }).click();
+  await page.getByRole("navigation", { name: "Admin" }).getByRole("link", { name: nav }).click();
   await page.getByText(waitForText, { exact: false }).first().waitFor();
   await page.waitForTimeout(300);
   await page.screenshot({ path: `../docs/screenshots/${path}`, fullPage: true });

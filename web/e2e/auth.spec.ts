@@ -23,10 +23,12 @@ test("login → shell → logout round-trip", async ({ page }) => {
   await page.getByLabel("Password").fill(CORRECT);
   await page.getByRole("button", { name: "Sign in" }).click();
 
-  // Redirected to the console; the session slot shows identity + role.
+  // Redirected to the console (Overview since Stage B); the session slot
+  // shows identity + role.
   await expect(page).toHaveURL("/");
   const slot = page.getByText("role admin", { exact: false });
   await expect(slot).toBeVisible();
+  await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Agents" }).click();
   await expect(page.getByText("shop-prod-collector")).toBeVisible();
 
   // Sign out → cookie revoked → back to the login page.

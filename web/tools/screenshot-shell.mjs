@@ -8,6 +8,7 @@
 import { chromium } from "@playwright/test";
 
 const BASE = "http://localhost:5199";
+const OVERVIEW_OUT = "../docs/screenshots/console-overview.png";
 const NAV_OUT = "../docs/screenshots/console-nav-admin.png";
 const SESSION_OUT = "../docs/screenshots/console-agents-session.png";
 const LOGIN_OUT = "../docs/screenshots/console-login-error.png";
@@ -30,6 +31,17 @@ await page.getByLabel("Name").fill("admin");
 await page.getByLabel("Password").fill("opamp-mock-password");
 await page.getByRole("button", { name: "Sign in" }).click();
 await page.waitForURL(`${BASE}/`, { timeout: 60_000 });
+
+// Overview (Stage B): '/' is the landing dashboard now.
+await page.getByText("Agents connected", { exact: true }).waitFor();
+await page.getByText("Agents by type").waitFor();
+await page.waitForTimeout(250);
+await page.screenshot({ path: OVERVIEW_OUT });
+console.log(`saved ${OVERVIEW_OUT}`);
+
+// The rest of the shell shots need the agents table — /agents since Stage B.
+await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Agents" }).click();
+await page.waitForURL(`${BASE}/agents`);
 // Wait out the session/agents queries: the shot needs the Admin section and
 // the populated table, not the loading skeletons.
 await page.getByRole("navigation", { name: "Admin" }).waitFor();

@@ -288,7 +288,7 @@ export default function AgentDetail() {
               : String(agent.error)
         }
       >
-        <Link to="/" search={carriedQuery} className="text-[13px] text-[var(--color-accent)] hover:underline">
+        <Link to="/agents" search={carriedQuery} className="text-[13px] text-[var(--color-accent)] hover:underline">
           ← All agents
         </Link>
       </EmptyState>
@@ -325,7 +325,7 @@ export default function AgentDetail() {
         title={data.name ?? "Agent details"}
         lede={data.id}
         actions={
-          <Link to="/" search={carriedQuery}>
+          <Link to="/agents" search={carriedQuery}>
             <Button size="sm">← All agents</Button>
           </Link>
         }

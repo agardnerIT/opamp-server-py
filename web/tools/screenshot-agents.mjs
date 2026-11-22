@@ -18,6 +18,9 @@ await page.getByRole("button", { name: "Sign in" }).click();
 // First visit compiles Vite deps; the login POST itself settles quickly, so
 // give the redirect a generous window and the shell time to hydrate.
 await page.waitForURL(`${BASE}/`, { timeout: 60_000 });
+// '/' is the Overview since Stage B — the list lives at /agents.
+await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Agents" }).click();
+await page.waitForURL(`${BASE}/agents`);
 await page.waitForTimeout(500);
 // Wait out the session/agents/schema queries: the shot needs the populated
 // table with both agent types, not the loading states.

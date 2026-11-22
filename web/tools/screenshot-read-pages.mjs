@@ -16,7 +16,7 @@ await page.getByRole("button", { name: "Sign in" }).click();
 await page.waitForURL(`${BASE}/`, { timeout: 60_000 });
 
 // Groups: run the search, then open the legacy group's detail panel.
-await page.getByRole("link", { name: "Groups" }).click();
+await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Groups" }).click();
 await page.getByText("1 · Search agents").waitFor();
 await page.getByLabel("SQL selection").fill("SELECT * FROM agents WHERE healthy = 1");
 await page.getByLabel("SQL selection").press("Enter");
@@ -28,7 +28,7 @@ await page.screenshot({ path: "../docs/screenshots/console-groups.png", fullPage
 console.log("saved ../docs/screenshots/console-groups.png");
 
 // Reports: the fleet summary.
-await page.getByRole("link", { name: "Reports" }).click();
+await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Reports" }).click();
 await page.getByRole("heading", { name: "Agent Report" }).waitFor();
 await page.waitForTimeout(200);
 await page.screenshot({ path: "../docs/screenshots/console-reports.png", fullPage: true });

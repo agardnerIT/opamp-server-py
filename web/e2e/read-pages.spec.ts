@@ -16,7 +16,7 @@ test.beforeEach(async ({ page }) => {
 });
 
 test("Reports renders the fleet summary and offers the profiles' reports", async ({ page }) => {
-  await page.getByRole("link", { name: "Reports" }).click();
+  await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Reports" }).click();
   await page.getByRole("heading", { name: "Agent Report" }).waitFor();
   await expect(page.getByText("Full fleet analysis — 2 agent(s)")).toBeVisible();
 
@@ -36,7 +36,7 @@ test("Reports renders the fleet summary and offers the profiles' reports", async
 });
 
 test("Groups runs a saved selection, saves it as a group, previews and deletes", async ({ page }) => {
-  await page.getByRole("link", { name: "Groups" }).click();
+  await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Groups" }).click();
   await page.getByText("1 · Search agents").waitFor();
 
   // Run the default editor query: mock selection resolves healthy = 1.
@@ -68,7 +68,7 @@ test("Groups runs a saved selection, saves it as a group, previews and deletes",
 });
 
 test("Help describes the profiles from the dictionary and links the query guide", async ({ page }) => {
-  await page.getByRole("link", { name: "Help" }).click();
+  await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Help" }).click();
   await page.getByText("Known agent types").waitFor();
   await page.getByText("OpenTelemetry Collector").click();
   await expect(page.getByText("Component inventory: yes")).toBeVisible();

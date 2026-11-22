@@ -15,7 +15,11 @@ test.beforeEach(async ({ page }) => {
   await page.getByLabel("Name").fill("admin");
   await page.getByLabel("Password").fill(CORRECT);
   await page.getByRole("button", { name: "Sign in" }).click();
+  // Since Stage B, login lands on the Overview dashboard; the agents table
+  // lives at /agents.
   await expect(page).toHaveURL("/");
+  await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Agents", exact: true }).click();
+  await expect(page).toHaveURL("/agents");
   await expect(page.getByRole("cell", { name: "shop-prod-collector" })).toBeVisible();
 });
 
@@ -41,7 +45,7 @@ test("SQL search selects server-side and lives in the URL", async ({ page }) => 
   await box.fill("SELECT * FROM agents WHERE healthy = 0");
   await box.press("Enter");
 
-  await expect(page).toHaveURL(/\/\?q=SELECT/);
+  await expect(page).toHaveURL(/\/agents\?q=SELECT/);
   await expect(page.getByRole("cell", { name: "lab-generic-forwarder" })).toBeVisible();
   await expect(page.getByRole("cell", { name: "shop-prod-collector" })).toHaveCount(0);
   await expect(page.getByText("Selection:")).toBeVisible();
@@ -50,7 +54,7 @@ test("SQL search selects server-side and lives in the URL", async ({ page }) => 
   await page.getByRole("link", { name: "lab-generic-forwarder" }).click();
   await expect(page.getByRole("heading", { level: 1, name: "lab-generic-forwarder" })).toBeVisible();
   await page.getByRole("link", { name: "← All agents" }).click();
-  await expect(page).toHaveURL(/q=SELECT/);
+  await expect(page).toHaveURL(/\/agents.*q=SELECT/);
   await expect(page.getByRole("cell", { name: "lab-generic-forwarder" })).toBeVisible();
 });
 

@@ -101,7 +101,7 @@ export default function Help() {
 
       <H2>Selecting agents with SQL</H2>
       <p className="max-w-prose text-sm">
-        The <Link to="/" className="text-[var(--color-accent)] hover:underline">Agents</Link> search box
+        The <Link to="/agents" className="text-[var(--color-accent)] hover:underline">Agents</Link> search box
         and group queries speak one read-only language:{" "}
         <code className="font-mono text-xs">SELECT * FROM agents WHERE ...</code>. Suggestions come from
         the values this fleet actually reports (built from{" "}

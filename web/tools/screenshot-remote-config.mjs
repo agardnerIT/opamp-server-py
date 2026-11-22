@@ -14,7 +14,7 @@ await page.getByLabel("Name").fill("admin");
 await page.getByLabel("Password").fill("opamp-mock-password");
 await page.getByRole("button", { name: "Sign in" }).click();
 await page.waitForURL(`${BASE}/`, { timeout: 60_000 });
-await page.getByRole("link", { name: "Remote Config" }).click();
+await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Remote Config" }).click();
 await page.getByTestId("compose-stepper").waitFor();
 
 // Drive the stepper to a meaningful state: target, body, validate, propose.

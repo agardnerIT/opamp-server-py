@@ -1,9 +1,9 @@
 /**
- * Sidebar definition, mirroring `ui/app.py`'s `st.navigation` tree so every
- * Streamlit page stays reachable during the migration (new-ui stage 4).
- *
- * URLs are flat like Streamlit's (`url_path` is deliberately not nested); the
- * Admin grouping lives in the sidebar section only.
+ * Sidebar definition. Originally a mirror of `ui/app.py`'s `st.navigation`
+ * tree so every Streamlit page stayed reachable during the migration
+ * (new-ui stage 4); since 2027-ui Stage B the main section intentionally
+ * diverges: `/` is the Overview landing page and the agents table lives at
+ * `/agents` (the owner's "more generic landing page" ask). URLs stay flat.
  */
 
 import { roleAtLeast, type Role } from "./roles";
@@ -16,7 +16,8 @@ export type NavItem = {
 };
 
 export const MAIN_NAV: NavItem[] = [
-  { to: "/", label: "Agents" },
+  { to: "/", label: "Overview" },
+  { to: "/agents", label: "Agents" },
   { to: "/reports", label: "Reports" },
   { to: "/groups", label: "Groups" },
   { to: "/remote-config", label: "Remote Config" },

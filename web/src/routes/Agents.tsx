@@ -132,7 +132,7 @@ function HealthChips({
             aria-pressed={active}
             onClick={() => onChange(v)}
             className={
-              "inline-flex h-7 items-center rounded-[var(--radius-sm)] border px-2.5 text-xs font-medium transition-colors duration-[var(--duration-fast)] ease-[var(--ease-out)] " +
+              "inline-flex h-9 items-center md:h-7 rounded-[var(--radius-sm)] border px-2.5 text-xs font-medium transition-colors duration-[var(--duration-fast)] ease-[var(--ease-out)] " +
               (active
                 ? "border-[var(--color-accent)]/50 bg-[var(--color-accent-soft)] text-[var(--color-accent-strong)]"
                 : "border-[var(--color-border)] text-[var(--color-muted)]") +
@@ -159,7 +159,7 @@ function ColumnPicker({
 }) {
   return (
     <details className="relative">
-      <summary className="inline-flex h-7 cursor-pointer list-none items-center rounded-[var(--radius-sm)] border border-[var(--color-border)] px-2.5 text-xs font-medium text-[var(--color-muted)] transition-colors duration-[var(--duration-fast)] ease-[var(--ease-out)] hover:text-[var(--color-text)]">
+      <summary className="inline-flex h-9 cursor-pointer md:h-7 list-none items-center rounded-[var(--radius-sm)] border border-[var(--color-border)] px-2.5 text-xs font-medium text-[var(--color-muted)] transition-colors duration-[var(--duration-fast)] ease-[var(--ease-out)] hover:text-[var(--color-text)]">
         Columns ({selected.length})
       </summary>
       <ul className="card absolute right-0 z-10 mt-1 max-h-72 w-64 overflow-y-auto p-2 text-xs shadow-[var(--shadow-overlay)]">
@@ -219,7 +219,7 @@ export default function Agents() {
   function runQuery(text: string) {
     // One selector at a time (the server refuses q + group together): a new
     // search clears any saved-group filter by simply not carrying it.
-    navigate({ to: "/", search: text ? { q: text } : {} });
+    navigate({ to: "/agents", search: text ? { q: text } : {} });
   }
 
   const data = agents.data;
@@ -234,7 +234,9 @@ export default function Agents() {
         meta={data ? `${total} connected` : undefined}
       />
 
-      <div className="flex flex-wrap items-end justify-between gap-3">
+      {/* Stack on a phone: a flex-wrap row would let the chips' content width
+          starve the flex-basis-0 SQL box down to a sliver. */}
+      <div className="flex flex-col gap-3 md:flex-row md:flex-wrap md:items-end md:justify-between">
         <div className="min-w-0 flex-1 md:max-w-2xl">
           <SqlSearch
             columns={columns}

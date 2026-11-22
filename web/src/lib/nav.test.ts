@@ -55,8 +55,11 @@ describe("visibleNav", () => {
 
   it("main nav is visible to every role (no minRole entries)", () => {
     expect(MAIN_NAV.every((i) => i.minRole === undefined)).toBe(true);
+    // 2027-ui Stage B: `/` is the Overview dashboard (the owner's "generic
+    // landing page" ask) and the agents table moved to `/agents`.
     expect(MAIN_NAV.map((i) => i.to)).toEqual([
       "/",
+      "/agents",
       "/reports",
       "/groups",
       "/remote-config",

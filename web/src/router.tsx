@@ -6,6 +6,7 @@ import {
 import Login from './routes/Login'
 import AppShell from './routes/AppShell'
 import Agents from './routes/Agents'
+import Overview from './routes/Overview'
 import AgentDetail from './routes/AgentDetail'
 import Groups from './routes/Groups'
 import RemoteConfig from './routes/RemoteConfig'
@@ -36,9 +37,14 @@ const shellRoute = createRoute({
   component: AppShell,
 })
 
-const agentsRoute = createRoute({
+const overviewRoute = createRoute({
   getParentRoute: () => shellRoute,
   path: '/',
+  component: Overview,
+})
+const agentsRoute = createRoute({
+  getParentRoute: () => shellRoute,
+  path: '/agents',
   component: Agents,
   // The SQL selection rides in the URL (#146 parity): a detail page's back
   // link re-enters the same selection, and a filtered list is shareable.
@@ -104,6 +110,7 @@ const updatesRoute = createRoute({
 const routeTree = rootRoute.addChildren([
   loginRoute,
   shellRoute.addChildren([
+    overviewRoute,
     agentsRoute,
     agentDetailRoute,
     reportsRoute,

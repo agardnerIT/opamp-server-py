@@ -11,6 +11,7 @@ const CORRECT = "opamp-mock-password"; // fixtures.validPassword
 
 /** Every shell route with its page title (flat URLs, like Streamlit's). */
 const ROUTES = [
+  ["/agents", "Agents"],
   ["/reports", "Reports"],
   ["/groups", "Groups"],
   ["/remote-config", "Remote Config"],
@@ -43,9 +44,15 @@ test("signed in as admin: Admin section visible, every page reachable", async ({
       page.getByRole("heading", { level: 1, name: title }),
     ).toBeVisible();
   }
+
+  // '/' is the Overview dashboard now (Stage B), and it marks itself too.
+  await page.goto("/");
+  await expect(
+    page.getByRole("heading", { level: 1, name: "Overview" }),
+  ).toBeVisible();
 });
 
-test("Agents is the only page marked active on '/', and each page marks itself", async ({
+test("Overview is the only page marked active on '/', and each page marks itself", async ({
   page,
 }) => {
   await page.goto("/login");
@@ -56,16 +63,39 @@ test("Agents is the only page marked active on '/', and each page marks itself",
 
   const mainNav = page.getByRole("navigation", { name: "Main" });
   await expect(
+    mainNav.getByRole("link", { name: "Overview", exact: true }),
+  ).toHaveAttribute("aria-current", "page");
+
+  await page.goto("/agents");
+  await expect(
     mainNav.getByRole("link", { name: "Agents", exact: true }),
   ).toHaveAttribute("aria-current", "page");
+  await expect(
+    mainNav.getByRole("link", { name: "Overview", exact: true }),
+  ).not.toHaveAttribute("aria-current", "page");
 
   await page.goto("/groups");
   await expect(
     mainNav.getByRole("link", { name: "Groups" }),
   ).toHaveAttribute("aria-current", "page");
-  await expect(
-    mainNav.getByRole("link", { name: "Agents", exact: true }),
-  ).not.toHaveAttribute("aria-current", "page");
+});
+
+test("the Overview dashboard shows the fleet hero and activity strip", async ({ page }) => {
+  await page.goto("/login");
+  await page.getByLabel("Name").fill("admin");
+  await page.getByLabel("Password").fill(CORRECT);
+  await page.getByRole("button", { name: "Sign in" }).click();
+
+  // Hero: counts derived from GET /agents (mock fleet: 2 agents, 1 healthy).
+  // exact: the page meta line "2 agents connected" contains the same words.
+  await expect(page.getByText("Agents connected", { exact: true })).toBeVisible();
+  await expect(page.getByText("Agents by type")).toBeVisible();
+  // Activity strip links through to the underlying pages.
+  await expect(page.getByText("Rollouts in progress")).toBeVisible();
+  await expect(page.getByText("Alert events armed")).toBeVisible();
+  // Entry cards route onward.
+  await page.getByRole("link", { name: /Reports.*fleet analysis/s }).click();
+  await expect(page).toHaveURL("/reports");
 });
 
 test("unknown URLs render the not-found page", async ({ page }) => {
@@ -73,6 +103,6 @@ test("unknown URLs render the not-found page", async ({ page }) => {
   await expect(
     page.getByRole("heading", { level: 1, name: "Page not found" }),
   ).toBeVisible();
-  await page.getByRole("link", { name: "Back to Agents" }).click();
+  await page.getByRole("link", { name: "Back to Overview" }).click();
   await expect(page).toHaveURL("/");
 });

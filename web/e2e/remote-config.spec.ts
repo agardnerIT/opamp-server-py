@@ -31,7 +31,7 @@ async function login(page: import("@playwright/test").Page) {
   await expect(page).toHaveURL("/");
   // Client-side navigation only: a full goto reloads the JS context and the
   // mock transport's session flag with it (real mode keeps the cookie).
-  await page.getByRole("link", { name: "Remote Config" }).click();
+  await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Remote Config" }).click();
   await expect(page.getByTestId("compose-stepper")).toBeVisible();
 }
 

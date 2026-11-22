@@ -79,3 +79,41 @@ services:
       - --server.address=0.0.0.0
       - --server.headless=true
       - --server.runOnSave=true
+
+  # The 2027 web console (web/), on the product port 8501 (2027-ui Stage B1).
+  # Opt-in via profile so it never fights the Streamlit `ui` above for the host
+  # port: run `docker compose stop ui` first, then
+  #   docker compose --profile console up console
+  # Vite's dev server proxies /api to the FastAPI service (OPAMP_API_TARGET),
+  # so the browser talks to one origin. `npm ci` runs on first boot only — the
+  # named volume keeps node_modules across restarts.
+  console:
+    image: node:22-alpine
+    container_name: opamp-console
+    working_dir: /app/web
+    environment:
+      - OPAMP_API_TARGET=http://server:4320
+    ports:
+      - "127.0.0.1:8501:8501"
+    volumes:
+      - ./web:/app/web
+      - console-node-modules:/app/web/node_modules
+    command:
+      - sh
+      - -c
+      - |
+        if [ ! -d node_modules/vite ]; then npm ci --no-audit --no-fund; fi
+        exec npm run dev -- --host 0.0.0.0 --port 8501
+    depends_on:
+      server:
+        condition: service_healthy
+    networks:
+      - opamp-network
+    profiles:
+      - console
+
+volumes:
+  # node_modules for the `console` dev server (above). A named volume, so the
+  # bind-mounted source tree never sees a host/node_modules collision and the
+  # install survives restarts. `docker compose down -v` clears it like any other.
+  console-node-modules:

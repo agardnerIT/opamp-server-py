@@ -10,6 +10,12 @@ import tailwindcss from '@tailwindcss/vite'
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
+    // Stage B: the owner wants the console on Streamlit's old port 8501 (the
+    // product port). strictPort stays false so the dev server still starts
+    // (on 8502+) when the compose stack's Streamlit ui currently owns 8501 —
+    // the port hand-over happens at cutover (stage 10 there).
+    port: 8501,
+    strictPort: false,
     proxy: {
       '/api': {
         // OPAMP_API_TARGET lets the live smoke (playwright.live.config.ts) run

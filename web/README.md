@@ -13,8 +13,13 @@ the current console, regenerated per the [Screenshots](#screenshots) section.
 
 ```bash
 npm install
-npm run dev            # http://localhost:5173, proxies /api -> 127.0.0.1:4320
+npm run dev            # http://localhost:8501 (product port), proxies /api -> 127.0.0.1:4320
 ```
+
+Port 8501 is Streamlit's old port — the owner wants the console on it
+(2027-ui Stage B). `strictPort` is false, so if the compose stack's Streamlit
+UI currently owns 8501 the dev server starts on the next port up instead of
+refusing; at cut-over the port is fully handed over.
 
 The FastAPI server must be running for live data (see `../startDevStack.sh`).
 Without it, run against the built-in fixtures:
@@ -70,14 +75,16 @@ Consequences baked into this codebase:
   from the Streamlit flow because the cookie must still point at the old session
   when the DELETE lands.
 
-Latest screens (mock-mode fleet fixtures, refreshed for the 2027 design system —
-Stage A: brand indigo/cyan on near-black, Inter Tight display + JetBrains Mono,
-Switch/Button/Tabs/PageHeader primitives):
+Latest screens (mock-mode fleet fixtures, refreshed through 2027-ui Stage B —
+Stage A design system; Stage B moved `/` to an Overview dashboard and the
+agents table to `/agents`):
 
 | | |
 |---|---|
-| ![Agents list](../docs/screenshots/console-agents-list.png) | ![Agent detail](../docs/screenshots/console-agent-detail.png) |
-| Agents list: server-side SQL selection, health chips, schema columns, type + provenance badges | Agent detail: profile-declared telemetry panels, component inventory, masked config flagged |
+| ![Overview](../docs/screenshots/console-overview.png) | ![Agents list](../docs/screenshots/console-agents-list.png) |
+| Overview (`/`): fleet health counts, type breakdown, config activity strip, entry cards | Agents list (`/agents`): server-side SQL selection, health chips, schema columns, type + provenance badges |
+| ![Agent detail](../docs/screenshots/console-agent-detail.png) | |
+| Agent detail: profile-declared telemetry panels, component inventory, masked config flagged | |
 | ![Agents with session slot](../docs/screenshots/console-agents-session.png) | ![Login error](../docs/screenshots/console-login-error.png) |
 | Agents list + session slot (role, expiry, Extend, Sign out) | Login with the 401 notice |
 | ![Nav parity with Admin section](../docs/screenshots/console-nav-admin.png) | |

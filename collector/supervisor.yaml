@@ -1,0 +1,39 @@
+# OpAMP Supervisor config — the agent that CAN accept remote config (#docs/remote-config.md).
+#
+# `extension/opampextension` never advertises AcceptsRemoteConfig, so a bare
+# collector cannot take a pushed config. The supervisor can: it receives the
+# config from the OpAMP server, writes it, restarts the child collector and
+# auto-reverts on failure. This file configures the SUPERVISOR; the collector it
+# manages starts from `collector-base.yaml` (no opamp extension — the supervisor
+# injects its own, pointing the child at the supervisor, not at the server).
+#
+# The token is a secret: generate the real file at run time, never commit one.
+#   sed "s/\${OPAMP_SERVER_TOKEN}/$OPAMP_SERVER_TOKEN/" \
+#     collector/supervisor.yaml > /tmp/supervisor.yaml
+# See collector/run-supervisor.sh for the full docker invocation.
+server:
+  endpoint: ws://${OPAMP_SERVER_HOST}:4320/v1/opamp
+  headers:
+    Authorization: "Bearer ${OPAMP_SERVER_TOKEN}"
+
+capabilities:
+  accepts_remote_config: true
+  accepts_restart_command: true
+  reports_effective_config: true
+  reports_health: true
+  reports_available_components: true
+  reports_heartbeat: true
+
+agent:
+  executable: /otelcol-contrib
+  # Base config for the child collector (pipelines only; the supervisor adds the
+  # opamp extension and its own service.extensions).
+  config_files:
+    - /etc/otelcol-contrib/collector-base.yaml
+  # Identity survives restarts only if this directory does — mount a volume here.
+  # Without persistence the supervisor mints a new instance_id on every start and
+  # the server sees a brand-new agent each time.
+  # (set under storage below)
+
+storage:
+  directory: /var/lib/otelcol/supervisor

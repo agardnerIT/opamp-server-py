@@ -5045,6 +5045,14 @@ def create_config_rollout(
             info = config_control.summary(proposal_id)
         except config_control.ConfigControlError as exc:
             raise _control_error(exc)
+        # The plan must not promise a rollout that can never deliver: name the
+        # agents that cannot accept remote config at plan time, not at approval.
+        try:
+            rollout.refuse_agents_that_cannot_accept(
+                info["agents"], AGENT_REGISTRY.list_all()
+            )
+        except rollout.RolloutError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.detail)
         try:
             return rollout.preview_rollout(
                 proposal_id,
@@ -5189,7 +5197,10 @@ def push_config(
     used to give, so the role is the thing that stays. A blocked config writes no
     revision (the pipeline runs before the first mutation) and a rollout that fails
     after activation marks the new revisions `rejected` with the reason, so a failed
-    push never leaves a `proposed` proposal behind.
+    push never leaves a `proposed` proposal behind. A scope that includes an agent
+    without `AcceptsRemoteConfig` is refused outright (**409**, before any write): a
+    bare collector can never accept the config, so the rollout could only die at its
+    TTL.
 
     There is no dry run: validating is the read-only question, and the push either
     validates and stages or writes nothing.
@@ -5216,6 +5227,15 @@ def push_config(
     except config_control.ConfigControlError as exc:
         # Nothing has been written yet, so there is no partial state to clean up.
         raise _control_error(exc)
+
+    # Still before the first write: an agent that can never accept remote config
+    # (a bare collector) turns the whole push into a rollout that dies at its TTL.
+    try:
+        rollout.refuse_agents_that_cannot_accept(
+            prepared["targets"], AGENT_REGISTRY.list_all()
+        )
+    except rollout.RolloutError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
 
     proposal_id = remote_config.new_proposal_id()
     audit_action(

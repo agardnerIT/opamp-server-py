@@ -321,6 +321,14 @@ recognisable mistakes, and it does, in this order:
    Violations block; an `approver` may override with a recorded reason (audited
    as `config.override`). When OPA is disabled the verdict says `skipped`, never
    "passed".
+7. **Targets that cannot accept a config** — a push or rollout whose scope
+   includes an agent that does not advertise `AcceptsRemoteConfig` is refused
+   **409** before anything is written (`reason: agent_does_not_accept`, with the
+   offending `agent_ids`). Without this the rollout stages fine and then dies at
+   its TTL: every delivery to such an agent is refused and the canary gate can
+   never open. A bare `otelcol-contrib` is the canonical case — its
+   `extension/opampextension` never advertises the bit; run it under the OpAMP
+   Supervisor instead. The dry run reports the same refusal.
 
 Validation runs at **propose** and again at **approve**: a config approved on
 Monday must not be delivered on Friday without re-checking, because the schema,

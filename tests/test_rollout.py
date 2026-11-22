@@ -86,10 +86,11 @@ def agent_message(
     error: str = "",
     healthy: bool = True,
     health_status: str = "",
+    capabilities: int | None = None,
 ) -> bytes:
     msg = opamp_pb2.AgentToServer()
     msg.instance_uid = bytes.fromhex(agent_id)
-    msg.capabilities = (
+    msg.capabilities = capabilities if capabilities is not None else (
         opamp_pb2.AgentCapabilities.AgentCapabilities_ReportsStatus
         | opamp_pb2.AgentCapabilities.AgentCapabilities_AcceptsRemoteConfig
         | opamp_pb2.AgentCapabilities.AgentCapabilities_ReportsHealth
@@ -122,6 +123,7 @@ def poll(
     healthy: bool = True,
     error: str = "",
     health_status: str = "",
+    capabilities: int | None = None,
 ) -> bool:
     """One agent poll; True when the reply carries a config.
 
@@ -137,6 +139,7 @@ def poll(
             healthy=healthy,
             error=error,
             health_status=health_status,
+            capabilities=capabilities,
         )
     ).HasField("remote_config")
     pin_collector(agent_id)
@@ -815,6 +818,56 @@ def test_abort_reholds_a_released_batch_and_the_monitor_stops_saying_in_flight(c
     # look like the abort had not landed).
     assert aborted["batches"][0]["status"] == "aborted"
     assert aborted["agents"]["states"]["applied"] == 0
+
+
+def test_a_rollout_is_refused_when_a_target_cannot_accept_remote_config(client):
+    """Acceptance: a push to a bare collector is refused before anything is written.
+
+    `extension/opampextension` never advertises `AcceptsRemoteConfig`, so every
+    delivery to such an agent is refused (`agent_does_not_accept`) and the gate can
+    never open — the rollout only died at its TTL. The server now refuses at push
+    and at rollout-create time, before the approval exists, naming the agents.
+    """
+    bare = agent_id_for(50)
+    capable = agent_id_for(51)
+    no_remote_config = (
+        opamp_pb2.AgentCapabilities.AgentCapabilities_ReportsStatus
+        | opamp_pb2.AgentCapabilities.AgentCapabilities_ReportsHealth
+    )
+    poll(bare, capabilities=no_remote_config)  # registers like otelcol-contrib
+    poll(capable)  # a supervisor or any agent that accepts remote config
+
+    # The push refuses with 409 and writes no revision.
+    response = client.post(
+        "/config/push",
+        json={"config_map": CONFIG_V2, "scope": {"agents": [bare, capable]}},
+        headers=admin_headers(),
+    )
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert bare in detail["agent_ids"]
+    assert capable not in detail["agent_ids"]
+    assert "AcceptsRemoteConfig" in detail["message"]
+
+    # Nothing leaked: no revision, no proposal for the refused push.
+    revisions = client.get(
+        f"/config/revisions?agent_id={bare}", headers=admin_headers()
+    ).json()
+    assert not revisions.get("revisions")
+
+    # A rollout created directly against the same proposal is refused too — the
+    # approval is the rollout, so the refusal must come before it.
+    proposal_id = _propose(client, [bare])
+    with pytest.raises(rollout.RolloutError) as exc:
+        rollout.create_rollout(
+            proposal_id, approver="admin", agents=AGENT_REGISTRY.list_all()
+        )
+    assert exc.value.status_code == 409
+    # The proposal is untouched: nothing was approved or assigned.
+    view = client.get(
+        f"/config/revisions/{proposal_id}", headers=admin_headers()
+    ).json()
+    assert view["status"] == "proposed"
 
 
 def test_a_ttl_expired_rollout_is_cancelled_and_audited(client):

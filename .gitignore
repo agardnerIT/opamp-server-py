@@ -215,3 +215,10 @@ data/update-settings.json
 
 # Local strategy notes (not committed)
 agent-candidates.md
+
+# OpAMP supervisor runtime state (instance identity) — do not commit
+collector/supervisor-state/
+
+# OpAMP supervisor runtime state (instance identity) — do not commit
+collector/supervisor-state/
+.supervisor/

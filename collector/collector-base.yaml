@@ -1,0 +1,68 @@
+# Base config for a SUPERVISOR-managed collector (collector/run-supervisor.sh).
+#
+# Derived from config-with-telemetry.yaml with the `opamp` extension removed:
+# the OpAMP Supervisor injects its own opamp extension (pointing the child at
+# the supervisor's local OpAMP port), and a second definition in the base file
+# would just be merged noise. The supervisor receives the config from the
+# OpAMP server — a bare collector cannot (docs/remote-config.md).
+#
+# This file was captured as an *effective* config (every default spelled out),
+# so a few keys are not accepted by the current collector and are removed:
+# `protocols.http.transport`/`idle_timeout` (http has no transport; idle_timeout
+# does not exist on this receiver) and `capabilities.accepts_restart_command`.
+# `filelog` is renamed to `file_log` (the alias is deprecated), and receivers
+# bind `0.0.0.0` so the published ports work from outside the container.
+exporters:
+  debug:
+    sampling_initial: 2
+    sampling_thereafter: 1
+    use_internal_logger: true
+    verbosity: Detailed
+processors:
+  batch:
+    metadata_cardinality_limit: 1000
+    metadata_keys: []
+    send_batch_max_size: 0
+    send_batch_size: 8192
+    timeout: 200ms
+receivers:
+  file_log:
+    include: ["/var/log/collector/file.log"]
+    start_at: beginning
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4347
+        keepalive: {}
+        read_buffer_size: 524288
+        transport: tcp
+      http:
+        endpoint: 0.0.0.0:4348
+        logs_url_path: /v1/logs
+        metrics_url_path: /v1/metrics
+        read_header_timeout: 0s
+        traces_url_path: /v1/traces
+        write_timeout: 0s
+service:
+  pipelines:
+    traces:
+      receivers:
+      - otlp
+      processors:
+      - batch
+      exporters:
+      - debug
+    logs:
+      receivers:
+        - file_log
+      exporters:
+        - debug
+  telemetry:
+    metrics:
+      level: detailed
+      readers:
+      - periodic:
+          exporter:
+            otlp:
+              protocol: http/protobuf
+              endpoint: ${env:OPAMP_METRICS_URL:-http://host.docker.internal:4320/v1/metrics}

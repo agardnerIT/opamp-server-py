@@ -621,6 +621,54 @@ def agent_state_for(gate: AgentGate, *, delivered: bool) -> str:
 # ----------------------------------------------------------------------- creation
 
 
+def refuse_agents_that_cannot_accept(
+    agent_ids: Sequence[str], agents: Sequence[AgentState]
+) -> None:
+    """Refuse a rollout whose targets can never accept the config.
+
+    `agent_does_not_accept` is not a transient delivery refusal: an agent without
+    the `AcceptsRemoteConfig` capability bit is refused on **every** delivery, so
+    the canary gate can never open and the rollout can only die at its TTL — the
+    exact zombie a bare `otelcol-contrib` produces, because its
+    `extension/opampextension` never advertises the bit. Catch that **before** the
+    approval is written, name the agents and say what the standard-OpAMP
+    alternative is, instead of staging an approval that is dead on arrival.
+    """
+    capabilities = {
+        str(getattr(agent, "agent_id", "")): int(getattr(agent, "capabilities", 0) or 0)
+        for agent in agents
+    }
+    cannot = sorted(
+        agent_id
+        for agent_id in agent_ids
+        if not capabilities.get(agent_id, 0)
+        & remote_config.AgentCapabilities.AgentCapabilities_AcceptsRemoteConfig
+    )
+    if not cannot:
+        return
+    shown = ", ".join(cannot[:5])
+    if len(cannot) > 5:
+        shown += f" … (+{len(cannot) - 5} more)"
+    raise RolloutError(
+        409,
+        {
+            "message": (
+                f"{len(cannot)} of {len(agent_ids)} target agent(s) do not advertise "
+                "AcceptsRemoteConfig, so every delivery would be refused "
+                f"(agent_does_not_accept) and the health gate could never open: {shown}"
+            ),
+            "hint": (
+                "extension/opampextension never accepts remote config — the OpAMP "
+                "supervisor is the only collector agent that can apply a pushed "
+                "config (docs/remote-config.md). Remove these agents from the scope, "
+                "or run them under the supervisor."
+            ),
+            "agent_ids": cannot,
+            "reason": "agent_does_not_accept",
+        },
+    )
+
+
 def create_rollout(
     proposal_id: str,
     *,
@@ -651,6 +699,12 @@ def create_rollout(
     """
     now = now or utcnow()
     agents = list(agents if agents is not None else AGENT_REGISTRY.list_all())
+    # Before the approval exists to point at: an agent that cannot accept remote
+    # config turns every delivery into `agent_does_not_accept`, so the gate never
+    # opens and the rollout only dies at its TTL. Refuse while nothing is written.
+    refuse_agents_that_cannot_accept(
+        config_control.summary(proposal_id)["agents"], agents
+    )
     approved = config_control.approve(
         proposal_id,
         approver=approver,

@@ -12,6 +12,7 @@ const DETAIL_OUT = "../docs/screenshots/console-agent-detail.png";
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
 await page.goto(`${BASE}/login`);
+await page.getByLabel("Name").fill("admin");
 await page.getByLabel("Password").fill("opamp-mock-password");
 await page.getByRole("button", { name: "Sign in" }).click();
 // First visit compiles Vite deps; the login POST itself settles quickly, so

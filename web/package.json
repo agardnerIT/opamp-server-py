@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "gen-api": "npm --prefix tools/api-codegen run gen",
-    "e2e": "playwright test"
+    "e2e": "playwright test",
+    "e2e:live": "playwright test --config playwright.live.config.ts"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.5",

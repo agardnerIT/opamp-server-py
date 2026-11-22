@@ -532,7 +532,7 @@ stage 9 owns the live pass and the role-denial cases.
 
 ---
 
-## Stage 9 — Test + screenshot parity, README (status: **todo**)
+## Stage 9 — Test + screenshot parity, README (status: **done**, 2026-11-22)
 
 Depends on: stages 5–8.
 
@@ -542,6 +542,37 @@ Depends on: stages 5–8.
    to the new UI or shown side-by-side during transition.
 3. Document local dev (server + `npm run dev`) and regeneration commands in
    `web/README.md`.
+
+### Notes for stage 10 (written 2026-11-22 when stage 9 closed)
+
+All gates green: `npm run build` (tsc strict), vitest 76, oxlint, Playwright 25
+(3 new in `e2e/roles.spec.ts`) plus a **live smoke**, `npm run e2e:live`, that
+boots a throwaway FastAPI server (temp `DATA_DIR`, throwaway password, config
+push off, port **4330**) and walks the real cookie round-trip: login → shell →
+privileged write (PUT /alerts) → logout → revoked cookie rejected.
+
+- **Role-denial cases run against the mock, not just disabled buttons**: the
+  mock now runs in *principals mode* — login name `viewer`/`operator`/
+  `approver`/`admin` maps onto that role (`fixtures.mockPrincipals`, same
+  password for all) and **every mock handler enforces the same role floor the
+  live endpoint does** (`docs/api-reference.md` is the source). The 403 body
+  is the server's exact wording (`role 'x' cannot perform this action
+  (requires 'y')`) — keep it that way, `errors.ts` and the tests key off it.
+  The mock's `authStatus` is now `auth_mode: "principals"`, so the login form
+  shows the Name field; all specs and `tools/screenshot-*.mjs` fill it.
+- **One real UX fix fell out** (not staged): TanStack Query's default retry
+  re-fires 4xx three times, so a 403/404 took ~7s to render its message.
+  `src/main.tsx` now retries only 5xx/network — 4xx answers are the server's
+  decision. If a page ever needs retry-on-4xx, override it in that query,
+  not globally.
+- **Screenshots**: all 13 `docs/screenshots/console-*.png` regenerated via the
+  five `web/tools/screenshot-*.mjs` scripts (commands documented in
+  `web/README.md`); the README's "Latest screens" table is the current
+  console. The live pass here was the auth/cookie smoke — fleet-dependent
+  views (a real agent proposing → applying) still only exist against the
+  mock; if the owner wants that proven live, it belongs with stage 10's
+  compose stack, where an agent can actually connect.
+- Stage 11's polish backlog is still open and unblocked.
 
 ---
 

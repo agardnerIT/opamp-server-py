@@ -26,6 +26,7 @@ test("signed in as admin: Admin section visible, every page reachable", async ({
   page,
 }) => {
   await page.goto("/login");
+  await page.getByLabel("Name").fill("admin");
   await page.getByLabel("Password").fill(CORRECT);
   await page.getByRole("button", { name: "Sign in" }).click();
   await expect(page).toHaveURL("/");
@@ -48,6 +49,7 @@ test("Agents is the only page marked active on '/', and each page marks itself",
   page,
 }) => {
   await page.goto("/login");
+  await page.getByLabel("Name").fill("admin");
   await page.getByLabel("Password").fill(CORRECT);
   await page.getByRole("button", { name: "Sign in" }).click();
   await expect(page).toHaveURL("/");

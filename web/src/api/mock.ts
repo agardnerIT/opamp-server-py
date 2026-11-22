@@ -120,21 +120,28 @@ const HANDLERS: Handler[] = [
     method: "GET",
     path: "/auth/me",
     respond: () =>
-      sessionActive()
-        ? { body: fixtures.me }
-        : { body: UNAUTHORIZED, status: 401 },
+      sessionActive() ? { body: meBody() } : { body: UNAUTHORIZED, status: 401 },
   },
   {
     method: "POST",
     path: "/auth/session",
     respond: async (request) => {
-      // The handler never inspects the password beyond accept/reject — same
+      // Principals mode (fixtures.authStatus): the name must match one, and
+      // the name maps onto the role a principal record carries — same
       // contract as the server: 401 on bad credentials, no such-name hint.
       try {
-        const body = (await request.json()) as { password?: unknown };
-        if (body.password === fixtures.validPassword) {
-          setSessionLive(true);
-          return { body: fixtures.session, status: 201 };
+        const body = (await request.json()) as { name?: unknown; password?: unknown };
+        const name = typeof body.name === "string" ? body.name.trim().toLowerCase() : "";
+        const role = fixtures.mockPrincipals[name] ?? (name === "admin" ? fixtures.defaultRole : null);
+        if (body.password === fixtures.validPassword && role !== null) {
+          setSessionLive(true, role);
+          return {
+            body: {
+              ...fixtures.session,
+              principal: { name: role === "admin" ? "admin" : role, role },
+            },
+            status: 201,
+          };
         }
         return { body: { detail: "invalid credentials" }, status: 401 };
       } catch {
@@ -198,6 +205,8 @@ const HANDLERS: Handler[] = [
     method: "POST",
     path: "/groups",
     respond: async (request) => {
+      const denied = sessionActive() ? roleDenied("operator") : { body: UNAUTHORIZED, status: 401 };
+      if (denied) return denied;
       const body = (await request.json()) as {
         name?: string;
         query?: string | null;
@@ -240,6 +249,8 @@ const HANDLERS: Handler[] = [
       return m ? { group_id: m[1] } : null;
     },
     respond: async (request, params) => {
+      const denied = sessionActive() ? roleDenied("operator") : { body: UNAUTHORIZED, status: 401 };
+      if (denied) return denied;
       const group = groupsState.find((g) => g.group_id === params.group_id);
       if (!group) return { body: { detail: "group not found" }, status: 404 };
       const body = (await request.json()) as {
@@ -267,6 +278,8 @@ const HANDLERS: Handler[] = [
       return m ? { group_id: m[1] } : null;
     },
     respond: (_request, params) => {
+      const denied = sessionActive() ? roleDenied("operator") : { body: UNAUTHORIZED, status: 401 };
+      if (denied) return denied;
       const index = groupsState.findIndex((g) => g.group_id === params.group_id);
       if (index === -1) return { body: { detail: "group not found" }, status: 404 };
       const [removed] = groupsState.splice(index, 1);
@@ -364,6 +377,8 @@ const HANDLERS: Handler[] = [
     method: "POST",
     path: "/config/revisions",
     respond: async (request) => {
+      const denied = sessionActive() ? roleDenied("operator") : { body: UNAUTHORIZED, status: 401 };
+      if (denied) return denied;
       const body = (await request.json()) as {
         scope?: { agents?: string[]; group?: string };
         note?: string | null;
@@ -452,6 +467,10 @@ const HANDLERS: Handler[] = [
     respond: async (_request, params) => {
       const proposal: MockProposal | undefined = proposals.get(params.proposal_id);
       if (!proposal) return { body: { detail: "proposal not found" }, status: 404 };
+      const denied = sessionActive()
+        ? roleDenied(params.action === "reject" ? "approver" : "operator")
+        : { body: UNAUTHORIZED, status: 401 };
+      if (denied) return denied;
       if (params.action === "reject" && proposal.status !== "proposed") {
         return { body: { detail: `only proposed revisions can be rejected (this one is ${proposal.status})` }, status: 409 };
       }
@@ -466,6 +485,8 @@ const HANDLERS: Handler[] = [
     method: "POST",
     path: "/config/rollouts",
     respond: async (request) => {
+      const denied = sessionActive() ? roleDenied("approver") : { body: UNAUTHORIZED, status: 401 };
+      if (denied) return denied;
       const url = new URL(request.url);
       const proposalId = url.searchParams.get("proposal_id") ?? "";
       const proposal = proposals.get(proposalId);
@@ -577,6 +598,11 @@ const HANDLERS: Handler[] = [
       return m ? { rollout_id: m[1], action: m[2] } : null;
     },
     respond: async (_request, params) => {
+      // abort is operator; resume and rollback are approver (as on the server).
+      const denied = sessionActive()
+        ? roleDenied(params.action === "abort" ? "operator" : "approver")
+        : { body: UNAUTHORIZED, status: 401 };
+      if (denied) return denied;
       const rollout = rolloutsState.find((r) => r.rollout_id === params.rollout_id);
       if (!rollout) return { body: { detail: "rollout not found" }, status: 404 };
       if (params.action === "abort") {
@@ -611,9 +637,10 @@ const HANDLERS: Handler[] = [
 
   /* ---------------------------------------------------------------- */
   /* Admin pages (stage 8): alerts, tokens, sessions, compliance,      */
-  /* updates. Read endpoints answer signed-in; mutating ones too — the */
-  /* mock runs as role `admin`, so role-denial cases stay Playwright   */
-  /* territory against a real server (stage 9 owns those).             */
+  /* updates. Every handler enforces the same role floor the live      */
+  /* endpoint does (`docs/api-reference.md`), so the stage-9 role-denial  */
+  /* cases exercise the real 403 path against the mock: the server is    */
+  /* the authority even when a client-side hint misfires.                */
   /* ---------------------------------------------------------------- */
   {
     method: "GET",
@@ -624,7 +651,8 @@ const HANDLERS: Handler[] = [
     method: "PUT",
     path: "/alerts",
     respond: async (request) => {
-      if (!sessionActive()) return { body: UNAUTHORIZED, status: 401 };
+      const denied = sessionActive() ? roleDenied("operator") : { body: UNAUTHORIZED, status: 401 };
+      if (denied) return denied;
       const body = (await request.json()) as {
         events?: Record<string, Record<string, unknown>>;
       };
@@ -648,7 +676,8 @@ const HANDLERS: Handler[] = [
     method: "POST",
     path: "/alerts/test",
     respond: (request) => {
-      if (!sessionActive()) return { body: UNAUTHORIZED, status: 401 };
+      const denied = sessionActive() ? roleDenied("operator") : { body: UNAUTHORIZED, status: 401 };
+      if (denied) return denied;
       void request; // body accepted, outcome fixed — the mock has no webhooks.
       return { body: { success: true, error: null } };
     },
@@ -663,7 +692,8 @@ const HANDLERS: Handler[] = [
     method: "POST",
     path: "/agent-tokens",
     respond: async (request) => {
-      if (!sessionActive()) return { body: UNAUTHORIZED, status: 401 };
+      const denied = sessionActive() ? roleDenied("admin") : { body: UNAUTHORIZED, status: 401 };
+      if (denied) return denied;
       const body = (await request.json().catch(() => ({}))) as {
         label?: string;
         expires_in_days?: number | null;
@@ -715,7 +745,8 @@ const HANDLERS: Handler[] = [
       return m ? { token_id: m[1] } : null;
     },
     respond: (_request, params) => {
-      if (!sessionActive()) return { body: UNAUTHORIZED, status: 401 };
+      const denied = sessionActive() ? roleDenied("admin") : { body: UNAUTHORIZED, status: 401 };
+      if (denied) return denied;
       const token = (fixtures.agentTokens.tokens as { token_id: string; revoked_at: string | null; active: boolean }[])
         .find((t) => t.token_id === params.token_id);
       if (!token || token.revoked_at) {
@@ -729,8 +760,11 @@ const HANDLERS: Handler[] = [
   {
     method: "GET",
     path: "/auth/sessions",
-    respond: () =>
-      sessionActive() ? { body: fixtures.adminSessions } : { body: UNAUTHORIZED, status: 401 },
+    respond: () => {
+      const denied = sessionActive() ? roleDenied("admin") : { body: UNAUTHORIZED, status: 401 };
+      if (denied) return denied;
+      return { body: fixtures.adminSessions };
+    },
   },
   {
     method: "DELETE",
@@ -739,7 +773,8 @@ const HANDLERS: Handler[] = [
       return m ? { session_id: m[1] } : null;
     },
     respond: (_request, params) => {
-      if (!sessionActive()) return { body: UNAUTHORIZED, status: 401 };
+      const denied = sessionActive() ? roleDenied("admin") : { body: UNAUTHORIZED, status: 401 };
+      if (denied) return denied;
       if (params.session_id.length < 6) {
         return { body: { detail: "session id must be at least 6 characters" }, status: 422 };
       }
@@ -758,10 +793,11 @@ const HANDLERS: Handler[] = [
   {
     method: "POST",
     path: "/compliance/reload",
-    respond: () =>
-      sessionActive()
-        ? { body: { success: true } }
-        : { body: { detail: "Authentication required" }, status: 401 },
+    respond: () => {
+      const denied = sessionActive() ? roleDenied("admin") : { body: UNAUTHORIZED, status: 401 };
+      if (denied) return denied;
+      return { body: { success: true } };
+    },
   },
   {
     method: "POST",
@@ -770,7 +806,8 @@ const HANDLERS: Handler[] = [
       return m ? { agent_id: m[1] } : null;
     },
     respond: (_request, params) => {
-      if (!sessionActive()) return { body: UNAUTHORIZED, status: 401 };
+      const denied = sessionActive() ? roleDenied("operator") : { body: UNAUTHORIZED, status: 401 };
+      if (denied) return denied;
       const detail = fixtures.agentDetails[params.agent_id];
       if (!detail) return { body: { detail: "Agent not found" }, status: 404 };
       const compliance = (detail as { compliance?: { compliant?: boolean | null } }).compliance;
@@ -792,7 +829,8 @@ const HANDLERS: Handler[] = [
     method: "PUT",
     path: "/updates/settings",
     respond: async (request) => {
-      if (!sessionActive()) return { body: UNAUTHORIZED, status: 401 };
+      const denied = sessionActive() ? roleDenied("admin") : { body: UNAUTHORIZED, status: 401 };
+      if (denied) return denied;
       const body = (await request.json()) as { enabled?: boolean | null };
       fixtures.updates.admin_override = body.enabled ?? null;
       fixtures.updates.enabled = body.enabled ?? fixtures.updates.deployment_enabled;
@@ -803,7 +841,8 @@ const HANDLERS: Handler[] = [
     method: "POST",
     path: "/updates/check",
     respond: () => {
-      if (!sessionActive()) return { body: UNAUTHORIZED, status: 401 };
+      const denied = sessionActive() ? roleDenied("admin") : { body: UNAUTHORIZED, status: 401 };
+      if (denied) return denied;
       fixtures.updates.checked_at = new Date().toISOString();
       return { body: fixtures.updates };
     },
@@ -947,6 +986,9 @@ function mockGroup(
  */
 let sessionLive = false;
 
+/** Role of the standing mock session (stage 9): name → role on login. */
+let sessionRole = "admin";
+
 /**
  * The mock session must survive full page navigations (Playwright `goto`
  * reloads the module): in a browser the flag is mirrored into localStorage —
@@ -954,20 +996,67 @@ let sessionLive = false;
  * module flag alone is used.
  */
 const MOCK_SESSION_KEY = "opamp-mock-session-live";
+const MOCK_SESSION_ROLE_KEY = "opamp-mock-session-role";
 
 function sessionActive(): boolean {
   if (typeof localStorage === "undefined") return sessionLive;
   return sessionLive || localStorage.getItem(MOCK_SESSION_KEY) === "1";
 }
 
-function setSessionLive(on: boolean): void {
+/** The signed-in principal's role (name → role at login, admin by default). */
+function currentRole(): string {
+  if (typeof localStorage === "undefined") return sessionRole;
+  return localStorage.getItem(MOCK_SESSION_ROLE_KEY) ?? sessionRole;
+}
+
+function setSessionLive(on: boolean, role = sessionRole): void {
   sessionLive = on;
+  sessionRole = role;
   try {
-    if (on) localStorage.setItem(MOCK_SESSION_KEY, "1");
-    else localStorage.removeItem(MOCK_SESSION_KEY);
+    if (on) {
+      localStorage.setItem(MOCK_SESSION_KEY, "1");
+      localStorage.setItem(MOCK_SESSION_ROLE_KEY, role);
+    } else {
+      localStorage.removeItem(MOCK_SESSION_KEY);
+      localStorage.removeItem(MOCK_SESSION_ROLE_KEY);
+    }
   } catch {
     /* storage unavailable (node, privacy mode) — the flag still works */
   }
+}
+
+/**
+ * Role gate mirroring `server/auth.py::require_roles`: 403 with the server's
+ * exact detail wording when the standing session's role is below `required`.
+ * Roles are ordered (viewer < operator < approver < admin) and imply every
+ * lesser one.
+ */
+const ROLE_RANK: Record<string, number> = {
+  viewer: 1,
+  operator: 2,
+  approver: 3,
+  admin: 4,
+};
+
+function roleDenied(required: string): { body: unknown; status: number } | null {
+  const role = currentRole();
+  if ((ROLE_RANK[role] ?? 0) >= (ROLE_RANK[required] ?? 0)) return null;
+  return {
+    body: {
+      detail: `role '${role}' cannot perform this action (requires '${required}')`,
+    },
+    status: 403,
+  };
+}
+
+/** `GET /auth/me` for the standing session, role included. */
+function meBody() {
+  const role = currentRole();
+  return {
+    ...fixtures.me,
+    name: role === "admin" ? "admin" : role,
+    role,
+  };
 }
 
 const LATENCY_MS = 50;

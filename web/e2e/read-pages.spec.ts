@@ -9,6 +9,7 @@ import { expect, test } from "@playwright/test";
 
 test.beforeEach(async ({ page }) => {
   await page.goto("/login");
+  await page.getByLabel("Name").fill("admin");
   await page.getByLabel("Password").fill("opamp-mock-password");
   await page.getByRole("button", { name: "Sign in" }).click();
   await page.waitForURL("/");

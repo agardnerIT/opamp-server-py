@@ -12,7 +12,10 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:4320',
+        // OPAMP_API_TARGET lets the live smoke (playwright.live.config.ts) run
+        // its own throwaway server on another port without touching the dev
+        // stack's server on 4320.
+        target: process.env.OPAMP_API_TARGET ?? 'http://127.0.0.1:4320',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api/, ''),
       },

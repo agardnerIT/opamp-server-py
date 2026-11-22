@@ -25,6 +25,7 @@ service:
 
 async function login(page: import("@playwright/test").Page) {
   await page.goto("/login");
+  await page.getByLabel("Name").fill("admin");
   await page.getByLabel("Password").fill(CORRECT);
   await page.getByRole("button", { name: "Sign in" }).click();
   await expect(page).toHaveURL("/");

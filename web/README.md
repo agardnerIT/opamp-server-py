@@ -4,6 +4,11 @@ React 19 + TypeScript (strict) + Vite + Tailwind v4 + shadcn/ui (Radix) +
 TanStack Query/Router. See `../new-ui-plans.md` for the staged plan; this UI
 replaces the Streamlit UI (`ui/`) page by page until full parity.
 
+**All stages through 9 are done** (auth, agents, remote config, read pages,
+admin pages, test + screenshot parity) — this UI is at feature parity with
+Streamlit and ready for the stage-10 cutover sign-off. Screenshots below are
+the current console, regenerated per the [Screenshots](#screenshots) section.
+
 ## Development
 
 ```bash
@@ -24,7 +29,28 @@ VITE_USE_MOCK_API=1 npm run dev
 npm run build   # tsc -b (strict) + vite build
 npm run test    # vitest (always mock transport — no live server needed)
 npm run lint    # oxlint
-npm run e2e     # Playwright (mock-mode dev server; stage 3: auth round-trip)
+npm run e2e     # Playwright (mock-mode dev server: auth, agents, stepper, admin, roles)
+npm run e2e:live # Playwright live smoke (boots a throwaway read-only server on :4330)
+```
+
+`e2e:live` is the mock suite's complement: it starts a real FastAPI server
+(temp `DATA_DIR`, throwaway `ADMIN_PASSWORD`, config push off) on port 4330 —
+never the dev stack's server on 4320 — and walks the real cookie round-trip
+(login → shell → privileged write → logout → revoked cookie). Fleet-dependent
+views stay in the mock suite, where fixtures make them deterministic.
+
+## Screenshots
+
+Every user-visible screen has a capture under `../docs/screenshots/`, linked
+from the section below. Regenerate all of them with the mock dev server up:
+
+```bash
+VITE_USE_MOCK_API=1 npm run dev -- --port 5199 --strictPort &
+node tools/screenshot-shell.mjs          # nav-admin, agents-session, login-error
+node tools/screenshot-agents.mjs         # agents list, collector detail
+node tools/screenshot-read-pages.mjs     # groups, reports
+node tools/screenshot-remote-config.mjs  # the config stepper
+node tools/screenshot-admin.mjs          # alerts, tokens, sessions, compliance, updates
 ```
 
 ## Auth (cookie sessions, stage 3)
@@ -105,9 +131,9 @@ red Push button (`src/components/config/ComposeStepper.tsx`):
   review.
 
 Playwright: `e2e/remote-config.spec.ts` drives the whole stepper against the
-stateful mock transport (the mock makes "create rollout = approval"); the live
-offer→approve→push→apply round-trip is stage 9's pass. Screenshot:
-`tools/screenshot-remote-config.mjs`.
+stateful mock transport (the mock makes "create rollout = approval"); the
+mock's rollout/approval handlers enforce the operator/approver role floors, so
+the denial cases run here too. Screenshot: `tools/screenshot-remote-config.mjs`.
 
 ## Agents (stage 5)
 
@@ -179,6 +205,10 @@ openapi-typescript does not yet support at runtime.
 - Mock mode: handlers + fixtures in `src/api/mock.ts` / `fixtures.ts`; Playwright
   and offline dev use `VITE_USE_MOCK_API=1`. The mock auth handlers are
   stateful (a flag stands in for the cookie) so the login → shell → logout
-  round-trip is exercised without a server.
+  round-trip is exercised without a server. The mock runs in **principals
+  mode** with a name→role map (`fixtures.mockPrincipals`): sign in as
+  `viewer`/`operator`/`approver`/`admin` (same password) and every handler
+  enforces the same role floor the live endpoint does, so the 403 contract is
+  testable end to end (`e2e/roles.spec.ts`).
 - Design tokens live in `src/index.css` (`--color-*`); never hard-code colors in
   components.

@@ -10,6 +10,9 @@ import { defineConfig, devices } from "@playwright/test";
  */
 export default defineConfig({
   testDir: "./e2e",
+  // The live smoke has its own config (playwright.live.config.ts) that boots a
+  // real server; here it would run against the mock and fail on purpose.
+  testIgnore: "**/live.smoke.spec.ts",
   use: {
     ...devices["Desktop Chrome"],
     baseURL: "http://localhost:5199",

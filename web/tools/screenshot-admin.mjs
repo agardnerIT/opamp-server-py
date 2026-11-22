@@ -10,6 +10,7 @@ const BASE = "http://localhost:5199";
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
 await page.goto(`${BASE}/login`);
+await page.getByLabel("Name").fill("admin");
 await page.getByLabel("Password").fill("opamp-mock-password");
 await page.getByRole("button", { name: "Sign in" }).click();
 await page.waitForURL(`${BASE}/`, { timeout: 60_000 });

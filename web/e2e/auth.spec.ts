@@ -10,6 +10,7 @@ const CORRECT = "opamp-mock-password"; // fixtures.validPassword
 
 test("wrong password shows the 401 message and stays on /login", async ({ page }) => {
   await page.goto("/login");
+  await page.getByLabel("Name").fill("admin");
   await page.getByLabel("Password").fill("wrong");
   await page.getByRole("button", { name: "Sign in" }).click();
   await expect(page.getByRole("alert")).toContainText("Incorrect name or password.");
@@ -18,6 +19,7 @@ test("wrong password shows the 401 message and stays on /login", async ({ page }
 
 test("login → shell → logout round-trip", async ({ page }) => {
   await page.goto("/login");
+  await page.getByLabel("Name").fill("admin");
   await page.getByLabel("Password").fill(CORRECT);
   await page.getByRole("button", { name: "Sign in" }).click();
 

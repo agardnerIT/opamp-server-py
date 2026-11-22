@@ -204,3 +204,103 @@ describe("mockFetch — admin pages (stage 8)", () => {
     });
   });
 });
+
+/**
+ * Role-denial cases (stage 9): the mock enforces the same role floor the live
+ * endpoints do, so the 403 contract — session kept, `role '<x>' cannot
+ * perform this action (requires '<y>')` — is testable without a server.
+ * Runs last: the logins here change the standing session's role.
+ */
+describe("mockFetch — role denial (stage 9)", () => {
+  const loginAs = async (name: string) => {
+    const res = await mockFetch(`${BASE}/auth/session`, {
+      method: "POST",
+      body: JSON.stringify({ name, password: fixtures.validPassword }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { principal: { role: string } };
+    return body.principal.role;
+  };
+
+  it("a login name maps onto its principal's role", async () => {
+    expect(await loginAs("viewer")).toBe("viewer");
+    const me = await mockFetch(`${BASE}/auth/me`);
+    expect(((await me.json()) as { role: string }).role).toBe("viewer");
+  });
+
+  it("viewer keeps the session on a 403: reads answer, mutations refuse", async () => {
+    const read = await mockFetch(`${BASE}/alerts`);
+    expect(read.status).toBe(200); // GET /alerts is viewer-level on the server
+
+    const put = await mockFetch(`${BASE}/alerts`, {
+      method: "PUT",
+      body: JSON.stringify({ events: {} }),
+    });
+    expect(put.status).toBe(403);
+    const detail = (await put.json()) as { detail: string };
+    // Exact server wording — ui/session.py and web/src/api/errors.ts key off it.
+    expect(detail.detail).toBe(
+      "role 'viewer' cannot perform this action (requires 'operator')",
+    );
+
+    // The session survived the refusal (403 never drops it — only 401 does).
+    const still = await mockFetch(`${BASE}/auth/me`);
+    expect(still.status).toBe(200);
+
+    const testAlert = await mockFetch(`${BASE}/alerts/test`, { method: "POST" });
+    expect(testAlert.status).toBe(403);
+  });
+
+  it("operator passes operator gates but not admin ones", async () => {
+    expect(await loginAs("operator")).toBe("operator");
+
+    const save = await mockFetch(`${BASE}/alerts`, {
+      method: "PUT",
+      body: JSON.stringify({ events: {} }),
+    });
+    expect(save.status).toBe(200);
+
+    const mint = await mockFetch(`${BASE}/agent-tokens`, {
+      method: "POST",
+      body: JSON.stringify({ label: "denied" }),
+    });
+    expect(mint.status).toBe(403);
+    const detail = (await mint.json()) as { detail: string };
+    expect(detail.detail).toContain("requires 'admin'");
+
+    const sessions = await mockFetch(`${BASE}/auth/sessions`);
+    expect(sessions.status).toBe(403);
+
+    const reload = await mockFetch(`${BASE}/compliance/reload`, { method: "POST" });
+    expect(reload.status).toBe(403);
+
+    const checkNow = await mockFetch(`${BASE}/updates/check`, { method: "POST" });
+    expect(checkNow.status).toBe(403);
+  });
+
+  it("approver can roll out but cannot mint tokens or revoke sessions", async () => {
+    expect(await loginAs("approver")).toBe("approver");
+
+    const propose = await mockFetch(`${BASE}/config/revisions`, {
+      method: "POST",
+      body: JSON.stringify({ scope: { agents: ["6b1f3a4c-9d2e-4f70-8a1b-2c3d4e5f6071"] } }),
+    });
+    expect(propose.status).toBe(200); // propose is operator; approver outranks it
+    const proposal = (await propose.json()) as { proposal_id: string };
+
+    const rollout = await mockFetch(
+      `${BASE}/config/rollouts?proposal_id=${proposal.proposal_id}`,
+      { method: "POST", body: JSON.stringify({ dry_run: true }) },
+    );
+    expect(rollout.status).toBe(200); // rollouts need approver — exactly this role
+
+    const sessions = await mockFetch(`${BASE}/auth/sessions`);
+    expect(sessions.status).toBe(403);
+  });
+
+  it("the ladder is ordered: admin satisfies everything below it", async () => {
+    expect(await loginAs("admin")).toBe("admin");
+    const sessions = await mockFetch(`${BASE}/auth/sessions`);
+    expect(sessions.status).toBe(200); // admin-only endpoint, admin role
+  });
+});

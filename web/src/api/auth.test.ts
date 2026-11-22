@@ -26,7 +26,7 @@ afterEach(() => {
 
 describe("login", () => {
   it("succeeds and never exposes the token to the caller", async () => {
-    const result = await login("", CORRECT);
+    const result = await login("admin", CORRECT);
     expect(result.principal).toEqual({ name: "admin", role: "admin" });
     expect(result.expires_at).toBeTruthy();
     expect("token" in result).toBe(false);
@@ -38,7 +38,7 @@ describe("login", () => {
     setUnauthorizedHandler(() => {
       redirected += 1;
     });
-    await expect(login("", "wrong")).rejects.toMatchObject({
+    await expect(login("admin", "wrong")).rejects.toMatchObject({
       status: 401,
       kind: "unauthorized",
       relogin: true,
@@ -49,7 +49,7 @@ describe("login", () => {
   });
 
   it("identity follows from the cookie, not returned state", async () => {
-    await login("", CORRECT);
+    await login("admin", CORRECT);
     const me = await getMe();
     expect(me.authenticated).toBe(true);
     expect(me.method).toBe("session");
@@ -63,7 +63,7 @@ describe("login", () => {
 
 describe("logout", () => {
   it("revokes the session and clears the cookie state", async () => {
-    await login("", CORRECT);
+    await login("admin", CORRECT);
     const result = await logout();
     expect(result.logged_out).toBe(true);
     await expect(getMe()).rejects.toMatchObject({ status: 401 });
@@ -78,16 +78,16 @@ describe("logout", () => {
 
 describe("extendSession", () => {
   it("revokes the old session, then mints a new one (audited re-auth)", async () => {
-    await login("", CORRECT);
-    const result = await extendSession("", CORRECT);
+    await login("admin", CORRECT);
+    const result = await extendSession("admin", CORRECT);
     expect("token" in result).toBe(false);
     const me = await getMe();
     expect(me.authenticated).toBe(true);
   });
 
   it("if the fresh login fails, the old session is already gone", async () => {
-    await login("", CORRECT);
-    await expect(extendSession("", "wrong")).rejects.toMatchObject({
+    await login("admin", CORRECT);
+    await expect(extendSession("admin", "wrong")).rejects.toMatchObject({
       status: 401,
     });
     await expect(getMe()).rejects.toMatchObject({ status: 401 });

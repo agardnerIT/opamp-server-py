@@ -6,7 +6,20 @@ import { router } from './router'
 import { setUnauthorizedHandler } from './api/errors'
 import './index.css'
 
-const queryClient = new QueryClient()
+// Retries are for transient failures only: a 4xx answer (403 role refusal, 404
+// missing agent, 422 rejected body) is the server's decision, not bad luck, and
+// retrying it just delays the honest error message the page renders.
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      retry: (failureCount, error) => {
+        const status = (error as { status?: number }).status;
+        if (status !== undefined && status < 500) return false;
+        return failureCount < 3;
+      },
+    },
+  },
+})
 
 /**
  * Global 401 behavior: a relogin-classified error means the httpOnly session

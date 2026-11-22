@@ -702,14 +702,30 @@ export const fixtures = {
   },
   authStatus: {
     password_required: true,
-    auth_mode: "password",
+    // Principals mode: per-person identities, so the login form shows the
+    // name field (stage 9 role-denial cases sign in as named principals).
+    auth_mode: "principals",
     roles: ["admin", "approver", "operator", "viewer"],
     sessions: true,
-    principals: 1,
+    principals: 4,
     legacy_password: false,
   },
   /** Password `mock.ts` accepts — also the Playwright credential. */
   validPassword: "opamp-mock-password",
+  /**
+   * Mock principals (stage 9 role-denial cases): `POST /auth/session` maps a
+   * login name onto a role the way the server maps a principal record onto
+   * one — name `viewer`/`operator`/`approver` signs in with that role; any
+   * other name (or none) is the legacy shared-password admin. Same password
+   * for all, so a test switches role by switching only the name.
+   */
+  mockPrincipals: {
+    viewer: "viewer",
+    operator: "operator",
+    approver: "approver",
+  } as Record<string, string>,
+  /** Role for the `admin` principal name. */
+  defaultRole: "admin",
   /** `POST /auth/session` 201 body — token included, exactly like the server. */
   session: {
     token: "mock-session-token-not-a-real-credential",

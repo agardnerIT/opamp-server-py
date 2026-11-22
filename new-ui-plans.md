@@ -232,6 +232,14 @@ For stage 4's Admin-section role gating, use `useSession().data.role` —
 `WhoAmI.role` + `roles` come from `GET /auth/me`. Screenshots:
 `docs/screenshots/console-{agents-session,login-error}.png` (mock fleet).
 
+Cache hygiene hardening (2026-11-22): login/re-auth now invalidate **all**
+queries (`queryClient.invalidateQueries()`), logout and the global 401 handler
+in `main.tsx` now `queryClient.clear()` — nothing fetched while signed out or
+under a previous identity survives into the next session (role changes must
+never reuse cached data). Also fixed vitest picking up Playwright specs:
+`vitest.config.ts` now scopes `include` to `src/**/*.test.{ts,tsx}`
+(previously `e2e/auth.spec.ts` failed the `npm run test` gate).
+
 Depends on: stage 3.
 
 Goal: the shell covers everything Streamlit's sidebar had, so no page is

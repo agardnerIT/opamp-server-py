@@ -7,6 +7,10 @@ import { defineConfig } from "vitest/config";
  */
 export default defineConfig({
   test: {
+    // Unit tests live in src/ as *.test.ts. Scoped include so the default
+    // `**/*.spec.*` pattern never picks up the Playwright specs in e2e/
+    // (those run via `npm run e2e`).
+    include: ["src/**/*.test.{ts,tsx}"],
     env: {
       VITE_USE_MOCK_API: "1",
       // openapi-fetch builds `new Request(baseUrl + path)` before the custom

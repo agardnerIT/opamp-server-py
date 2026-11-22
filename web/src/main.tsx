@@ -4,7 +4,6 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { RouterProvider } from '@tanstack/react-router'
 import { router } from './router'
 import { setUnauthorizedHandler } from './api/errors'
-import { SESSION_QUERY_KEY } from './api/session'
 import './index.css'
 
 const queryClient = new QueryClient()
@@ -17,7 +16,10 @@ const queryClient = new QueryClient()
  */
 setUnauthorizedHandler(() => {
   if (router.state.location.pathname !== '/login') {
-    queryClient.removeQueries({ queryKey: SESSION_QUERY_KEY })
+    // Clear everything, not just the session query: data fetched under the
+    // dead session must not linger, and the next login starts from zero
+    // (same hygiene as useLogout / useLogin in api/session.ts).
+    queryClient.clear()
     void router.navigate({ to: '/login' })
   }
 })

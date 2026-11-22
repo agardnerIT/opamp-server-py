@@ -83,3 +83,85 @@ export interface QuerySchemaResponse {
 export async function getQuerySchema(): Promise<QuerySchemaResponse> {
   return unwrap<QuerySchemaResponse>(api.GET("/agents/query/schema"));
 }
+
+/* ------------------------------------------------------------------ */
+/* Auth (cookie sessions — new-ui stage 3). The browser never holds    */
+/* the session token: the server sets it as an httpOnly cookie and the */
+/* token in the login response body is discarded here, never returned  */
+/* to callers and never persisted (plan rule: no localStorage).        */
+/* ------------------------------------------------------------------ */
+
+/** `GET /auth/status` — how this server wants to be authenticated. */
+export interface AuthStatus {
+  password_required: boolean;
+  auth_mode: "password" | "principals" | "disabled";
+  roles: string[];
+  sessions: boolean;
+  principals: number;
+  legacy_password: boolean;
+}
+
+export async function getAuthStatus(): Promise<AuthStatus> {
+  return unwrap<AuthStatus>(api.GET("/auth/status"));
+}
+
+/** `GET /auth/me` — identity, role and session expiry for the session slot. */
+export interface WhoAmI {
+  authenticated: boolean;
+  name: string;
+  role: string;
+  /** `session` (cookie/bearer), `password`, `legacy` or `anonymous` (read-only). */
+  method: string;
+  roles: string[];
+  session_expires_at: string | null;
+  session_idle_timeout_seconds: number;
+}
+
+export async function getMe(): Promise<WhoAmI> {
+  return unwrap<WhoAmI>(api.GET("/auth/me"));
+}
+
+/** Login response minus the token — the one secret this UI must drop. */
+export interface LoginResult {
+  principal: { name: string; role: string };
+  expires_at: string;
+  ttl_seconds: number;
+  idle_timeout_seconds: number;
+}
+
+/**
+ * `POST /auth/session`. The 201 body carries the bearer token once; the cookie
+ * (set by the same response) is the browser's transport, so the token is
+ * stripped here and never exposed further. Bad credentials are 401, a locked
+ * out identity is 429 (with Retry-After) — `errors.ts` classifies both.
+ */
+export async function login(name: string, password: string): Promise<LoginResult> {
+  const result = await unwrap<Record<string, unknown>>(
+    api.POST("/auth/session", { body: { name, password } }),
+  );
+  // Pick the non-secret fields explicitly — `token` stays inside this function.
+  return {
+    principal: result.principal as LoginResult["principal"],
+    expires_at: result.expires_at as string,
+    ttl_seconds: result.ttl_seconds as number,
+    idle_timeout_seconds: result.idle_timeout_seconds as number,
+  };
+}
+
+/** `DELETE /auth/session` — revokes the session AND clears the cookie. */
+export async function logout(): Promise<{ logged_out: boolean }> {
+  return unwrap<{ logged_out: boolean }>(api.DELETE("/auth/session"));
+}
+
+/**
+ * Audited re-auth ("Extend"): revoke the current session, then mint a new one
+ * from freshly entered credentials. NOTE: this is the reverse of the Streamlit
+ * UI's POST-then-DELETE order — in the cookie flow a second POST would move the
+ * cookie to the NEW session, so the subsequent DELETE (which follows the cookie)
+ * would revoke the wrong one. DELETE first (cookie still points at the old
+ * session), then POST. If the POST fails the caller is simply logged out.
+ */
+export async function extendSession(name: string, password: string): Promise<LoginResult> {
+  await logout();
+  return login(name, password);
+}

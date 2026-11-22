@@ -1,4 +1,5 @@
 import { Link, Outlet, useMatchRoute } from '@tanstack/react-router'
+import SessionStatus from './SessionStatus'
 
 const NAV = [
   { to: '/', label: 'Agents' },
@@ -33,9 +34,7 @@ export default function AppShell() {
             )
           })}
         </nav>
-        <div className="mt-auto px-4 py-4 text-xs text-[var(--color-muted)]">
-          session status stub
-        </div>
+        <SessionStatus />
       </aside>
       <main className="flex-1 overflow-auto p-6">
         <Outlet />

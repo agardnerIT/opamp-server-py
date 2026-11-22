@@ -144,6 +144,31 @@ export function classifyError(response: Response, payload: unknown): ApiError {
 }
 
 /**
+ * Global 401 behavior. `main.tsx` registers a handler that drops session state
+ * and routes to `/login`; every relogin-classified ApiError raised through
+ * `unwrap` funnels through it, so components never hand-roll redirect logic.
+ *
+ * A failed login attempt itself answers 401 — the handler decides (by current
+ * location) not to treat that as "session died"; callers still get the thrown
+ * ApiError to render as a form message.
+ */
+let unauthorizedHandler: ((error: ApiError) => void) | null = null;
+
+export function setUnauthorizedHandler(handler: (error: ApiError) => void): void {
+  unauthorizedHandler = handler;
+}
+
+function notifyUnauthorized(error: ApiError): void {
+  if (unauthorizedHandler) {
+    try {
+      unauthorizedHandler(error);
+    } catch {
+      // The handler must never mask the original error.
+    }
+  }
+}
+
+/**
  * Unwrap an openapi-fetch result: throw the normalized ApiError on any error
  * response, return the typed payload on success. Callers never see `{ data?,
  * error? }` unions.
@@ -152,7 +177,11 @@ export async function unwrap<T>(
   result: Promise<{ data?: unknown; error?: unknown; response: Response }>,
 ): Promise<T> {
   const { data, error, response } = await result;
-  if (error !== undefined) throw classifyError(response, error);
+  if (error !== undefined) {
+    const apiError = classifyError(response, error);
+    if (apiError.relogin) notifyUnauthorized(apiError);
+    throw apiError;
+  }
   // openapi-fetch leaves `data` undefined for empty bodies (204/blank 200) —
   // that is a success, not an error. Callers with a typed payload pass T
   // explicitly; several server payloads are `unknown` in the schema (FastAPI

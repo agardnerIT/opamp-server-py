@@ -146,7 +146,7 @@ passing, oxlint clean):
 
 ---
 
-## Stage 3 — Cookie-session auth end-to-end (status: **in-progress** — backend half done)
+## Stage 3 — Cookie-session auth end-to-end (status: **done**)
 
 Depends on: stage 2. **Touches the FastAPI server** (`server/auth.py` and the
 session routes) — that is expected and sanctioned.
@@ -154,7 +154,8 @@ session routes) — that is expected and sanctioned.
 ### Backend half — DONE (2026-11-22, server-side session + tests)
 
 Implemented in `server/auth.py` + `server/main.py`, tests in
-`tests/test_auth.py::TestCookieSessions` (6 tests; full suite 1885 passing):
+`tests/test_auth.py::TestCookieSessions` (6 tests; full suite 1885 passing)
+— **frontend half landed 2026-11-22, see "Notes for next stage" below**:
 
 - `POST /auth/session` now also sets `Set-Cookie: opamp_admin_session=<token>`
   — httpOnly, SameSite=Strict, `max_age` = session TTL, path=/. Same token as
@@ -205,6 +206,24 @@ role gating reflected in UI; Playwright test for login failure/success.
 ---
 
 ## Stage 4 — App shell + navigation parity (status: **todo**)
+
+### Notes for next stage (written 2026-11-22 when stage 3 closed)
+
+Frontend auth is live in `web/`: `endpoints.ts` owns `login`/`logout`/
+`extendSession`/`getMe`/`getAuthStatus` (the token in the 201 body is
+**discarded** there — never returned, never persisted); `session.ts` holds
+`useSession` (query key `['session']`), `useLogin`, `useLogout`,
+`useExtendSession`. The **global 401 handler** registered in `main.tsx`
+(`setUnauthorizedHandler`, `errors.ts`) drops session state and routes to
+`/login` on any relogin-classified error from `unwrap()` — pages must not
+hand-roll 401 handling. "Extend" is DELETE-then-POST (`extendSession` doc
+comment explains why the cookie flow inverts the Streamlit ordering). Mock
+mode is auth-stateful (flag for the cookie) with `fixtures.validPassword`;
+Playwright is installed (`npm run e2e`, config `playwright.config.ts`,
+mock-mode dev server on :5199) with the login round-trip in `e2e/auth.spec.ts`.
+For stage 4's Admin-section role gating, use `useSession().data.role` —
+`WhoAmI.role` + `roles` come from `GET /auth/me`. Screenshots:
+`docs/screenshots/console-{agents-session,login-error}.png` (mock fleet).
 
 Depends on: stage 3.
 

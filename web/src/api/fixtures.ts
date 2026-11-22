@@ -96,4 +96,25 @@ export const fixtures = {
     principals: 1,
     legacy_password: false,
   },
+  /** Password `mock.ts` accepts — also the Playwright credential. */
+  validPassword: "opamp-mock-password",
+  /** `POST /auth/session` 201 body — token included, exactly like the server. */
+  session: {
+    token: "mock-session-token-not-a-real-credential",
+    token_type: "bearer",
+    expires_at: "2026-12-01T10:44:12Z",
+    principal: { name: "admin", role: "admin" },
+    ttl_seconds: 3600,
+    idle_timeout_seconds: 900,
+  },
+  /** `GET /auth/me` for a live session. */
+  me: {
+    authenticated: true,
+    name: "admin",
+    role: "admin",
+    method: "session",
+    roles: ["admin", "approver", "operator", "viewer"],
+    session_expires_at: "2026-12-01T10:44:12Z",
+    session_idle_timeout_seconds: 900,
+  },
 };

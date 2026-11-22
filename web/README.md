@@ -22,9 +22,34 @@ VITE_USE_MOCK_API=1 npm run dev
 
 ```bash
 npm run build   # tsc -b (strict) + vite build
-npm run test    # vitest
+npm run test    # vitest (always mock transport — no live server needed)
 npm run lint    # oxlint
+npm run e2e     # Playwright (mock-mode dev server; stage 3: auth round-trip)
 ```
+
+## Auth (cookie sessions, stage 3)
+
+The browser authenticates with the httpOnly `opamp_admin_session` cookie the
+server sets on `POST /auth/session` (bearer tokens stay for CLI/API clients).
+Consequences baked into this codebase:
+
+- The session token is **never** in JS state: `login()` in `endpoints.ts`
+  discards it, nothing is persisted to `localStorage`, and identity/role/expiry
+  come from `GET /auth/me` via the `useSession` hook (`src/api/session.ts`).
+- A relogin-classified error (401) anywhere drops session state and routes to
+  `/login` via the global handler registered in `src/main.tsx` — a failed login
+  form is also a 401, but it is already on `/login` and surfaces inline.
+- "Extend" in the session slot is the audited re-auth (`extendSession`): fresh
+  credentials, DELETE old session, then POST the new one. The order is inverted
+  from the Streamlit flow because the cookie must still point at the old session
+  when the DELETE lands.
+
+Latest screens (mock-mode fleet fixtures):
+
+| | |
+|---|---|
+| ![Agents with session slot](../docs/screenshots/console-agents-session.png) | ![Login error](../docs/screenshots/console-login-error.png) |
+| Agents list + session slot (role, expiry, Extend, Sign out) | Login with the 401 message |
 
 ## Regenerating the API types
 
@@ -53,6 +78,8 @@ openapi-typescript does not yet support at runtime.
   narrow interface in `src/api/endpoints.ts` mirroring the server
   (`AgentState.to_dict()`, `credential_summary()`, …).
 - Mock mode: handlers + fixtures in `src/api/mock.ts` / `fixtures.ts`; Playwright
-  (later stages) and offline dev use `VITE_USE_MOCK_API=1`.
+  and offline dev use `VITE_USE_MOCK_API=1`. The mock auth handlers are
+  stateful (a flag stands in for the cookie) so the login → shell → logout
+  round-trip is exercised without a server.
 - Design tokens live in `src/index.css` (`--color-*`); never hard-code colors in
   components.

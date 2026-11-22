@@ -56,6 +56,29 @@ Latest screens (mock-mode fleet fixtures):
 | Sidebar at nav parity (stage 4): main pages + role-gated Admin section | |
 | ![Remote Config stepper](../docs/screenshots/console-remote-config.png) | |
 | Remote Config (stage 6): target → edit → review → propose → approve, with the rollout monitor below after creation | |
+| ![Groups](../docs/screenshots/console-groups.png) | ![Reports](../docs/screenshots/console-reports.png) |
+| Groups (stage 7): search → save → inspect (kind, pins, drift) → preview/edit/delete, all server-resolved | Reports (stage 7): the fleet's profiles decide which reports are offered; the server's markdown, rendered and downloadable |
+
+## Read pages: Reports, Groups, Help (stage 7)
+
+- **Reports** (`src/routes/Reports.tsx`): the server generates the markdown
+  (`GET /reports/fleet`, `/reports/heavy-collectors`, `/reports/outdated-collectors`);
+  the page renders it and offers the download. Which reports are offered is the
+  union of what the fleet's profiles declare (`lib/reportTypes.ts`) — a fleet
+  with no component concept is never offered "Heavy agents".
+- **Groups** (`src/routes/Groups.tsx`): a group is a **saved SQL selection** —
+  search first (the same `SqlSearch` box as Agents), then name it. Running and
+  previewing are viewer actions; save/edit/delete need `operator` (hinted, the
+  server re-authorises). The detail panel shows selector vs pins (`sources`),
+  unknown pins, health-defined warnings and the drift count; delete confirms and
+  surfaces a live-rollout 409. Full CRUD lives in `src/api/groups.ts`.
+- **Help** (`src/routes/Help.tsx`): the universal connect facts (endpoint +
+  agent token), the profile dictionary from `GET /agent/types`, token model, the
+  SQL selection language (`docs/sql-agent-queries.md` is the full reference) and
+  the session/role security model.
+- The report markdown subset (`#/##/###`, bullets, `**bold**`) is rendered by
+  `lib/markdown.ts` + `components/Markdown.tsx` — dependency-free, and
+  XSS-safe by construction (agent-supplied attribute values stay text nodes).
 
 ## Remote Config (stage 6)
 

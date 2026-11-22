@@ -8,7 +8,8 @@
  */
 
 import { fixtures } from "./fixtures";
-import type { AgentEntry } from "./endpoints";
+import { attrValue, type AgentEntry } from "./endpoints";
+import type { GroupView } from "./groups";
 
 export function mockApiEnabled(): boolean {
   return import.meta.env.VITE_USE_MOCK_API === "1";
@@ -148,6 +149,157 @@ const HANDLERS: Handler[] = [
       const was = sessionLive;
       sessionLive = false;
       return { body: { logged_out: was } };
+    },
+  },
+
+  /* ---------------------------------------------------------------- */
+  /* Reports (stage 7). The markdown fixtures mirror `server/reports.py` */
+  /* for this fleet; parameters are echoed, not honoured.                */
+  /* ---------------------------------------------------------------- */
+  {
+    method: "GET",
+    path: "/reports/fleet",
+    respond: () => ({ body: fixtures.reports.fleet }),
+  },
+  {
+    method: "GET",
+    path: "/reports/heavy-collectors",
+    respond: (request) => {
+      const threshold = new URL(request.url).searchParams.get("threshold");
+      if (threshold !== null && !/^(0(\.\d+)?|1(\.0+)?)$/.test(threshold)) {
+        return { body: { detail: "threshold must be within [0, 1]" }, status: 422 };
+      }
+      return { body: fixtures.reports.heavy };
+    },
+  },
+  {
+    method: "GET",
+    path: "/reports/outdated-collectors",
+    respond: (request) => {
+      const version = new URL(request.url).searchParams.get("version");
+      if (version !== null && !/^\d+\.\d+\.\d+$/.test(version)) {
+        return { body: { detail: "version must be plain semver, e.g. '0.149.0'" }, status: 422 };
+      }
+      return { body: { ...fixtures.reports.outdated, version: version ?? "0.149.0" } };
+    },
+  },
+
+  /* ---------------------------------------------------------------- */
+  /* Groups (stage 7): stateful CRUD + preview. Members resolve like    */
+  /* the server does on read — SQL via runSelection, legacy definitions */
+  /* by deployment.environment, plus pins that match a live agent.      */
+  /* ---------------------------------------------------------------- */
+  {
+    method: "GET",
+    path: "/groups",
+    respond: () => ({ body: { groups: groupsState, count: groupsState.length } }),
+  },
+  {
+    method: "POST",
+    path: "/groups",
+    respond: async (request) => {
+      const body = (await request.json()) as {
+        name?: string;
+        query?: string | null;
+        definition?: Record<string, unknown> | null;
+        include?: string[];
+        exclude?: string[];
+        description?: string | null;
+        owner?: string | null;
+      };
+      const name = (body.name ?? "").trim();
+      if (!/^[a-z0-9._-]+$/.test(name)) {
+        return { body: { detail: "group name must be lowercase a-z, 0-9, '.', '_' and '-'" }, status: 422 };
+      }
+      if (groupsState.some((g) => g.name.toLowerCase() === name.toLowerCase())) {
+        return { body: { detail: `group name '${name}' is already taken (names are unique case-insensitively)` }, status: 409 };
+      }
+      if (!body.query && !body.definition) {
+        return { body: { detail: "exactly one selector is required: query or definition" }, status: 422 };
+      }
+      const group = mockGroup(name, body.query ?? null, body.definition ?? null, body.include ?? [], body.exclude ?? [], body.description ?? null, body.owner ?? null);
+      groupsState.push(group);
+      return { body: group };
+    },
+  },
+  {
+    method: "GET",
+    path: (path) => {
+      const m = /^\/groups\/([^/]+)$/.exec(path);
+      return m ? { group_id: m[1] } : null;
+    },
+    respond: (_request, params) => {
+      const group = groupsState.find((g) => g.group_id === params.group_id);
+      return group ? { body: group } : { body: { detail: "group not found" }, status: 404 };
+    },
+  },
+  {
+    method: "PUT",
+    path: (path) => {
+      const m = /^\/groups\/([^/]+)$/.exec(path);
+      return m ? { group_id: m[1] } : null;
+    },
+    respond: async (request, params) => {
+      const group = groupsState.find((g) => g.group_id === params.group_id);
+      if (!group) return { body: { detail: "group not found" }, status: 404 };
+      const body = (await request.json()) as {
+        query?: string | null;
+        description?: string | null;
+        owner?: string | null;
+      };
+      if (body.query !== undefined && body.query !== null) {
+        group.query = body.query;
+        group.definition = null;
+        group.selector_kind = "query";
+      }
+      if (body.description !== undefined) group.description = body.description;
+      if (body.owner !== undefined) group.owner = body.owner;
+      group.updated_by = "admin";
+      group.updated_at = new Date().toISOString();
+      recomputeMembers(group);
+      return { body: group };
+    },
+  },
+  {
+    method: "DELETE",
+    path: (path) => {
+      const m = /^\/groups\/([^/]+)$/.exec(path);
+      return m ? { group_id: m[1] } : null;
+    },
+    respond: (_request, params) => {
+      const index = groupsState.findIndex((g) => g.group_id === params.group_id);
+      if (index === -1) return { body: { detail: "group not found" }, status: 404 };
+      const [removed] = groupsState.splice(index, 1);
+      return { body: { deleted: removed.group_id, name: removed.name } };
+    },
+  },
+  {
+    method: "POST",
+    path: (path) => {
+      const m = /^\/groups\/([^/]+)\/preview$/.exec(path);
+      return m ? { group_id: m[1] } : null;
+    },
+    respond: (_request, params) => {
+      const group = groupsState.find((g) => g.group_id === params.group_id);
+      if (!group) return { body: { detail: "group not found" }, status: 404 };
+      const previous = new Set(group.members);
+      const now = resolveMockMembers(group);
+      const preview = {
+        group_id: group.group_id,
+        name: group.name,
+        count: now.members.length,
+        previous_count: group.members.length,
+        added: now.members.filter((id) => !previous.has(id)),
+        dropped: group.members.filter((id) => !now.members.includes(id)),
+        unchanged: now.members.filter((id) => previous.has(id)),
+        sources: now.sources,
+        unknown_pins: now.unknown_pins,
+      };
+      group.members = now.members;
+      group.sources = now.sources;
+      group.unknown_pins = now.unknown_pins;
+      group.member_count = now.members.length;
+      return { body: preview };
     },
   },
 
@@ -459,7 +611,7 @@ const HANDLERS: Handler[] = [
 ];
 
 /** Mutable config-flow state (module scope, like the session flag). */
-const nextId = { proposal: 1, revision: 1, rollout: 1 };
+const nextId = { proposal: 1, revision: 1, rollout: 1, group: 3 };
 const proposals = new Map<string, MockProposal>();
 const fixtureRevisions: Record<string, unknown>[] = [...fixtures.revisions];
 const rolloutsState: MockRollout[] = [...(fixtures.rollouts as MockRollout[])];
@@ -490,8 +642,101 @@ interface MockRollout {
 }
 
 function groupMembers(name: string): string[] {
-  const group = fixtures.groups.groups.find((g) => g.name === name);
+  const group = groupsState.find((g) => g.name === name);
   return group ? group.members : [];
+}
+
+/** Stage-7 group state: the fixtures' groups, mutable. */
+const groupsState: GroupView[] = structuredClone(fixtures.groups.groups);
+
+/**
+ * Member resolution stand-in (mirror of `groups.resolve_members`, not a
+ * re-implementation): SQL via runSelection, legacy definitions by the
+ * `environment` key against `deployment.environment`, plus pins that match
+ * a live agent — pins that match nothing stay `unknown_pins`, as on the server.
+ */
+function resolveMockMembers(group: GroupView): {
+  members: string[];
+  sources: Record<string, string[]>;
+  unknown_pins: string[];
+} {
+  const agents = fixtures.agents.agents as AgentEntry[];
+  const selected = group.query
+    ? runSelection(group.query, agents)
+    : agents.filter((a) => {
+        const env = (group.definition as Record<string, unknown> | null)?.environment;
+        return typeof env !== "string" || attrValue(a.description, "deployment.environment") === env;
+      });
+  const sources: Record<string, string[]> = {
+    [group.query ? "query" : "definition"]: selected.map((a) => a.id),
+    included: [],
+    excluded: [],
+  };
+  const memberIds = new Set(selected.map((a) => a.id));
+  const unknown_pins: string[] = [];
+  for (const id of group.include) {
+    if (memberIds.has(id)) continue;
+    if (agents.some((a) => a.id === id)) {
+      sources.included.push(id);
+      memberIds.add(id);
+    } else {
+      unknown_pins.push(id);
+    }
+  }
+  for (const id of group.exclude) {
+    if (memberIds.delete(id)) sources.excluded.push(id);
+  }
+  return { members: [...memberIds], sources, unknown_pins };
+}
+
+function recomputeMembers(group: GroupView): void {
+  const now = resolveMockMembers(group);
+  if (now.members.join(",") !== group.members.join(",")) group.membership_changes++;
+  group.members = now.members;
+  group.sources = now.sources;
+  group.unknown_pins = now.unknown_pins;
+  group.member_count = now.members.length;
+  group.health_defined =
+    group.query && /healthy/i.test(group.query)
+      ? ["healthy"]
+      : group.definition && "healthy" in (group.definition as object)
+        ? ["healthy"]
+        : [];
+}
+
+function mockGroup(
+  name: string,
+  query: string | null,
+  definition: Record<string, unknown> | null,
+  include: string[],
+  exclude: string[],
+  description: string | null,
+  owner: string | null,
+): GroupView {
+  const group: GroupView = {
+    group_id: `grp-mock-${nextId.group++}`,
+    name,
+    selector_kind: query ? "query" : "definition",
+    query,
+    definition,
+    include,
+    exclude,
+    description,
+    owner,
+    source: "api",
+    created_by: "admin",
+    created_at: new Date().toISOString(),
+    updated_by: null,
+    updated_at: null,
+    member_count: 0,
+    members: [],
+    sources: null,
+    unknown_pins: [],
+    health_defined: [],
+    membership_changes: 0,
+  };
+  recomputeMembers(group);
+  return group;
 }
 
 /**

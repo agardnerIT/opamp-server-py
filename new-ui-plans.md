@@ -433,7 +433,7 @@ stateful mock transport.
 
 ---
 
-## Stage 7 — Read pages: Reports, Groups, Help (status: **todo**)
+## Stage 7 — Read pages: Reports, Groups, Help (status: **done**, 2026-12-01)
 
 Depends on: stage 5 primitives.
 
@@ -441,6 +441,43 @@ Mostly tables and empty states; quick wins. Reuse the stage-5 table/search
 primitives. Groups = saved SQL selections with create/edit/run; keep parity
 with `ui/pages/3_Groups.py` behavior, including the query language guide
 (`docs/sql-agent-queries.md`) linked from Help.
+
+### Notes for next stage (written 2026-12-01 when stage 7 closed)
+
+All gates green: `npm run build` (tsc strict), vitest 64, oxlint, Playwright 17
+(3 new in `e2e/read-pages.spec.ts`). Screenshots: `docs/screenshots/console-{groups,reports}.png`
+via `tools/screenshot-read-pages.mjs`. **Still to do against a live server**
+(stage 9 owns the live pass): everything here ran against the stateful mock.
+
+- **Where the pieces live**: `src/api/groups.ts` owns the FULL group CRUD
+  (`listGroups`/`getGroup`/`createGroup`/`updateGroup`/`deleteGroup`/`previewGroup`
+  + `GroupView`) — `config.ts`'s read-only duplicates were removed and
+  `ComposeStepper` now imports from `groups.ts` (one implementation, one
+  `['groups']` cache key). `src/api/reports.ts` wraps the three report
+  endpoints; `lib/reportTypes.ts` (`offeredReports`) + `lib/markdown.ts` /
+  `components/Markdown.tsx` (dependency-free report renderer, XSS-safe by
+  construction — agent-supplied attribute values stay text nodes).
+- **Reports parity notes**: offered reports are the union of the fleet's
+  profiles' `reports:` (fleet always) — same #121 rule as Streamlit. The
+  outdated report's reference version is a free-text semver input (default
+  `0.149.0`), NOT a GitHub-releases dropdown — the Streamlit page fetched
+  GitHub tags, which the new UI does not do (single-origin rule); owner may
+  ask for it back. Download is Markdown-only (Streamlit's "Download CSV"
+  downloaded the same markdown text — a quirk, not replicated).
+- **Groups parity notes**: search/save/preview are viewer actions;
+  save/edit/delete need `operator` (hinted only). The editor reuses `SqlSearch`
+  remounted by key when a saved group's query is loaded (SqlSearch reads
+  `value` only on mount). The saved query IS the editor text (no duplicate
+  textarea). Legacy `definition`-kind groups load an empty editor and show
+  the "no SQL query yet" note, as Streamlit did. Delete confirms via `Modal`
+  and shows the server's message on a live-rollout 409.
+- Mock mode is now stateful for groups (CRUD + preview mutate `groupsState`)
+  and serves all three report endpoints. Group fixtures carry the full
+  `GroupView` shape, including a legacy group with an unknown pin.
+- Streamlit parity NOT ported (deliberate): the connect-snippet generators on
+  Help (profile Python data, not exposed by the REST API — Help describes
+  profiles from `GET /agent/types` instead) and the attribute-keys endpoint
+  (`GET /groups/attribute-keys`, superseded by `/agents/query/schema`).
 
 ---
 

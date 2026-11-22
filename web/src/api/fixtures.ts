@@ -9,6 +9,7 @@
  */
 
 import type { AgentEntry, AgentDetail, AgentTypeSummary } from "./endpoints";
+import type { GroupsResponse } from "./groups";
 
 const CONNECTED_AT = "2026-12-01T09:15:00Z";
 const HEARTBEAT = "2026-12-01T09:44:12Z";
@@ -302,8 +303,9 @@ const configPosture = {
   },
 };
 
-/** `GET /groups` — one saved SQL selection covering both agents. */
-const groups = {
+/** `GET /groups` (stage 7 full shape): one SQL group and one legacy definition,
+ * carrying the pin/warning fields the Groups page renders. */
+const groups: GroupsResponse = {
   groups: [
     {
       group_id: "grp-mock-1",
@@ -315,14 +317,95 @@ const groups = {
       exclude: [],
       description: "Every collector in the fleet",
       owner: "admin",
+      source: "api",
+      created_by: "admin",
+      created_at: CONNECTED_AT,
+      updated_by: "admin",
+      updated_at: HEARTBEAT,
       member_count: 1,
       members: [OTCOL_ID],
       sources: { query: [OTCOL_ID], included: [], excluded: [] },
       unknown_pins: [],
       health_defined: [],
+      membership_changes: 0,
+    },
+    {
+      group_id: "grp-mock-2",
+      name: "prod-agents",
+      selector_kind: "definition",
+      query: null,
+      definition: { environment: "prod" },
+      include: ["deadbeef0000"],
+      exclude: [],
+      description: "Prod filter plus a hand-pinned agent",
+      owner: "platform-oncall",
+      source: "api",
+      created_by: "admin",
+      created_at: CONNECTED_AT,
+      updated_by: null,
+      updated_at: null,
+      member_count: 1,
+      members: [OTCOL_ID],
+      sources: { definition: [OTCOL_ID], included: [], excluded: [] },
+      unknown_pins: ["deadbeef0000"],
+      health_defined: [],
+      membership_changes: 2,
     },
   ],
-  count: 1,
+  count: 2,
+};
+
+/** Report markdown fixtures (stage 7) — shaped like `server/reports.py` output
+ * for this fleet: the collector has 5 components (2 unused, 40% ≤ 50%), the
+ * generic agent has no component concept (so it is "not applicable"). */
+const reports = {
+  fleet: {
+    report_markdown:
+      "# Agent Report\n\n" +
+      "Generated: 2026-12-01 09:45:00\n\n" +
+      "Total Agents: 2\n\n" +
+      "## Component Versions\n" +
+      "- **0.149.0**: 5 components\n\n" +
+      "## Outdated Collectors\n" +
+      "All collectors are up to date.\n\n" +
+      "## Heavy Collectors (Unused Components)\n" +
+      "- **6b1f3a4c-9d2e-4f**: 2/5 components unused (40%)\n\n" +
+      "## Detailed Agent List\n" +
+      "### 6b1f3a4c-9d2e-4f...\n\n" +
+      "- Healthy: True\n" +
+      "- Receivers: 2 total, 1 in use\n" +
+      "- Processors: 1 total, 1 in use\n" +
+      "- Exporters: 2 total, 1 in use\n" +
+      "- Extensions: 1 total, 1 in use\n\n" +
+      "### 0f2e8d7c-6b5a-49...\n\n" +
+      "- Healthy: False\n\n",
+    agent_count: 2,
+  },
+  heavy: {
+    report_markdown:
+      "# Heavy Collectors Report\n\n" +
+      "Generated: 2026-12-01 09:45:00\n" +
+      "Showing collectors with >50% unused components\n\n" +
+      "Found 0 heavy collector(s)\n\n" +
+      "Not applicable (report does not cover this profile): generic × 1\n",
+    heavy_count: 0,
+    threshold: 0.5,
+    applicable_count: 1,
+    not_applicable: { generic: 1 },
+  },
+  outdated: {
+    report_markdown:
+      "# Outdated Collectors Report\n\n" +
+      "Generated: 2026-12-01 09:45:00\n" +
+      "Latest version: v0.149.0\n\n" +
+      "Found 0 outdated collector(s)\n\n" +
+      "Not applicable (report does not cover this profile): generic × 1\n",
+    collectors_count: 0,
+    components_count: 0,
+    version: "0.149.0",
+    applicable_count: 1,
+    not_applicable: { generic: 1 },
+  },
 };
 
 /** Pre-existing revision history: an active one and a poisoned one. */
@@ -499,6 +582,7 @@ export const fixtures = {
   },
   configPosture,
   groups,
+  reports,
   revisions,
   rollouts,
   /** `GET /auth/me` for a live session. */

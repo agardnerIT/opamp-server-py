@@ -31,35 +31,7 @@ export async function getConfigPosture(): Promise<ConfigPosture> {
   return unwrap<ConfigPosture>(api.GET("/config/posture"));
 }
 
-/* ------------------------------------------------------------------ */
-/* Saved groups (read-only; the Groups page is stage 7)                */
-/* ------------------------------------------------------------------ */
-
-/** One entry of `GET /groups` — `groups.view()` minus the history blocks. */
-export interface SavedGroup {
-  group_id: string;
-  name: string;
-  selector_kind: string;
-  query: string | null;
-  definition: unknown;
-  include: string[];
-  exclude: string[];
-  member_count: number;
-  members: string[];
-  /** Which health keys the definition uses — pushing to these is guarded. */
-  health_defined: string[];
-  sources: Record<string, string[]> | null;
-  unknown_pins: string[] | null;
-}
-
-export interface GroupsResponse {
-  groups: SavedGroup[];
-  count: number;
-}
-
-export async function listGroups(): Promise<GroupsResponse> {
-  return unwrap<GroupsResponse>(api.GET("/groups"));
-}
+/* Saved groups moved to `groups.ts` (stage 7 owns the full CRUD).        */
 
 /* ------------------------------------------------------------------ */
 /* Validation (no storage, no side effects)                            */

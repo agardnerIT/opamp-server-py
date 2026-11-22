@@ -3,15 +3,14 @@ import { useState } from "react";
 import {
   createConfigRollout,
   getConfigProposal,
-  listGroups,
   proposeConfig,
   rejectConfigProposal,
   validateConfig,
   type ProposeResult,
   type RolloutPlan,
-  type SavedGroup,
   type Verdict,
 } from "../../api/config";
+import { listGroups, type GroupView } from "../../api/groups";
 import { listAgents, getAgent, type AgentEntry } from "../../api/endpoints";
 import { ApiError } from "../../api/errors";
 import { roleAtLeast } from "../../lib/roles";
@@ -83,7 +82,7 @@ export function ComposeStepper() {
     enabled: diffAgentId !== "",
   });
 
-  const selectedGroup: SavedGroup | undefined = groups.data?.groups.find(
+  const selectedGroup: GroupView | undefined = groups.data?.groups.find(
     (g) => g.name === groupName,
   );
 

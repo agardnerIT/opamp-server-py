@@ -45,7 +45,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import prometheus_client as prom_client
-from fastapi import HTTPException, Request
+from fastapi import HTTPException, Request, Response
 from loguru import logger
 
 from server import admin_auth
@@ -73,6 +73,11 @@ ROLE_LEVELS: Dict[str, int] = {
 ROLES = tuple(ROLE_LEVELS)
 
 SESSION_PREFIX = "opamp_admin_"
+
+# Cookie that carries the same session token for browser clients (#new-ui stage 3).
+# The `Authorization` header stays the credential for CLI/API clients and wins when
+# a request presents both.
+ADMIN_COOKIE = "opamp_admin_session"
 SESSION_BYTES = 32
 SESSION_HEADER = "Authorization"
 SESSION_SCHEME = "bearer"
@@ -173,6 +178,52 @@ def _env_int(name: str, default: int) -> int:
 def session_ttl_seconds() -> int:
     """Absolute session lifetime (`ADMIN_SESSION_TTL_SECONDS`, default 3600)."""
     return _env_int("ADMIN_SESSION_TTL_SECONDS", 3600)
+
+
+def cookie_secure(request: Request) -> bool:
+    """Should the admin session cookie be `Secure` for this request?
+
+    `ADMIN_COOKIE_SECURE` wins when set (true/1/yes or false/0/no). Otherwise the
+    cookie is Secure exactly when the request reached us over HTTPS — directly or
+    via `X-Forwarded-Proto: https` when `TRUST_PROXY_HEADERS=true`. A local dev
+    server (plain http on localhost) deliberately gets a non-Secure cookie, which
+    is the only way the browser will store it there.
+    """
+    raw = (os.environ.get("ADMIN_COOKIE_SECURE") or "").strip().lower()
+    if raw in ("1", "true", "yes"):
+        return True
+    if raw in ("0", "false", "no"):
+        return False
+    if request.url.scheme == "https":
+        return True
+    if trust_proxy_headers():
+        proto = (request.headers.get("X-Forwarded-Proto") or "").strip().lower()
+        if proto == "https":
+            return True
+    return False
+
+
+def set_session_cookie(response: Response, token: str, request: Request) -> None:
+    """Attach the session token as an httpOnly cookie for browser clients.
+
+    Same value as the bearer token — one session row, two transports. `max_age`
+    mirrors the absolute TTL so the browser drops the cookie when the session
+    dies; the server-side expiry remains the authority either way.
+    """
+    response.set_cookie(
+        ADMIN_COOKIE,
+        token,
+        max_age=session_ttl_seconds(),
+        path="/",
+        httponly=True,
+        secure=cookie_secure(request),
+        samesite="strict",
+    )
+
+
+def clear_session_cookie(response: Response) -> None:
+    """Drop the admin session cookie (logout)."""
+    response.delete_cookie(ADMIN_COOKIE, path="/", httponly=True, samesite="strict")
 
 
 def session_idle_seconds() -> int:
@@ -808,30 +859,39 @@ def authenticate(request: Request) -> Tuple[Optional[Principal], Optional[str]]:
     """Resolve the caller. Returns `(principal, None)` or `(None, reason)`.
 
     Accepted credentials, in order: `Authorization: Bearer <session token>`, then
-    HTTP Basic (`name:password` against a principal, or any name + the legacy
-    `ADMIN_PASSWORD`). No credential at all in read-only mode resolves to an
-    anonymous `viewer` — see `require_roles`.
+    the browser session cookie (`ADMIN_COOKIE`, httpOnly — see `set_session_cookie`),
+    then HTTP Basic (`name:password` against a principal, or any name + the legacy
+    `ADMIN_PASSWORD`). The header wins when several are present, so a stale cookie
+    can never shadow a fresh CLI token. No credential at all in read-only mode
+    resolves to an anonymous `viewer` — see `require_roles`.
     """
     header = (request.headers.get(SESSION_HEADER) or "").strip()
-    if not header:
-        return None, REASON_MISSING
+    if header:
+        # Any Authorization header (bearer or Basic) outranks the cookie: a CLI
+        # token must never be shadowed by whatever a browser has stored.
+        scheme, _, value = header.partition(" ")
+        scheme = scheme.strip().lower()
 
-    scheme, _, value = header.partition(" ")
-    scheme = scheme.strip().lower()
+        if scheme == SESSION_SCHEME:
+            if not value.strip():
+                return None, REASON_MALFORMED
+            return _authenticate_session(value.strip())
 
-    if scheme == SESSION_SCHEME:
-        if not value.strip():
-            return None, REASON_MALFORMED
-        return _authenticate_session(value.strip())
+        if scheme == "basic":
+            credentials, reason = _decode_basic(header)
+            if credentials is None:
+                return None, reason
+            name, password = credentials
+            return _authenticate_basic(name.strip(), password)
 
-    if scheme == "basic":
-        credentials, reason = _decode_basic(header)
-        if credentials is None:
-            return None, reason
-        name, password = credentials
-        return _authenticate_basic(name.strip(), password)
+        return None, REASON_MALFORMED
 
-    return None, REASON_MALFORMED
+    # No header: fall back to the browser cookie.
+    cookie = (request.cookies.get(ADMIN_COOKIE) or "").strip()
+    if cookie:
+        return _authenticate_session(cookie)
+
+    return None, REASON_MISSING
 
 
 def _authenticate_basic(name: str, password: str) -> Tuple[Optional[Principal], Optional[str]]:

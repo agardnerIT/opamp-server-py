@@ -30,7 +30,7 @@ from server.state import (
     SQLiteSessionStore,
     utcnow,
 )
-from tests.support import basic, bearer
+from tests.support import anonymous, basic, bearer
 
 LEGACY = "legacy-pw-1234567890"
 
@@ -719,3 +719,97 @@ def auth_redacted() -> str:
     from server.alerts import REDACTED
 
     return REDACTED
+
+
+# ------------------------------------------------------------- cookie sessions
+
+
+class TestCookieSessions:
+    """Browser clients get the session token as an httpOnly cookie (new-ui stage 3).
+
+    The cookie carries the *same* token as the bearer header — one session row,
+    two transports. The header wins when both are presented, so `opampctl` and the
+    CLI are never affected by whatever a browser has stored.
+    """
+
+    def test_login_sets_an_httponly_strict_cookie_matching_the_token(
+        self, client, legacy, monkeypatch
+    ):
+        monkeypatch.delenv("ADMIN_COOKIE_SECURE", raising=False)
+        response = client.post("/auth/session", json={"name": "", "password": legacy})
+        assert response.status_code == 201
+        raw = response.headers["set-cookie"]
+        assert f"{auth.ADMIN_COOKIE}=" in raw
+        assert response.cookies[auth.ADMIN_COOKIE] == response.json()["token"]
+        assert "httponly" in raw.lower()
+        assert "samesite=strict" in raw.lower()
+        assert "secure" not in raw.lower()  # plain http: Secure would break the browser
+
+    def test_cookie_alone_authenticates_browser_calls(self, client, legacy):
+        client.post("/auth/session", json={"name": "", "password": legacy})
+        me = client.get("/auth/me", headers=anonymous())
+        assert me.status_code == 200
+        assert me.json()["method"] == "session" and me.json()["role"] == "admin"
+
+    def test_header_wins_over_the_cookie(self, client, legacy):
+        first = login(client, "", legacy)["token"]
+        second = login(client, "", legacy)["token"]
+
+        # Cookie from session one, header from session two: identity is the header's.
+        me = client.get(
+            "/auth/me", headers=bearer(second), cookies={auth.ADMIN_COOKIE: first}
+        )
+        assert me.status_code == 200
+
+        # Even when the header's session is dead, the cookie is not consulted —
+        # a stale cookie must never shadow the CLI's credential.
+        client.delete("/auth/session", headers=bearer(second))
+        dead = client.get(
+            "/auth/me", headers=bearer(second), cookies={auth.ADMIN_COOKIE: first}
+        )
+        assert dead.status_code == 401
+
+    def test_logout_revokes_the_session_and_clears_the_cookie(self, client, legacy):
+        response = client.post("/auth/session", json={"name": "", "password": legacy})
+        token = response.json()["token"]
+
+        logout = client.delete("/auth/session", headers=anonymous())
+        assert logout.json()["logged_out"] is True
+        clear = logout.headers.get("set-cookie", "")
+        assert f"{auth.ADMIN_COOKIE}=" in clear and "max-age=0" in clear.lower()
+
+        # The revoked token fails on both transports, cookie or header.
+        assert (
+            client.get("/auth/me", headers=anonymous(), cookies={auth.ADMIN_COOKIE: token}).status_code
+            == 401
+        )
+        assert client.get("/auth/me", headers=bearer(token)).status_code == 401
+
+    def test_secure_flag_follows_https_and_the_config_switch(
+        self, client, legacy, monkeypatch
+    ):
+        # Plain http (TestClient): no Secure by default...
+        response = client.post("/auth/session", json={"name": "", "password": legacy})
+        assert "secure" not in response.headers["set-cookie"].lower()
+
+        # ...unless ADMIN_COOKIE_SECURE forces it on.
+        monkeypatch.setenv("ADMIN_COOKIE_SECURE", "true")
+        forced = client.post("/auth/session", json={"name": "", "password": legacy})
+        assert "secure" in forced.headers["set-cookie"].lower()
+
+        # A trusted proxy that says https gets a Secure cookie.
+        monkeypatch.delenv("ADMIN_COOKIE_SECURE", raising=False)
+        monkeypatch.setenv("TRUST_PROXY_HEADERS", "true")
+        behind_proxy = client.post(
+            "/auth/session",
+            json={"name": "", "password": legacy},
+            headers={"X-Forwarded-Proto": "https"},
+        )
+        assert "secure" in behind_proxy.headers["set-cookie"].lower()
+
+    def test_bad_cookie_is_a_plain_401(self, client, legacy):
+        response = client.get(
+            "/auth/me", headers=anonymous(), cookies={auth.ADMIN_COOKIE: "opamp_admin_nope"}
+        )
+        assert response.status_code == 401
+        assert response.json()["detail"] == "invalid credentials"

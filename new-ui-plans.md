@@ -146,10 +146,32 @@ passing, oxlint clean):
 
 ---
 
-## Stage 3 — Cookie-session auth end-to-end (status: **todo**)
+## Stage 3 — Cookie-session auth end-to-end (status: **in-progress** — backend half done)
 
 Depends on: stage 2. **Touches the FastAPI server** (`server/auth.py` and the
 session routes) — that is expected and sanctioned.
+
+### Backend half — DONE (2026-11-22, server-side session + tests)
+
+Implemented in `server/auth.py` + `server/main.py`, tests in
+`tests/test_auth.py::TestCookieSessions` (6 tests; full suite 1885 passing):
+
+- `POST /auth/session` now also sets `Set-Cookie: opamp_admin_session=<token>`
+  — httpOnly, SameSite=Strict, `max_age` = session TTL, path=/. Same token as
+  the bearer body: one session row, two transports.
+- Secure flag: `cookie_secure()` — `ADMIN_COOKIE_SECURE` env wins (true/false),
+  else Secure iff the request arrived over https (direct or `X-Forwarded-Proto`
+  when `TRUST_PROXY_HEADERS=true`). Plain-http localhost dev gets no Secure
+  (otherwise the browser would drop it).
+- `authenticate()` credential order: bearer header → cookie → Basic. ANY
+  Authorization header (including Basic) means the cookie is never consulted,
+  so `opampctl`/scripts are unaffected by browser cookies (this bit the test
+  suite once — see TestSessions::test_list_and_revoke_a_session).
+- `DELETE /auth/session` revokes the session AND clears the cookie (Max-Age=0).
+- 401/403/429/503 semantics unchanged; read-only mode untouched.
+
+Frontend still to do (the tasks below) — the cookie is live server-side, so
+the Login page can start posting to `POST /api/auth/session` immediately.
 
 Goal: replace Bearer-in-memory with `httpOnly` cookie sessions for the
 browser, keeping Bearer for CLI/API clients.

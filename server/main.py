@@ -601,6 +601,12 @@ def create_session(body: LoginRequest, request: Request, response: Response):
     (default 900) of inactivity. With only the legacy `ADMIN_PASSWORD` configured,
     any name (or none, or `admin`) works; with principals, `name` must match one.
 
+    Browser clients may use the cookie the response sets (`opamp_admin_session`,
+    httpOnly, SameSite=Strict, `Secure` over https — `ADMIN_COOKIE_SECURE` forces
+    it on/off) instead of sending the token in a header; scripts keep sending
+    `Authorization: Bearer <token>`, which wins when both are presented. Log out
+    with `DELETE /auth/session` — it revokes the session and clears the cookie.
+
     Failed logins are counted per `(identity, client IP)` and answered with 429 +
     `Retry-After` once `ADMIN_LOGIN_MAX_ATTEMPTS` (default 5) is exceeded, with
     exponential backoff; the response never reveals whether the name exists. Key the
@@ -608,21 +614,25 @@ def create_session(body: LoginRequest, request: Request, response: Response):
     """
     result = auth.login(body.name, body.password, request)
     response.headers["Cache-Control"] = "no-store"
+    auth.set_session_cookie(response, result["token"], request)
     return result
 
 
 @app.delete("/auth/session", tags=["auth"], summary="Log out (revoke your session)")
-def delete_session(request: Request):
+def delete_session(request: Request, response: Response):
     """Revoke the session token used for this request. Requires a session token.
 
-    Idempotent: `{"logged_out": false}` means it was already gone. HTTP Basic
-    callers have no session to revoke and get 400.
+    Also clears the browser session cookie when one was set (idempotent).
+    `{"logged_out": false}` means the session was already gone. HTTP Basic callers
+    have no session to revoke and get 400.
     """
     principal = require_roles(request, ROLE_VIEWER)
     try:
-        return auth.logout(principal)
+        result = auth.logout(principal)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    auth.clear_session_cookie(response)
+    return result
 
 
 @app.get("/auth/me", tags=["auth"], summary="Who am I, and what may I do")

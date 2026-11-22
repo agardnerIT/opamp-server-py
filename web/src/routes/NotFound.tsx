@@ -4,7 +4,7 @@ import { Link } from "@tanstack/react-router";
 export default function NotFound() {
   return (
     <div className="p-8">
-      <h1 className="text-lg font-semibold">Page not found</h1>
+      <h1 className="text-xl font-semibold tracking-[-0.01em]">Page not found</h1>
       <p className="mt-2 text-sm text-[var(--color-muted)]">
         There is no page at this address.
       </p>

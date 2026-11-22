@@ -11,7 +11,11 @@ import { getAgentTypes, type AgentTypeSummary } from "../api/endpoints";
  */
 
 function H2({ children }: { children: string }) {
-  return <h2 className="mt-8 text-base font-semibold">{children}</h2>;
+  return (
+    <h2 className="mt-10 border-b border-[var(--color-border)] pb-2 text-base font-semibold first:mt-6">
+      {children}
+    </h2>
+  );
 }
 
 function TypeDeclares({ profile }: { profile: AgentTypeSummary }) {
@@ -36,7 +40,7 @@ export default function Help() {
 
   return (
     <section className="flex flex-col gap-1 pb-8">
-      <h1 className="text-lg font-semibold">Help</h1>
+      <h1 className="text-xl font-semibold tracking-[-0.01em]">Help</h1>
 
       <H2>Connecting an agent</H2>
       <p className="max-w-prose text-sm">
@@ -62,13 +66,13 @@ export default function Help() {
       </p>
       <div className="flex flex-col gap-2">
         {(types.data?.types ?? []).map((profile) => (
-          <details key={profile.name} className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
+          <details key={profile.name} className="card p-3">
             <summary className="cursor-pointer text-sm font-medium">
               <span className="mr-1.5">{profile.icon}</span>
               {profile.display_name}{" "}
               <code className="ml-1 font-mono text-xs text-[var(--color-muted)]">{profile.name}</code>
               {profile.bootstrap_default && (
-                <span className="ml-2 text-[10px] uppercase tracking-wide text-[var(--color-muted)]">
+                <span className="ml-2 rounded-full bg-[var(--color-accent-soft)] px-2 py-0.5 text-[11px] font-medium text-[var(--color-accent-strong)]">
                   bootstrap default
                 </span>
               )}
@@ -121,7 +125,7 @@ export default function Help() {
       </p>
 
       <H2>Admin console security</H2>
-      <ul className="max-w-prose list-disc space-y-1 pl-5 text-sm text-[var(--color-muted)]">
+      <ul className="max-w-prose list-disc space-y-1.5 pl-5 text-sm leading-relaxed text-[var(--color-muted)]">
         <li>
           Signing in posts your name and password to{" "}
           <code className="font-mono text-xs">POST /auth/session</code> once; the password is discarded

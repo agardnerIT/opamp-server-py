@@ -15,7 +15,7 @@ export default function StubPage({
 }) {
   return (
     <div>
-      <h1 className="text-lg font-semibold">{title}</h1>
+      <h1 className="text-xl font-semibold tracking-[-0.01em]">{title}</h1>
       <p className="mt-2 max-w-prose text-sm text-[var(--color-muted)]">
         {description}
       </p>

@@ -12,6 +12,8 @@ import { useSession } from "../api/session";
 import { roleAtLeast } from "../lib/roles";
 import { EmptyState } from "../components/EmptyState";
 import { Section } from "../components/Section";
+import { PageHeader } from "../components/ui/PageHeader";
+import { Button } from "../components/ui/Button";
 
 /**
  * Compliance (new-ui stage 8): the OPA policy files this server loads, and a
@@ -76,13 +78,10 @@ export default function Compliance() {
 
   return (
     <section className="flex flex-col gap-4">
-      <div>
-        <h1 className="text-lg font-semibold">Compliance</h1>
-        <p className="mt-1 max-w-prose text-xs text-[var(--color-muted)]">
-          The OPA policy files this server loads, and per-agent checks.
-          Fleet-wide verdicts are on each agent's row in the Agents list.
-        </p>
-      </div>
+      <PageHeader
+        title="Compliance"
+        lede="The OPA policy files this server loads, and per-agent checks. Fleet-wide verdicts are on each agent's row in the Agents list."
+      />
 
       {policies.data && !policies.data.opa_enabled && (
         <EmptyState
@@ -99,15 +98,14 @@ export default function Compliance() {
             "loaded from the server's POLICIES_DIR"
           }
           actions={
-            <button
-              type="button"
+            <Button
+              size="sm"
               onClick={() => reload.mutate()}
               disabled={!canAdmin || reload.isPending}
-              className="rounded-md border border-[var(--color-border)] px-2 py-1 text-xs hover:text-[var(--color-text)] disabled:opacity-40 disabled:hover:text-inherit"
               title={canAdmin ? "Ask OPA to reload policies from disk" : "Reloading policies needs the admin role"}
             >
               Reload & re-validate
-            </button>
+            </Button>
           }
         >
           {reload.isSuccess && reload.data.success === false && (
@@ -140,7 +138,7 @@ export default function Compliance() {
               setAgentId(e.target.value);
               setCheck(null);
             }}
-            className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-sm"
+            className="field"
           >
             <option value="">Select an agent…</option>
             {(agents.data?.agents ?? []).map((a) => (
@@ -149,14 +147,13 @@ export default function Compliance() {
               </option>
             ))}
           </select>
-          <button
-            type="button"
+          <Button
+            variant="primary"
             onClick={() => runCheck.mutate()}
             disabled={!agentId || runCheck.isPending}
-            className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs hover:text-[var(--color-text)] disabled:opacity-40 disabled:hover:text-inherit"
           >
             Check compliance
-          </button>
+          </Button>
         </div>
         {check && (
           <p role="status" className="mt-3 text-sm">

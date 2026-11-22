@@ -18,7 +18,7 @@ export function Diff({ oldText, newText }: { oldText: string; newText: string })
     return <p className="text-xs text-[var(--color-muted)]">No difference from the current config.</p>;
   }
   return (
-    <div className="overflow-x-auto rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-2 font-mono text-xs leading-5">
+    <div className="card-2 overflow-x-auto p-2.5 font-mono text-xs leading-5">
       <div className="mb-1 text-[11px] text-[var(--color-muted)]">
         +{added} / −{removed} lines
       </div>

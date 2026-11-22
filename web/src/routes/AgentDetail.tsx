@@ -12,6 +12,10 @@ import { EmptyState } from "../components/EmptyState";
 import { KeyValue, Section } from "../components/Section";
 import { StatusBadge } from "../components/StatusBadge";
 import { AgentTypeBadge } from "../components/AgentTypeBadge";
+import { PageHeader } from "../components/ui/PageHeader";
+import { Button } from "../components/ui/Button";
+import { Switch } from "../components/ui/Switch";
+import { Notice } from "../components/ui/Toast";
 import { configObjects } from "../lib/configText";
 
 /**
@@ -91,20 +95,11 @@ function TelemetryPanels({
           if (panel.widget === "alert") {
             const value = panel.metric ? metrics[panel.metric] : undefined;
             if (panel.when === "above_zero" && value && value > 0) {
-              const severity = panel.severity === "error" ? "danger" : "warn";
+              const severity: "error" | "warn" = panel.severity === "error" ? "error" : "warn";
               return (
-                <p
-                  key={panel.id}
-                  role="status"
-                  className={
-                    "rounded-md border px-3 py-2 text-sm " +
-                    (severity === "danger"
-                      ? "border-[var(--color-danger)] text-[var(--color-danger)]"
-                      : "border-[var(--color-warn)] text-[var(--color-warn)]")
-                  }
-                >
+                <Notice key={panel.id} kind={severity}>
                   {(panel.message ?? "⚠️ {value}").replace("{value}", value.toLocaleString())}
-                </p>
+                </Notice>
               );
             }
             return null;
@@ -118,11 +113,9 @@ function TelemetryPanels({
               )}
               <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
                 {(panel.metrics ?? []).map((m) => (
-                  <div key={m.metric} className="rounded-md border border-[var(--color-border)] p-3">
-                    <div className="text-[11px] uppercase tracking-wide text-[var(--color-muted)]">
-                      {m.label}
-                    </div>
-                    <div className="mt-1 text-lg tabular-nums">
+                  <div key={m.metric} className="card-2 p-3">
+                    <div className="text-xs text-[var(--color-faint)]">{m.label}</div>
+                    <div className="tnum mt-1 font-display text-xl font-semibold tracking-[-0.01em]">
                       {metrics[m.metric] === undefined
                         ? "—"
                         : formatMetric(metrics[m.metric], m.format)}
@@ -180,32 +173,29 @@ function ComponentsTable({
     <Section
       title="Components"
       actions={
-        <label className="flex cursor-pointer items-center gap-2 text-xs text-[var(--color-muted)]">
-          <input
-            type="checkbox"
-            checked={inUseOnly}
-            onChange={(e) => setInUseOnly(e.target.checked)}
-          />
-          In use only
-        </label>
+        <Switch
+          label="In use only"
+          checked={inUseOnly}
+          onChange={setInUseOnly}
+        />
       }
     >
-      <table className="w-full text-left text-xs">
+      <table className="data-table">
         <thead>
-          <tr className="border-b border-[var(--color-border)] uppercase tracking-wide text-[var(--color-muted)]">
-            <th scope="col" className="py-1.5 pr-3 font-medium">Type</th>
-            <th scope="col" className="py-1.5 pr-3 font-medium">Name</th>
-            <th scope="col" className="py-1.5 pr-3 font-medium">Version</th>
-            <th scope="col" className="py-1.5 font-medium">In use</th>
+          <tr>
+            <th>Type</th>
+            <th>Name</th>
+            <th>Version</th>
+            <th>In use</th>
           </tr>
         </thead>
         <tbody>
           {shown.map((r) => (
-            <tr key={`${r.section}/${r.id}`} className="border-b border-[var(--color-border)] last:border-0">
-              <td className="py-1.5 pr-3">{r.section}</td>
-              <td className="py-1.5 pr-3 font-mono">{r.id}</td>
-              <td className="py-1.5 pr-3 text-[var(--color-muted)]">{r.version ?? "—"}</td>
-              <td className="py-1.5">
+            <tr key={`${r.section}/${r.id}`}>
+              <td className="text-xs">{r.section}</td>
+              <td className="font-mono text-xs">{r.id}</td>
+              <td className="text-xs text-[var(--color-muted)]">{r.version ?? "—"}</td>
+              <td>
                 <StatusBadge
                   tone={r.used ? "ok" : "muted"}
                   label={r.used ? "in use" : "unused"}
@@ -232,9 +222,9 @@ function ConfigSection({ agent }: { agent: AgentDetail }) {
       }
     >
       {agent.config_error ? (
-        <p className="mb-2 rounded-md border border-[var(--color-warn)] px-3 py-2 text-xs text-[var(--color-warn)]">
+        <Notice kind="warn" className="mb-2">
           {String(agent.config_error)}
-        </p>
+        </Notice>
       ) : null}
       {objects.length === 0 ? (
         <p className="text-xs text-[var(--color-muted)]">
@@ -248,7 +238,7 @@ function ConfigSection({ agent }: { agent: AgentDetail }) {
                 <span className="font-mono">object {obj.key || "<empty key>"}</span>
                 {obj.contentType && <span>· {obj.contentType}</span>}
               </div>
-              <pre className="max-h-96 overflow-auto rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-3 font-mono text-xs leading-relaxed">
+              <pre className="card-2 max-h-96 overflow-auto bg-[var(--color-bg)] p-3 text-xs leading-relaxed">
                 {obj.body}
               </pre>
             </div>
@@ -298,7 +288,7 @@ export default function AgentDetail() {
               : String(agent.error)
         }
       >
-        <Link to="/" search={carriedQuery} className="rounded-md border border-[var(--color-border)] px-2 py-1 text-xs hover:text-[var(--color-text)]">
+        <Link to="/" search={carriedQuery} className="text-[13px] text-[var(--color-accent)] hover:underline">
           ← All agents
         </Link>
       </EmptyState>
@@ -331,33 +321,26 @@ export default function AgentDetail() {
 
   return (
     <section className="flex flex-col gap-4">
-      <div>
-        <Link
-          to="/"
-          search={carriedQuery}
-          className="text-xs text-[var(--color-muted)] hover:text-[var(--color-text)]"
-        >
-          ← All agents
-        </Link>
-        <h1 className="mt-1 text-lg font-semibold">
-          {data.name ?? <span className="text-[var(--color-muted)]">Agent details</span>}
-        </h1>
-        <p className="mt-0.5 font-mono text-[11px] text-[var(--color-muted)]">{data.id}</p>
-      </div>
+      <PageHeader
+        title={data.name ?? "Agent details"}
+        lede={data.id}
+        actions={
+          <Link to="/" search={carriedQuery}>
+            <Button size="sm">← All agents</Button>
+          </Link>
+        }
+      />
 
       {data.uid_reissued_from && (
-        <p
-          role="status"
-          className="rounded-md border border-[var(--color-warn)] px-3 py-2 text-sm text-[var(--color-warn)]"
-        >
+        <Notice kind="warn">
           This agent's id changed: it previously connected as{" "}
           <code className="font-mono">{data.uid_reissued_from}</code>
           {data.uid_reissue_reason ? ` (${data.uid_reissue_reason})` : ""}. The server renamed
           it because the old uid was re-issued to another agent.
-        </p>
+        </Notice>
       )}
 
-      <div className="grid grid-cols-2 gap-4 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 sm:grid-cols-3 lg:grid-cols-6">
+      <div className="card grid grid-cols-2 gap-4 p-4 sm:grid-cols-3 lg:grid-cols-6">
         <KeyValue label="Status">
           <StatusBadge tone={healthTone} label={healthLabel} />
           {data.health_error && (
@@ -407,23 +390,15 @@ export default function AgentDetail() {
       </div>
 
       {data.agent_type_warning && (
-        <p
-          role="status"
-          className={
-            "rounded-md border px-3 py-2 text-xs " +
-            (typeWarningSource
-              ? "border-[var(--color-border)] text-[var(--color-muted)]"
-              : "border-[var(--color-warn)] text-[var(--color-warn)]")
-          }
-        >
+        <Notice kind={typeWarningSource ? "info" : "warn"}>
           {data.agent_type_warning}
-        </p>
+        </Notice>
       )}
       {data.agent_type_ambiguous && data.agent_type_ambiguous.length > 0 && (
-        <p className="rounded-md border border-[var(--color-border)] px-3 py-2 text-xs text-[var(--color-muted)]">
+        <Notice kind="info">
           This agent also matches: {data.agent_type_ambiguous.join(", ")}. Match priority chose
           this one; pin the type to settle it.
-        </p>
+        </Notice>
       )}
 
       {profile && (
@@ -488,7 +463,7 @@ export default function AgentDetail() {
             {data.capability_tags.map((tag) => (
               <li
                 key={tag.label}
-                className="rounded-md border border-[var(--color-border)] px-2 py-0.5 text-xs"
+                className="rounded-full border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2.5 py-0.5 text-xs"
               >
                 <span aria-hidden className="mr-1">{tag.icon}</span>
                 {tag.label}
@@ -497,12 +472,12 @@ export default function AgentDetail() {
           </ul>
           {data.custom_capabilities.length > 0 && (
             <>
-              <h3 className="mt-3 text-[11px] uppercase tracking-wide text-[var(--color-muted)]">
+              <h3 className="mt-3 text-xs text-[var(--color-faint)]">
                 Custom capabilities
               </h3>
               <ul className="mt-1 flex flex-wrap gap-1.5">
                 {data.custom_capabilities.map((c) => (
-                  <li key={c} className="rounded-md border border-[var(--color-border)] px-2 py-0.5 font-mono text-xs">
+                  <li key={c} className="rounded-full border border-[var(--color-border)] bg-[var(--color-surface-2)] px-2.5 py-0.5 font-mono text-xs">
                     {c}
                   </li>
                 ))}

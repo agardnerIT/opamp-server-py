@@ -15,11 +15,15 @@ export function Section({
   children: React.ReactNode;
 }) {
   return (
-    <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
+    <section className="card p-4">
       <header className="mb-3 flex items-baseline justify-between gap-4">
-        <div>
+        <div className="min-w-0">
           <h2 className="text-sm font-semibold">{title}</h2>
-          {caption && <p className="mt-0.5 text-xs text-[var(--color-muted)]">{caption}</p>}
+          {caption && (
+            <p className="mt-0.5 text-xs leading-relaxed text-[var(--color-muted)]">
+              {caption}
+            </p>
+          )}
         </div>
         {actions && <div className="shrink-0">{actions}</div>}
       </header>
@@ -32,8 +36,8 @@ export function Section({
 export function KeyValue({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="flex min-w-0 flex-col gap-0.5">
-      <dt className="text-[11px] uppercase tracking-wide text-[var(--color-muted)]">{label}</dt>
-      <dd className="min-w-0 text-sm">{children}</dd>
+      <dt className="text-xs text-[var(--color-faint)]">{label}</dt>
+      <dd className="min-w-0 text-[13px]">{children}</dd>
     </div>
   );
 }

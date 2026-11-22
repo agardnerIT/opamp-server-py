@@ -4,6 +4,8 @@ import { getAuthStatus } from "../api/endpoints";
 import { useQuery } from "@tanstack/react-query";
 import { ApiError } from "../api/errors";
 import { useLogin } from "../api/session";
+import { Button } from "../components/ui/Button";
+import { Notice } from "../components/ui/Toast";
 
 /**
  * Sign-in page. Posts to `POST /auth/session`; the server sets the httpOnly
@@ -31,12 +33,18 @@ function loginErrorMessage(error: unknown): string {
 
 function ReadOnlyNotice() {
   return (
-    <div className="w-96 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-6">
-      <h1 className="mb-1 text-lg font-semibold">OpAMP Console</h1>
-      <p className="mt-3 text-sm text-[var(--color-muted)]">
+    <div className="card w-96 max-w-full p-6">
+      <div className="mb-4 flex items-center gap-2.5">
+        <span
+          aria-hidden
+          className="inline-block h-8 w-8 rounded-[var(--radius-sm)] bg-[linear-gradient(135deg,var(--color-accent-deep),var(--color-accent-bright))] shadow-[var(--inner-highlight)]"
+        />
+        <h1 className="font-display text-lg font-semibold">OpAMP Console</h1>
+      </div>
+      <p className="text-[13px] leading-relaxed text-[var(--color-muted)]">
         This server has no admin credential configured, so it is running in
-        read-only mode. Set <code>ADMIN_PASSWORD</code> or create a principal,
-        then restart the server to sign in.
+        read-only mode. Set <code className="font-mono">ADMIN_PASSWORD</code> or
+        create a principal, then restart the server to sign in.
       </p>
     </div>
   );
@@ -71,24 +79,47 @@ export default function Login() {
   }
 
   if (status && status.auth_mode === "disabled") {
-    return <ReadOnlyNotice />
+    return (
+      <div className="flex min-h-screen items-center justify-center p-6">
+        <ReadOnlyNotice />
+      </div>
+    )
   }
 
   const needsName = status?.auth_mode === "principals"
 
   return (
-    <div className="flex min-h-screen items-center justify-center">
+    <div className="relative flex min-h-screen items-center justify-center overflow-hidden p-6">
+      {/* One quiet brand moment: a faint indigo glow behind the card. */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute left-1/2 top-[-20%] h-[60vh] w-[80vw] -translate-x-1/2 rounded-full opacity-40"
+        style={{
+          background:
+            "radial-gradient(closest-side, rgb(64 81 181 / 0.35), transparent)",
+        }}
+      />
       <form
-        className="w-80 rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] p-6"
+        className="card relative w-96 max-w-full p-7 shadow-[var(--shadow-overlay)]"
         onSubmit={onSubmit}
       >
-        <h1 className="mb-1 text-lg font-semibold">OpAMP Console</h1>
-        <p className="mb-5 text-sm text-[var(--color-muted)]">
-          Sign in to manage the fleet.
-        </p>
+        <div className="mb-6 flex items-center gap-3">
+          <span
+            aria-hidden
+            className="inline-block h-9 w-9 rounded-[var(--radius-md)] bg-[linear-gradient(135deg,var(--color-accent-deep),var(--color-accent-bright))] shadow-[var(--inner-highlight)]"
+          />
+          <div>
+            <h1 className="font-display text-lg font-semibold leading-tight">
+              OpAMP Console
+            </h1>
+            <p className="text-xs text-[var(--color-muted)]">
+              Sign in to manage the fleet
+            </p>
+          </div>
+        </div>
         {needsName && (
           <>
-            <label className="mb-1 block text-sm" htmlFor="name">
+            <label className="mb-1 block text-[13px] font-medium" htmlFor="name">
               Name
             </label>
             <input
@@ -96,13 +127,13 @@ export default function Login() {
               type="text"
               autoComplete="username"
               autoFocus
-              className="mb-4 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-sm outline-none focus:border-[var(--color-accent)]"
+              className="field mb-4"
               value={name}
               onChange={(e) => setName(e.target.value)}
             />
           </>
         )}
-        <label className="mb-1 block text-sm" htmlFor="password">
+        <label className="mb-1 block text-[13px] font-medium" htmlFor="password">
           Password
         </label>
         <input
@@ -110,21 +141,23 @@ export default function Login() {
           type="password"
           autoComplete="current-password"
           autoFocus={!needsName}
-          className="mb-4 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-sm outline-none focus:border-[var(--color-accent)]"
+          className="field mb-5"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
         />
-        <button
+        <Button
           type="submit"
+          variant="primary"
+          size="lg"
           disabled={login.isPending}
-          className="w-full rounded-md bg-[var(--color-accent)] px-3 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
+          className="w-full"
         >
           {login.isPending ? "Signing in…" : "Sign in"}
-        </button>
+        </Button>
         {error && (
-          <p role="alert" className="mt-3 text-sm text-[var(--color-danger)]">
+          <Notice kind="error" className="mt-4">
             {error}
-          </p>
+          </Notice>
         )}
       </form>
     </div>

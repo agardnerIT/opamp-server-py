@@ -24,7 +24,7 @@ function Spans({ spans }: { spans: Inline[] }) {
 export function Markdown({ text }: { text: string }) {
   const blocks = useMemo(() => parseMarkdownBlocks(text), [text]);
   return (
-    <div className="max-w-prose text-sm leading-relaxed">
+    <div className="max-w-prose text-[13px] leading-relaxed">
       {blocks.map((block, i) => {
         switch (block.kind) {
           case "h1":

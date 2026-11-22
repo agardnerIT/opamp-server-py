@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { RouterProvider } from '@tanstack/react-router'
 import { router } from './router'
 import { setUnauthorizedHandler } from './api/errors'
+import { ToastProvider } from './components/ui/Toast'
 import './index.css'
 
 // Retries are for transient failures only: a 4xx answer (403 role refusal, 404
@@ -40,7 +41,9 @@ setUnauthorizedHandler(() => {
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
-      <RouterProvider router={router} context={{ queryClient }} />
+      <ToastProvider>
+        <RouterProvider router={router} context={{ queryClient }} />
+      </ToastProvider>
     </QueryClientProvider>
   </StrictMode>,
 )

@@ -1,21 +1,232 @@
 @import 'tailwindcss';
 
-/* Design tokens — dark-first ops console. Refined with the better-colors
-   skill once real screens exist; these are starting values, not doctrine. */
+/* Self-hosted variable fonts (subsetted by fontsource, bundled by Vite). */
+@import '@fontsource-variable/inter';
+@import '@fontsource-variable/inter-tight';
+@import '@fontsource-variable/jetbrains-mono';
+
+/* ---------------------------------------------------------------------------
+   Design tokens — the only place values live. Components reference tokens,
+   never literals (ground rule). Palette derived from the agardner.net brand
+   (MkDocs Material): indigo #4051b5 primary, link blue #5488e8, dark-scheme
+   primary #02a6f2 on a faint indigo cast near-black. Direction: accessible
+   modern SaaS (Linear/Vercel polish), dark-first.
+   Measured pairs (WCAG 2.x, 2027-01): text/surface 13.9, muted/surface 6.4,
+   accent/surface 4.8, accent-strong/surface-2 6.1, white/#4051b5 6.9,
+   ok 7.8 · warn 5.7 · danger 5.0 on surface.
+--------------------------------------------------------------------------- */
 :root {
-  --color-bg: #0b0e14;
-  --color-surface: #131722;
-  --color-border: #232a3b;
-  --color-text: #e6e9f0;
-  --color-muted: #8b93a7;
-  --color-accent: #4f8ff7;
-  --color-ok: #3fb27f;
-  --color-warn: #d9a441;
-  --color-danger: #e05252;
+  /* Surfaces — near-black with the brand site's faint indigo cast. */
+  --color-bg: #14161c;
+  --color-surface: #1b1e27;
+  --color-surface-2: #232735;
+  --color-surface-3: #2b3040; /* hovers, active rows, raised chips */
+
+  /* Hairline borders — low alpha so they hold across nested surfaces. */
+  --color-border: rgb(151 163 205 / 0.14);
+  --color-border-strong: rgb(151 163 205 / 0.28);
+
+  /* Text */
+  --color-text: #e8ebf3;
+  --color-muted: #98a1b6;
+  --color-faint: #7c86a2; /* placeholders, disabled labels */
+
+  /* Accent family.
+     accent: everyday interactive text/links (brand link blue).
+     accent-strong: accent text on surface-2 (4.29→6.1 contrast fix).
+     accent-deep: solid primary fills — white text passes on it (white on
+       #5488e8 fails at 3.5); hover step stays in the same hue ramp.
+     accent-bright: #02a6f2, the brand dark-scheme primary — reserved for
+       focus rings, the active nav marker, and hero moments. */
+  --color-accent: #5488e8;
+  --color-accent-strong: #6d9df0;
+  --color-accent-deep: #4051b5;
+  --color-accent-deep-hover: #4a5ecb;
+  --color-accent-bright: #02a6f2;
+  --color-accent-soft: rgb(84 136 232 / 0.14); /* tinted fills */
+
+  /* Semantic tones — mapped through statusTone() only, never applied raw.
+     Soft variants are the tinted fills behind inline notices/badges. */
+  --color-ok: #43c78e;
+  --color-ok-soft: rgb(67 199 142 / 0.12);
+  --color-warn: #d98324;
+  --color-warn-soft: rgb(217 131 36 / 0.13);
+  --color-danger: #e5645f;
+  --color-danger-soft: rgb(229 100 95 / 0.12);
+  --color-info: #6d9df0;
+  --color-info-soft: rgb(109 157 240 / 0.13);
+
+  /* Radius scale */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+
+  /* Motion — one pair (fast out ≈140ms, enter ≈200ms). */
+  --duration-fast: 140ms;
+  --duration-enter: 200ms;
+  --ease-out: cubic-bezier(0.2, 0, 0, 1);
+
+  /* Depth: border + inner highlight, not drop shadows. One real shadow,
+     reserved for overlays floating above content. */
+  --inner-highlight: inset 0 1px 0 rgb(255 255 255 / 0.03);
+  --shadow-overlay: 0 12px 32px rgb(8 10 16 / 0.5), 0 2px 8px rgb(8 10 16 / 0.4);
+}
+
+@theme inline {
+  --font-sans: 'Inter Variable', ui-sans-serif, system-ui, sans-serif;
+  --font-display: 'Inter Tight Variable', 'Inter Variable', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono Variable', ui-monospace, SFMono-Regular, monospace;
+}
+
+/* ---------------------------------------------------------------- base --- */
+
+html {
+  color-scheme: dark;
 }
 
 body {
   background: var(--color-bg);
   color: var(--color-text);
-  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Display face for headings and big numbers — tight, dense, SaaS-modern. */
+h1,
+h2,
+h3,
+.font-display {
+  font-family: var(--font-display);
+  letter-spacing: -0.01em;
+  font-weight: 600;
+}
+
+/* Data that must stay scannable: metrics, counts, tables. */
+.tnum,
+table,
+input[type='number'] {
+  font-variant-numeric: tabular-nums;
+}
+
+code,
+pre,
+kbd {
+  font-family: var(--font-mono);
+  font-size: 0.923em; /* 13px against 14px body */
+}
+
+::selection {
+  background: rgb(84 136 232 / 0.35);
+}
+
+/* Keyboard focus — one visible ring everywhere. */
+:focus-visible {
+  outline: 2px solid var(--color-accent-bright);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+/* Quiet scrollbars; the track stays invisible, the thumb barely there. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-surface-3) transparent;
+}
+
+/* --------------------------------------------------------------- cards --- */
+
+/* The one card surface: hairline border, inner top highlight, brand radius.
+   .card-2 raises inside a card (list rows, code blocks, wells). */
+.card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--inner-highlight);
+}
+
+.card-2 {
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+
+/* --------------------------------------------------------------- forms --- */
+
+/* Shared text-control treatment (inputs, selects, textareas). */
+.field {
+  width: 100%;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: 0.5rem 0.625rem;
+  color: var(--color-text);
+  font-size: 13px;
+  transition: border-color var(--duration-fast) var(--ease-out);
+}
+.field::placeholder {
+  color: var(--color-faint);
+}
+.field:hover:not(:disabled):not(:focus) {
+  border-color: var(--color-border-strong);
+}
+.field:focus {
+  outline: none;
+  border-color: var(--color-accent-bright);
+  box-shadow: 0 0 0 3px rgb(2 166 242 / 0.18);
+}
+.field:disabled {
+  opacity: 0.5;
+}
+
+/* -------------------------------------------------------------- tables --- */
+
+/* Shared data-table treatment: hairline row rules, quiet header, hover. */
+.data-table {
+  width: 100%;
+  text-align: left;
+  font-size: 13px;
+}
+.data-table thead th {
+  padding: 0.5rem 0.75rem;
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--color-faint);
+  letter-spacing: 0.01em;
+  border-bottom: 1px solid var(--color-border-strong);
+}
+.data-table tbody td {
+  padding: 0.55rem 0.75rem;
+  border-bottom: 1px solid var(--color-border);
+}
+.data-table tbody tr:last-child td {
+  border-bottom: none;
+}
+.data-table tbody tr:hover td {
+  background: rgb(151 163 205 / 0.04);
+}
+
+/* -------------------------------------------------------------- toasts --- */
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* ------------------------------------------------------------- motion --- */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }

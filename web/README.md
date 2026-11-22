@@ -70,20 +70,26 @@ Consequences baked into this codebase:
   from the Streamlit flow because the cookie must still point at the old session
   when the DELETE lands.
 
-Latest screens (mock-mode fleet fixtures):
+Latest screens (mock-mode fleet fixtures, refreshed for the 2027 design system —
+Stage A: brand indigo/cyan on near-black, Inter Tight display + JetBrains Mono,
+Switch/Button/Tabs/PageHeader primitives):
 
 | | |
 |---|---|
 | ![Agents list](../docs/screenshots/console-agents-list.png) | ![Agent detail](../docs/screenshots/console-agent-detail.png) |
-| Agents list (stage 5): server-side SQL selection, health chips, schema columns, type + provenance badges | Collector detail (stage 5): profile-declared telemetry panels, component inventory, masked config flagged |
+| Agents list: server-side SQL selection, health chips, schema columns, type + provenance badges | Agent detail: profile-declared telemetry panels, component inventory, masked config flagged |
 | ![Agents with session slot](../docs/screenshots/console-agents-session.png) | ![Login error](../docs/screenshots/console-login-error.png) |
-| Agents list + session slot (role, expiry, Extend, Sign out) | Login with the 401 message |
+| Agents list + session slot (role, expiry, Extend, Sign out) | Login with the 401 notice |
 | ![Nav parity with Admin section](../docs/screenshots/console-nav-admin.png) | |
-| Sidebar at nav parity (stage 4): main pages + role-gated Admin section | |
+| Sidebar at nav parity: main pages + role-gated Admin section, active-nav marker | |
 | ![Remote Config stepper](../docs/screenshots/console-remote-config.png) | |
-| Remote Config (stage 6): target → edit → review → propose → approve, with the rollout monitor below after creation | |
+| Remote Config: target → edit → review → propose → approve, with the rollout monitor below after creation | |
 | ![Groups](../docs/screenshots/console-groups.png) | ![Reports](../docs/screenshots/console-reports.png) |
-| Groups (stage 7): search → save → inspect (kind, pins, drift) → preview/edit/delete, all server-resolved | Reports (stage 7): the fleet's profiles decide which reports are offered; the server's markdown, rendered and downloadable |
+| Groups: search → save → inspect (kind, pins, drift) → preview/edit/delete, all server-resolved | Reports: the fleet's profiles decide which reports are offered; the server's markdown, rendered and downloadable |
+| ![Alerts](../docs/screenshots/console-alerts.png) | ![Agent tokens](../docs/screenshots/console-agent-tokens.png) |
+| Alerts: per-event webhooks, Switch-enabled, masked secrets kept on save | Agent tokens: mint (shown once) and revoke, state pills |
+| ![Sessions](../docs/screenshots/console-sessions.png) | ![Updates](../docs/screenshots/console-updates.png) |
+| Sessions: every honoured admin session, per-row revoke | Updates: release checks, automatic-check switch, GitHub releases link |
 
 ## Read pages: Reports, Groups, Help (stage 7)
 

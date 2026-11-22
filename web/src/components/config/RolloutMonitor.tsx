@@ -11,6 +11,8 @@ import { ApiError } from "../../api/errors";
 import { roleAtLeast } from "../../lib/roles";
 import { StatusBadge } from "../StatusBadge";
 import { Modal } from "../Modal";
+import { Button } from "../ui/Button";
+import { Notice } from "../ui/Toast";
 import { useSession } from "../../api/session";
 
 /**
@@ -115,7 +117,7 @@ export function RolloutMonitor({ rolloutId }: { rolloutId: string }) {
       </div>
 
       {paused && (
-        <div className="rounded-md border border-[var(--color-warn)] bg-[color-mix(in_srgb,var(--color-warn)_12%,transparent)] p-3 text-xs">
+        <Notice kind="warn">
           <p>
             <strong>Paused: {view.paused_reason}.</strong> {PAUSE_HELP[view.paused_reason ?? ""] ?? ""}
           </p>
@@ -124,7 +126,7 @@ export function RolloutMonitor({ rolloutId }: { rolloutId: string }) {
             {view.batch.current + 1}. Nothing is retried and nothing is rolled back automatically — decide below.
           </p>
           {view.pause_detail && <p className="mt-1 break-all font-mono">{view.pause_detail}</p>}
-        </div>
+        </Notice>
       )}
       {view.status === "completed" && (
         <p className="text-xs text-[var(--color-ok)]">
@@ -142,24 +144,25 @@ export function RolloutMonitor({ rolloutId }: { rolloutId: string }) {
         </p>
       )}
 
-      <table className="w-full text-xs">
-        <thead className="text-left text-[var(--color-muted)]">
+      <div className="card-2 overflow-x-auto">
+      <table className="data-table">
+        <thead>
           <tr>
-            <th className="py-1 pr-4 font-medium">Batch</th>
-            <th className="py-1 pr-4 font-medium">Agents</th>
-            <th className="py-1 pr-4 font-medium">Status</th>
-            <th className="py-1 font-medium">States</th>
+            <th>Batch</th>
+            <th>Agents</th>
+            <th>Status</th>
+            <th>States</th>
           </tr>
         </thead>
         <tbody>
           {view.batches.map((batch) => (
-            <tr key={batch.batch} className="border-t border-[var(--color-border)]">
-              <td className="py-1.5 pr-4">#{batch.batch + 1}</td>
-              <td className="py-1.5 pr-4">{batch.agents}</td>
-              <td className="py-1.5 pr-4">
+            <tr key={batch.batch}>
+              <td className="tnum text-xs">#{batch.batch + 1}</td>
+              <td className="text-xs">{batch.agents}</td>
+              <td>
                 <StatusBadge status={batch.status} />
               </td>
-              <td className="py-1.5 text-[var(--color-muted)]">
+              <td className="text-xs text-[var(--color-muted)]">
                 {Object.entries(batch.states)
                   .map(([state, count]) => `${count} ${state}`)
                   .join(" · ") || "—"}
@@ -168,38 +171,36 @@ export function RolloutMonitor({ rolloutId }: { rolloutId: string }) {
           ))}
         </tbody>
       </table>
+      </div>
 
-      {error && <p className="text-xs text-[var(--color-danger)]">{error}</p>}
+      {error && <Notice kind="error">{error}</Notice>}
 
       <div className="flex flex-wrap gap-2">
-        <button
-          type="button"
+        <Button
+          size="sm"
           disabled={!canOperator || !["running", "paused"].includes(view.status)}
           onClick={() => setDialog("abort")}
-          className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs hover:bg-[var(--color-bg)] disabled:opacity-40"
         >
           Abort promotion
-        </button>
+        </Button>
         {resumable && (
-          <button
-            type="button"
+          <Button
+            size="sm"
             disabled={!canApprover}
             onClick={() => setDialog("resume")}
-            className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs hover:bg-[var(--color-bg)] disabled:opacity-40"
           >
             Resume
-          </button>
+          </Button>
         )}
-        <button
-          type="button"
+        <Button
+          size="sm"
           disabled={!canApprover || (view.agents.states.applied ?? 0) === 0 || view.kind === "rollback"}
           onClick={() => setDialog("rollback")}
-          className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs hover:bg-[var(--color-bg)] disabled:opacity-40"
         >
           Roll back applied agents
-        </button>
+        </Button>
       </div>
-      <p className="text-[11px] text-[var(--color-muted)]">
+      <p className="text-xs text-[var(--color-muted)]">
         Abort stops promotion and cannot recall a delivered config. Roll back creates a new revision per
         applied agent and runs it as its own gated rollout — a different, bigger decision.
       </p>
@@ -228,28 +229,23 @@ export function RolloutMonitor({ rolloutId }: { rolloutId: string }) {
           type="text"
           value={reason}
           onChange={(e) => setReason(e.target.value)}
-          className="mb-4 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-sm"
+          className="field mb-4"
         />
         <div className="flex justify-end gap-2">
-          <button
-            type="button"
-            onClick={() => setDialog(null)}
-            className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs"
-          >
+          <Button variant="ghost" onClick={() => setDialog(null)}>
             Cancel
-          </button>
-          <button
-            type="button"
+          </Button>
+          <Button
+            variant="danger"
             data-testid={`confirm-${dialog}`}
             onClick={() => {
               if (dialog === "abort") act(() => abortConfigRollout(rolloutId, reason || null));
               else if (dialog === "resume") act(() => resumeConfigRollout(rolloutId, reason || null));
               else if (dialog === "rollback") act(() => rollbackConfigRollout(rolloutId, reason || null));
             }}
-            className="rounded-md border border-[var(--color-danger)] px-3 py-1.5 text-xs font-medium text-[var(--color-danger)] hover:bg-[color-mix(in_srgb,var(--color-danger)_15%,transparent)]"
           >
             {dialog === "abort" ? "Abort promotion" : dialog === "resume" ? "Resume" : "Roll back"}
-          </button>
+          </Button>
         </div>
       </Modal>
     </div>

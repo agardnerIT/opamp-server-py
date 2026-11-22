@@ -35,7 +35,7 @@ export function Modal({
       ref={ref}
       aria-labelledby="modal-title"
       onClose={onClose}
-      className="m-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-5 text-[var(--color-text)] backdrop:bg-black/60"
+      className="m-auto w-[26rem] max-w-[calc(100vw-2rem)] rounded-[var(--radius-lg)] border border-[var(--color-border-strong)] bg-[var(--color-surface)] p-5 text-[var(--color-text)] shadow-[var(--shadow-overlay)] backdrop:bg-black/60"
     >
       <h2 id="modal-title" className="mb-3 text-sm font-semibold">
         {title}

@@ -96,9 +96,9 @@ test("updates: status line, toggle off, check now", async ({ page }) => {
   // The mock never fails a check; the status line stays.
   await expect(page.getByText("update available")).toBeVisible();
 
-  const toggle = page.getByRole("checkbox", { name: "Check for updates automatically" });
+  const toggle = page.getByRole("switch", { name: "Check for updates automatically" });
   await toggle.click();
-  // Controlled checkbox + server round-trip: the effective state flips to off.
+  // Controlled switch + server round-trip: the effective state flips to off.
   await expect(page.getByText("Automatic checks")).toBeVisible();
   await expect(toggle).not.toBeChecked();
 

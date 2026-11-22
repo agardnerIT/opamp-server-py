@@ -5,6 +5,8 @@ import { useSession } from "../api/session";
 import { roleAtLeast } from "../lib/roles";
 import { EmptyState } from "../components/EmptyState";
 import { Modal } from "../components/Modal";
+import { PageHeader } from "../components/ui/PageHeader";
+import { Button, buttonStyles } from "../components/ui/Button";
 
 /**
  * Sessions (new-ui stage 8): every admin session the server honours,
@@ -12,9 +14,6 @@ import { Modal } from "../components/Modal";
  * table — Streamlit made the operator retype it, which only invited typos);
  * revoking is audited against the acting principal.
  */
-
-const buttonClass =
-  "rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs hover:text-[var(--color-text)] disabled:opacity-40 disabled:hover:text-inherit";
 
 export default function Sessions() {
   const session = useSession();
@@ -40,13 +39,10 @@ export default function Sessions() {
 
   return (
     <section className="flex flex-col gap-4">
-      <div>
-        <h1 className="text-lg font-semibold">Sessions</h1>
-        <p className="mt-1 max-w-prose text-xs text-[var(--color-muted)]">
-          Every admin session the server currently honours, including other
-          browsers. Revoking one is audited against your principal.
-        </p>
-      </div>
+      <PageHeader
+        title="Sessions"
+        lede="Every admin session the server currently honours, including other browsers. Revoking one is audited against your principal."
+      />
 
       {sessions.isPending && <p className="text-sm text-[var(--color-muted)]">Loading…</p>}
       {sessions.isError && <EmptyState title="Could not load sessions" detail={String(sessions.error)} />}
@@ -57,31 +53,31 @@ export default function Sessions() {
         />
       )}
       {rows.length > 0 && (
-        <table className="w-full text-left text-xs">
+        <table className="data-table">
           <thead>
-            <tr className="text-[var(--color-muted)]">
-              <th className="py-1 pr-3 font-medium">Session</th>
-              <th className="py-1 pr-3 font-medium">Principal</th>
-              <th className="py-1 pr-3 font-medium">Started</th>
-              <th className="py-1 pr-3 font-medium">Last seen</th>
-              <th className="py-1 pr-3 font-medium">Expires</th>
-              <th className="py-1 pr-3 font-medium">Client IP</th>
-              <th className="py-1 font-medium" aria-label="actions" />
+            <tr>
+              <th>Session</th>
+              <th>Principal</th>
+              <th>Started</th>
+              <th>Last seen</th>
+              <th>Expires</th>
+              <th>Client IP</th>
+              <th aria-label="actions" />
             </tr>
           </thead>
           <tbody>
             {rows.map((r) => (
-              <tr key={r.session_id} className="border-t border-[var(--color-border)]">
-                <td className="py-1.5 pr-3 font-mono">{r.session_id}</td>
-                <td className="py-1.5 pr-3">
+              <tr key={r.session_id}>
+                <td className="font-mono text-xs">{r.session_id}</td>
+                <td>
                   {r.principal || r.principal_id || "—"}
-                  {r.expired && <span className="ml-2 text-[var(--color-muted)]">expired</span>}
+                  {r.expired && <span className="ml-2 text-xs text-[var(--color-faint)]">expired</span>}
                 </td>
-                <td className="py-1.5 pr-3">{r.created_at?.replace("T", " ").slice(0, 19) ?? "—"}</td>
-                <td className="py-1.5 pr-3">{r.last_seen_at?.replace("T", " ").slice(0, 19) ?? "—"}</td>
-                <td className="py-1.5 pr-3">{r.expires_at?.replace("T", " ").slice(0, 19) ?? "—"}</td>
-                <td className="py-1.5 pr-3 font-mono">{r.client_ip ?? "—"}</td>
-                <td className="py-1.5 text-right">
+                <td className="tnum text-xs">{r.created_at?.replace("T", " ").slice(0, 19) ?? "—"}</td>
+                <td className="tnum text-xs">{r.last_seen_at?.replace("T", " ").slice(0, 19) ?? "—"}</td>
+                <td className="tnum text-xs">{r.expires_at?.replace("T", " ").slice(0, 19) ?? "—"}</td>
+                <td className="font-mono text-xs">{r.client_ip ?? "—"}</td>
+                <td className="text-right">
                   {!r.expired && (
                     <button
                       type="button"
@@ -90,7 +86,7 @@ export default function Sessions() {
                         setError(null);
                       }}
                       disabled={!canAdmin}
-                      className={buttonClass}
+                      className={buttonStyles({ variant: "ghost", size: "sm" })}
                       title={canAdmin ? "Revoke this session" : "Revoking needs the admin role"}
                     >
                       Revoke
@@ -115,17 +111,16 @@ export default function Sessions() {
           </p>
         )}
         <div className="flex justify-end gap-2">
-          <button type="button" className={buttonClass} onClick={() => setRevokeId(null)}>
+          <Button variant="ghost" onClick={() => setRevokeId(null)}>
             Cancel
-          </button>
-          <button
-            type="button"
-            className="rounded-md border border-[var(--color-danger)] px-3 py-1.5 text-xs font-medium text-[var(--color-danger)]"
+          </Button>
+          <Button
+            variant="danger"
             disabled={revoke.isPending}
             onClick={() => revokeId && revoke.mutate(revokeId)}
           >
             Revoke session
-          </button>
+          </Button>
         </div>
       </Modal>
     </section>

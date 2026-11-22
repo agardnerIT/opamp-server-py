@@ -19,6 +19,9 @@ import { Diff } from "./Diff";
 import { RolloutMonitor } from "./RolloutMonitor";
 import { Modal } from "../Modal";
 import { StatusBadge } from "../StatusBadge";
+import { Button } from "../ui/Button";
+import { Checkbox } from "../ui/Checkbox";
+import { Notice } from "../ui/Toast";
 import { useSession } from "../../api/session";
 
 /**
@@ -227,8 +230,8 @@ export function ComposeStepper() {
     enabled: !!proposal && unchecked,
   });
 
-  const stepClass = "rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4";
-  const stepTitle = "mb-2 text-sm font-semibold";
+  const stepClass = "card p-4";
+  const stepTitle = "mb-3 text-sm font-semibold";
 
   return (
     <div className="flex flex-col gap-4" data-testid="compose-stepper">
@@ -248,10 +251,10 @@ export function ComposeStepper() {
               }}
               aria-pressed={targetMode === mode}
               className={
-                "rounded-md border px-3 py-1 " +
+                "inline-flex h-7 items-center rounded-[var(--radius-sm)] border px-3 text-xs font-medium transition-colors duration-[var(--duration-fast)] ease-[var(--ease-out)] " +
                 (targetMode === mode
-                  ? "border-[var(--color-accent)] bg-[color-mix(in_srgb,var(--color-accent)_15%,transparent)]"
-                  : "border-[var(--color-border)] text-[var(--color-muted)]")
+                  ? "border-[var(--color-accent)]/50 bg-[var(--color-accent-soft)] text-[var(--color-accent-strong)]"
+                  : "border-[var(--color-border)] text-[var(--color-muted)] hover:text-[var(--color-text)]")
               }
             >
               {mode === "agents" ? "Ad-hoc selection" : "Saved group"}
@@ -260,56 +263,55 @@ export function ComposeStepper() {
         </div>
 
         {targetMode === "agents" ? (
-          <div className="max-h-64 overflow-auto rounded-md border border-[var(--color-border)]">
-            <table className="w-full text-xs">
-              <thead className="sticky top-0 bg-[var(--color-surface)] text-left text-[var(--color-muted)]">
+          <div className="card-2 max-h-64 overflow-auto">
+            <table className="data-table">
+              <thead className="sticky top-0 z-10 bg-[var(--color-surface-2)]">
                 <tr>
-                  <th className="w-8 px-2 py-1.5" aria-label="Select" />
-                  <th className="px-2 py-1.5 font-medium">Agent</th>
-                  <th className="px-2 py-1.5 font-medium">Name</th>
-                  <th className="px-2 py-1.5 font-medium">Health</th>
-                  <th className="px-2 py-1.5 font-medium">Config</th>
-                  <th className="px-2 py-1.5 font-medium">Accepts config</th>
+                  <th className="w-8" aria-label="Select" />
+                  <th>Agent</th>
+                  <th>Name</th>
+                  <th>Health</th>
+                  <th>Config</th>
+                  <th>Accepts config</th>
                 </tr>
               </thead>
               <tbody>
                 {(agents.data?.agents ?? []).map((agent: AgentEntry) => {
                   const accepts = (agent.capabilities & 0x2) !== 0;
                   return (
-                    <tr key={agent.id} className="border-t border-[var(--color-border)]">
-                      <td className="px-2 py-1.5">
-                        <input
-                          type="checkbox"
-                          aria-label={`Select ${agent.name ?? agent.id}`}
+                    <tr key={agent.id}>
+                      <td>
+                        <Checkbox
+                          label={<span className="sr-only">Select {agent.name ?? agent.id}</span>}
                           checked={selectedIds.has(agent.id)}
-                          onChange={(e) => {
-                            const next = new Set(selectedIds);
-                            if (e.target.checked) next.add(agent.id);
-                            else next.delete(agent.id);
-                            setSelectedIds(next);
+                          onChange={(next) => {
+                            const nextIds = new Set(selectedIds);
+                            if (next) nextIds.add(agent.id);
+                            else nextIds.delete(agent.id);
+                            setSelectedIds(nextIds);
                             setVerdict(null);
                             setProposal(null);
                           }}
                         />
                       </td>
-                      <td className="px-2 py-1.5 font-mono">{agent.id}</td>
-                      <td className="px-2 py-1.5">{agent.name ?? "—"}</td>
-                      <td className="px-2 py-1.5">
+                      <td className="font-mono text-xs">{agent.id}</td>
+                      <td className="text-xs">{agent.name ?? "—"}</td>
+                      <td>
                         <StatusBadge
                           tone={agent.healthy === true ? "ok" : agent.healthy === false ? "danger" : "muted"}
                           label={agent.healthy === true ? "Healthy" : agent.healthy === false ? "Unhealthy" : "Unknown"}
                         />
                       </td>
-                      <td className="px-2 py-1.5">
+                      <td>
                         <StatusBadge status={agent.remote_config_status} />
                       </td>
-                      <td className="px-2 py-1.5">{accepts ? "yes" : "no"}</td>
+                      <td className="text-xs">{accepts ? "yes" : "no"}</td>
                     </tr>
                   );
                 })}
                 {(agents.data?.agents.length ?? 0) === 0 && (
                   <tr>
-                    <td colSpan={6} className="px-2 py-3 text-center text-[var(--color-muted)]">
+                    <td colSpan={6} className="py-3 text-center text-xs text-[var(--color-muted)]">
                       No agents connected.
                     </td>
                   </tr>
@@ -328,7 +330,7 @@ export function ComposeStepper() {
                 setProposal(null);
                 setPlan(null);
               }}
-              className="w-full max-w-sm rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-sm"
+              className="field max-w-sm"
             >
               <option value="">Choose a saved group…</option>
               {(groups.data?.groups ?? []).map((g) => (
@@ -382,7 +384,7 @@ export function ComposeStepper() {
             <select
               value={contentType}
               onChange={(e) => setContentType(e.target.value)}
-              className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-sm"
+              className="field"
             >
               {CONTENT_TYPES.map((ct) => (
                 <option key={ct}>{ct}</option>
@@ -396,7 +398,7 @@ export function ComposeStepper() {
               value={objectKey}
               onChange={(e) => setObjectKey(e.target.value)}
               placeholder="empty for an unnamed object (collector)"
-              className="w-64 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-sm"
+              className="field w-64"
             />
           </label>
           <label className="flex flex-col gap-1 text-xs">
@@ -404,7 +406,7 @@ export function ComposeStepper() {
             <select
               value={prefillId}
               onChange={(e) => setPrefillId(e.target.value)}
-              className="w-64 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-sm"
+              className="field w-64"
             >
               <option value="">(none)</option>
               {(agents.data?.agents ?? []).map((a) => (
@@ -414,19 +416,14 @@ export function ComposeStepper() {
               ))}
             </select>
           </label>
-          <button
-            type="button"
-            onClick={prefill}
-            disabled={!prefillId || !diffAgent.data}
-            className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs disabled:opacity-40"
-          >
+          <Button size="sm" onClick={prefill} disabled={!prefillId || !diffAgent.data}>
             Prefill from this agent
-          </button>
+          </Button>
         </div>
         {prefillNote && (
-          <p className={`mb-2 text-xs ${prefillNote.tone === "warn" ? "text-[var(--color-warn)]" : "text-[var(--color-muted)]"}`}>
+          <Notice kind={prefillNote.tone} className="mb-2">
             {prefillNote.text}
-          </p>
+          </Notice>
         )}
         <textarea
           aria-label="Config body"
@@ -434,7 +431,7 @@ export function ComposeStepper() {
           onChange={(e) => setBody(e.target.value)}
           rows={12}
           spellCheck={false}
-          className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-3 font-mono text-xs"
+          className="field font-mono text-xs leading-relaxed"
         />
         {bodyIsRedacted && (
           <p className="mt-2 text-xs text-[var(--color-danger)]">
@@ -448,15 +445,13 @@ export function ComposeStepper() {
       <section className={stepClass}>
         <h2 className={stepTitle}>3. Review</h2>
         <div className="flex items-center gap-3">
-          <button
-            type="button"
+          <Button
             disabled={!body.trim() || bodyIsRedacted || ids.length === 0 || !canOperator || validate.isPending}
             onClick={() => validate.mutate()}
-            className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs disabled:opacity-40"
           >
             {validate.isPending ? "Validating…" : "Validate"}
-          </button>
-          <span className="text-[11px] text-[var(--color-muted)]">
+          </Button>
+          <span className="text-xs text-[var(--color-muted)]">
             The #100 pipeline, no storage — nothing is proposed by validating.
           </span>
         </div>
@@ -479,23 +474,20 @@ export function ComposeStepper() {
           (or creates the rollout, which is the same decision).
         </p>
         {targetMode === "group" && confirmScopeChange && (
-          <label className="mb-2 flex items-center gap-2 text-xs">
-            <input
-              type="checkbox"
-              checked={confirmScopeChange}
-              onChange={(e) => setConfirmScopeChange(e.target.checked)}
-            />
-            Confirm the membership change this group produced (required when it resolved smaller)
-          </label>
+          <Checkbox
+            className="mb-2 flex items-start"
+            label={<span className="max-w-prose">Confirm the membership change this group produced (required when it resolved smaller)</span>}
+            checked={confirmScopeChange}
+            onChange={setConfirmScopeChange}
+          />
         )}
-        <button
-          type="button"
+        <Button
+          variant="primary"
           disabled={!body.trim() || bodyIsRedacted || ids.length === 0 || !canOperator || propose.isPending}
           onClick={() => propose.mutate()}
-          className="rounded-md border border-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-[var(--color-accent)] disabled:opacity-40"
         >
           {propose.isPending ? "Proposing…" : "Propose revision"}
-        </button>
+        </Button>
         {proposal && (
           <p className="mt-2 text-xs" data-testid="proposal-status">
             Proposal <span className="font-mono">{proposal.proposal_id}</span> — {proposal.agents} agent(s),
@@ -515,25 +507,19 @@ export function ComposeStepper() {
             </p>
           )}
           <div className="mb-3 flex flex-wrap items-center gap-2">
-            <button
-              type="button"
+            <Button
               disabled={dryRun.isPending}
               onClick={() => dryRun.mutate(null)}
-              className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs"
             >
               {dryRun.isPending ? "Planning…" : "Plan the rollout (dry run)"}
-            </button>
-            <button
-              type="button"
-              onClick={() => setRejectOpen(true)}
-              className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs"
-            >
+            </Button>
+            <Button onClick={() => setRejectOpen(true)}>
               Reject
-            </button>
+            </Button>
           </div>
 
           {plan && (
-            <div className="mb-3 rounded-md border border-[var(--color-border)] p-3 text-xs">
+            <div className="card-2 mb-3 p-3 text-xs">
               <p className="mb-2 font-medium">Rollout plan (nothing has been delivered)</p>
               <p className="text-[var(--color-muted)]">
                 {plan.batch.count} batch(es), canary {plan.batches[0]?.agents ?? 0} agent(s), health gate{" "}
@@ -548,7 +534,7 @@ export function ComposeStepper() {
                   step={5}
                   value={gate ?? plan.batch.health_gate_seconds}
                   onChange={(e) => setGate(Number.parseInt(e.target.value, 10))}
-                  className="w-32 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1 text-sm"
+                  className="field w-32"
                 />
               </label>
               {gate !== null && gate !== plan.batch.health_gate_seconds && (
@@ -557,47 +543,48 @@ export function ComposeStepper() {
                   approving — the batches do not change, the waiting does.
                 </p>
               )}
-              <label className="mt-3 flex items-center gap-2">
-                <input type="checkbox" checked={restart} onChange={(e) => setRestart(e.target.checked)} />
-                Restart each agent once its batch passes the gate
-              </label>
+              <Checkbox
+                className="mt-3"
+                label="Restart each agent once its batch passes the gate"
+                checked={restart}
+                onChange={setRestart}
+              />
               {gate !== null && (
-                <button
-                  type="button"
+                <Button
+                  size="sm"
+                  className="mt-2"
                   onClick={() => dryRun.mutate(gate)}
-                  className="mt-2 rounded-md border border-[var(--color-border)] px-3 py-1 text-xs"
                 >
                   Re-plan with this gate
-                </button>
+                </Button>
               )}
             </div>
           )}
 
           {proposalDetail.data && proposalDetail.data.revisions.some((r) => r.verdict?.structure_checked === false) && (
-            <label className="mb-3 flex items-start gap-2 text-xs text-[var(--color-warn)]">
-              <input
-                type="checkbox"
-                checked={confirmUnchecked}
-                onChange={(e) => setConfirmUnchecked(e.target.checked)}
-              />
-              <span>
-                <strong>No structural checks ran for this agent type</strong> — validation covered the
-                bytes and the object name, nothing about what the agent will do with the document. A
-                config that stops it starting cannot be noticed here. (Recorded in the audit log.)
-              </span>
-            </label>
+            <Checkbox
+              className="mb-3 items-start"
+              label={
+                <span className="max-w-prose text-[var(--color-warn)]">
+                  <strong>No structural checks ran for this agent type</strong> — validation covered the
+                  bytes and the object name, nothing about what the agent will do with the document. A
+                  config that stops it starting cannot be noticed here. (Recorded in the audit log.)
+                </span>
+              }
+              checked={confirmUnchecked}
+              onChange={setConfirmUnchecked}
+            />
           )}
 
-          <button
-            type="button"
+          <Button
+            variant="primary"
             data-testid="approve-rollout"
             disabled={!canApprover || (unchecked && !confirmUnchecked) || approve.isPending}
             onClick={() => approve.mutate()}
-            className="rounded-md border border-[var(--color-accent)] bg-[color-mix(in_srgb,var(--color-accent)_18%,transparent)] px-3 py-1.5 text-xs font-medium disabled:opacity-40"
           >
             {approve.isPending ? "Creating rollout…" : "Approve & roll out"}
-          </button>
-          <p className="mt-1 text-[11px] text-[var(--color-muted)]">
+          </Button>
+          <p className="mt-1 text-xs text-[var(--color-muted)]">
             Creates the rollout: approves the proposal, releases the canary only.
           </p>
         </section>
@@ -612,9 +599,9 @@ export function ComposeStepper() {
       )}
 
       {error && (
-        <p className="text-sm text-[var(--color-danger)]" role="alert" data-testid="stepper-error">
-          {error}
-        </p>
+        <div data-testid="stepper-error" role="alert">
+          <Notice kind="error">{error}</Notice>
+        </div>
       )}
 
       <Modal open={rejectOpen} title="Reject this proposal?" onClose={() => setRejectOpen(false)}>
@@ -629,20 +616,19 @@ export function ComposeStepper() {
           type="text"
           value={rejectReason}
           onChange={(e) => setRejectReason(e.target.value)}
-          className="mb-4 w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-sm"
+          className="field mb-4"
         />
         <div className="flex justify-end gap-2">
-          <button type="button" onClick={() => setRejectOpen(false)} className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs">
+          <Button variant="ghost" onClick={() => setRejectOpen(false)}>
             Cancel
-          </button>
-          <button
-            type="button"
+          </Button>
+          <Button
+            variant="danger"
             data-testid="confirm-reject"
             onClick={() => reject.mutate()}
-            className="rounded-md border border-[var(--color-danger)] px-3 py-1.5 text-xs font-medium text-[var(--color-danger)]"
           >
             Reject
-          </button>
+          </Button>
         </div>
       </Modal>
     </div>

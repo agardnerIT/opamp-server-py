@@ -20,6 +20,9 @@ import { Section } from "../components/Section";
 import { SqlSearch } from "../components/SqlSearch";
 import { StatusBadge } from "../components/StatusBadge";
 import { AgentTypeBadge } from "../components/AgentTypeBadge";
+import { PageHeader } from "../components/ui/PageHeader";
+import { Button } from "../components/ui/Button";
+import { Notice } from "../components/ui/Toast";
 import { getAgentTypes } from "../api/endpoints";
 
 /**
@@ -167,35 +170,20 @@ export default function Groups() {
     onError: (error) => setNotice({ tone: "error", text: `Group refused: ${errorText(error)}` }),
   });
 
-  const inputClass =
-    "w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-sm";
-
   return (
     <section className="flex flex-col gap-4">
-      <div className="flex items-baseline justify-between">
-        <h1 className="text-lg font-semibold">Groups</h1>
-        <span className="text-xs text-[var(--color-muted)]">
-          {groups.data ? `${groups.data.count} saved` : ""}
-        </span>
-      </div>
-      <p className="max-w-prose text-xs text-[var(--color-muted)]">
-        A group is a <strong>saved SQL selection</strong>: search first, then name the query.
-        Membership is resolved on read, so a group cannot drift from the fleet.
-      </p>
+      <PageHeader
+        title="Groups"
+        lede={
+          <>
+            A group is a <strong>saved SQL selection</strong>: search first, then name the query.
+            Membership is resolved on read, so a group cannot drift from the fleet.
+          </>
+        }
+        meta={groups.data ? `${groups.data.count} saved` : undefined}
+      />
 
-      {notice && (
-        <p
-          role="status"
-          className={
-            "rounded-md border px-3 py-2 text-xs " +
-            (notice.tone === "ok"
-              ? "border-[var(--color-border)] text-[var(--color-text)]"
-              : "border-[var(--color-danger)]/60 text-[var(--color-danger)]")
-          }
-        >
-          {notice.text}
-        </p>
-      )}
+      {notice && <Notice kind={notice.tone === "ok" ? "ok" : "error"}>{notice.text}</Notice>}
 
       {/* 1. Search agents ------------------------------------------------ */}
       <Section
@@ -212,7 +200,7 @@ export default function Groups() {
                   const group = byName.get(e.target.value);
                   loadQuery(group?.query ?? "");
                 }}
-                className={inputClass}
+                className="field"
               >
                 <option value="">— choose a saved group —</option>
                 {[...byName.keys()].sort().map((name) => (
@@ -247,43 +235,43 @@ export default function Groups() {
                 </p>
               )}
               {(search.data?.agents ?? []).length > 0 && (
-                <div className="mt-2 overflow-x-auto rounded-lg border border-[var(--color-border)]">
-                  <table className="w-full min-w-[40rem] text-left text-sm">
+                <div className="card mt-2 overflow-x-auto">
+                  <table className="data-table min-w-[40rem]">
                     <thead>
-                      <tr className="border-b border-[var(--color-border)] text-xs uppercase tracking-wide text-[var(--color-muted)]">
-                        <th scope="col" className="px-3 py-2 font-medium">Agent</th>
-                        <th scope="col" className="px-3 py-2 font-medium">Service</th>
-                        <th scope="col" className="px-3 py-2 font-medium">Health</th>
-                        <th scope="col" className="px-3 py-2 font-medium">Config</th>
-                        <th scope="col" className="px-3 py-2 font-medium">Type</th>
-                        <th scope="col" className="px-3 py-2 font-medium">Environment</th>
+                      <tr>
+                        <th>Agent</th>
+                        <th>Service</th>
+                        <th>Health</th>
+                        <th>Config</th>
+                        <th>Type</th>
+                        <th>Environment</th>
                       </tr>
                     </thead>
                     <tbody>
                       {search.data!.agents.map((agent) => (
-                        <tr key={agent.id} className="border-b border-[var(--color-border)] last:border-0">
-                          <td className="px-3 py-2">
+                        <tr key={agent.id}>
+                          <td>
                             <Link
                               to="/agents/$agentId"
                               params={{ agentId: agent.id }}
-                              className="font-medium hover:text-[var(--color-accent)] hover:underline"
+                              className="font-medium hover:text-[var(--color-accent-strong)] hover:underline"
                               title={agent.id}
                             >
                               {agent.name ?? <em className="text-[var(--color-muted)]">unnamed</em>}
                             </Link>
                           </td>
-                          <td className="px-3 py-2 text-xs">{attrValue(agent.description, "service.name") ?? "—"}</td>
-                          <td className="px-3 py-2 text-xs">
+                          <td className="text-xs">{attrValue(agent.description, "service.name") ?? "—"}</td>
+                          <td>
                             <StatusBadge
                               tone={agent.healthy === true ? "ok" : agent.healthy === false ? "danger" : "muted"}
                               label={agent.healthy === true ? "Healthy" : agent.healthy === false ? "Unhealthy" : "Unknown"}
                             />
                           </td>
                           <td className="px-3 py-2 text-xs"><StatusBadge status={agent.remote_config_status} /></td>
-                          <td className="px-3 py-2 text-xs">
+                          <td>
                             <AgentTypeBadge agentType={agent.agent_type} source={agent.agent_type_source} profiles={types.data?.types} />
                           </td>
-                          <td className="px-3 py-2 text-xs">{attrValue(agent.description, "deployment.environment") ?? "—"}</td>
+                          <td className="text-xs">{attrValue(agent.description, "deployment.environment") ?? "—"}</td>
                         </tr>
                       ))}
                     </tbody>
@@ -297,21 +285,21 @@ export default function Groups() {
               <summary className="cursor-pointer text-xs text-[var(--color-muted)] hover:text-[var(--color-text)]">
                 Columns and values observed on connected agents
               </summary>
-              <div className="mt-2 overflow-x-auto rounded-md border border-[var(--color-border)]">
-                <table className="w-full text-left text-xs">
+              <div className="card-2 mt-2 overflow-x-auto">
+                <table className="data-table">
                   <thead>
-                    <tr className="border-b border-[var(--color-border)] text-[var(--color-muted)]">
-                      <th scope="col" className="px-2 py-1.5 font-medium">Column</th>
-                      <th scope="col" className="px-2 py-1.5 font-medium">Agents</th>
-                      <th scope="col" className="px-2 py-1.5 font-medium">Values</th>
+                    <tr>
+                      <th>Column</th>
+                      <th>Agents</th>
+                      <th>Values</th>
                     </tr>
                   </thead>
                   <tbody>
                     {attributeColumns.map((c) => (
-                      <tr key={c.name} className="border-b border-[var(--color-border)] last:border-0">
-                        <td className="px-2 py-1.5 font-mono">{c.sql_name}</td>
-                        <td className="px-2 py-1.5">{c.agent_count}</td>
-                        <td className="px-2 py-1.5 font-mono text-[var(--color-muted)]">
+                      <tr key={c.name}>
+                        <td className="font-mono text-xs">{c.sql_name}</td>
+                        <td className="tnum text-xs">{c.agent_count}</td>
+                        <td className="font-mono text-xs text-[var(--color-muted)]">
                           {(c.values ?? []).join(", ").slice(0, 120)}
                         </td>
                       </tr>
@@ -348,23 +336,23 @@ export default function Groups() {
               onChange={(e) => setNewName(e.target.value)}
               placeholder="macos-au"
               required
-              className={inputClass}
+              className="field"
             />
-            <span className="text-[10px] text-[var(--color-muted)]">
+            <span className="text-xs text-[var(--color-faint)]">
               Lowercase a-z, 0-9, '.', '_' and '-'; unique regardless of case.
             </span>
           </label>
           <label className="flex flex-col gap-1 text-xs">
             <span className="font-medium">Owner</span>
-            <input value={newOwner} onChange={(e) => setNewOwner(e.target.value)} placeholder="platform-oncall" className={inputClass} />
+            <input value={newOwner} onChange={(e) => setNewOwner(e.target.value)} placeholder="platform-oncall" className="field" />
           </label>
           <label className="flex flex-col gap-1 text-xs">
             <span className="font-medium">Force in (agent ids, comma separated)</span>
-            <input value={newInclude} onChange={(e) => setNewInclude(e.target.value)} className={inputClass} />
+            <input value={newInclude} onChange={(e) => setNewInclude(e.target.value)} className="field" />
           </label>
           <label className="flex flex-col gap-1 text-xs">
             <span className="font-medium">Force out (agent ids, comma separated)</span>
-            <input value={newExclude} onChange={(e) => setNewExclude(e.target.value)} className={inputClass} />
+            <input value={newExclude} onChange={(e) => setNewExclude(e.target.value)} className="field" />
           </label>
           <label className="flex flex-col gap-1 text-xs md:col-span-2">
             <span className="font-medium">Description</span>
@@ -372,21 +360,21 @@ export default function Groups() {
               value={newDescription}
               onChange={(e) => setNewDescription(e.target.value)}
               placeholder="macOS gateways in Australia. Owner: platform-oncall."
-              className={inputClass}
+              className="field"
             />
           </label>
           <div className="md:col-span-2">
-            <p className="mb-2 text-[11px] text-[var(--color-muted)]">
+            <p className="mb-2 text-xs text-[var(--color-muted)]">
               Query saved: <code className="font-mono">{editorText.trim() || DEFAULT_SQL}</code> — pins are human overrides
               that still apply when the query does not match.
             </p>
-            <button
+            <Button
               type="submit"
+              variant="primary"
               disabled={!canOperator || createMutation.isPending}
-              className="rounded-md border border-[var(--color-accent)] bg-[var(--color-accent)]/10 px-3 py-1.5 text-sm disabled:opacity-40"
             >
               Save group
-            </button>
+            </Button>
           </div>
         </form>
       </Section>
@@ -400,16 +388,16 @@ export default function Groups() {
           />
         ) : (
           <div className="flex flex-col gap-3">
-            <div className="overflow-x-auto rounded-lg border border-[var(--color-border)]">
-              <table className="w-full min-w-[40rem] text-left text-sm">
+            <div className="card overflow-x-auto">
+              <table className="data-table min-w-[40rem]">
                 <thead>
-                  <tr className="border-b border-[var(--color-border)] text-xs uppercase tracking-wide text-[var(--color-muted)]">
-                    <th scope="col" className="px-3 py-2 font-medium">Group</th>
-                    <th scope="col" className="px-3 py-2 font-medium">Kind</th>
-                    <th scope="col" className="px-3 py-2 font-medium">Members</th>
-                    <th scope="col" className="px-3 py-2 font-medium">Health-defined</th>
-                    <th scope="col" className="px-3 py-2 font-medium">Owner</th>
-                    <th scope="col" className="px-3 py-2 font-medium">Updated</th>
+                  <tr>
+                    <th>Group</th>
+                    <th>Kind</th>
+                    <th>Members</th>
+                    <th>Health-defined</th>
+                    <th>Owner</th>
+                    <th>Updated</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -418,16 +406,16 @@ export default function Groups() {
                       key={g.group_id}
                       onClick={() => selectGroup(g.name)}
                       className={
-                        "cursor-pointer border-b border-[var(--color-border)] last:border-0 hover:bg-[var(--color-bg)] " +
-                        (g.name === selectedName ? "bg-[var(--color-bg)]" : "")
+                        "cursor-pointer " +
+                        (g.name === selectedName ? "bg-[var(--color-surface-2)]" : "")
                       }
                     >
-                      <td className="px-3 py-2 font-medium">{g.name}</td>
-                      <td className="px-3 py-2 text-xs">{g.selector_kind}</td>
-                      <td className="px-3 py-2 text-xs">{g.member_count}</td>
-                      <td className="px-3 py-2 text-xs">{g.health_defined.join(", ") || "—"}</td>
-                      <td className="px-3 py-2 text-xs">{g.owner ?? "—"}</td>
-                      <td className="px-3 py-2 text-xs">{formatWhen(g.updated_at)}</td>
+                      <td className="font-medium">{g.name}</td>
+                      <td className="text-xs">{g.selector_kind}</td>
+                      <td className="tnum text-xs">{g.member_count}</td>
+                      <td className="text-xs">{g.health_defined.join(", ") || "—"}</td>
+                      <td className="text-xs">{g.owner ?? "—"}</td>
+                      <td className="tnum text-xs">{formatWhen(g.updated_at)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -435,7 +423,7 @@ export default function Groups() {
             </div>
 
             {selected && (
-              <div data-testid="group-detail" className="rounded-md border border-[var(--color-border)] p-3">
+              <div data-testid="group-detail" className="card-2 p-3">
                 <div className="mb-2 flex items-baseline justify-between gap-3">
                   <h3 className="text-sm font-semibold">{selected.name}</h3>
                   <span className="text-xs text-[var(--color-muted)]">
@@ -444,7 +432,7 @@ export default function Groups() {
                   </span>
                 </div>
                 {selected.selector_kind === "query" ? (
-                  <pre className="overflow-x-auto rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-2 font-mono text-xs">
+                  <pre className="overflow-x-auto rounded-[var(--radius-sm)] bg-[var(--color-bg)] p-2 font-mono text-xs">
                     {selected.query}
                   </pre>
                 ) : (
@@ -470,7 +458,7 @@ export default function Groups() {
                 )}
 
                 {preview && (
-                  <div data-testid="group-preview" className="mt-2 rounded-md border border-[var(--color-border)] p-2 text-xs">
+                  <div data-testid="group-preview" className="mt-2 rounded-[var(--radius-sm)] bg-[var(--color-bg)] p-2 text-xs">
                     <p>
                       Members now: <strong>{preview.count}</strong> · previously {preview.previous_count} ·{" "}
                       {preview.dropped.length} dropped · {preview.added.length} added
@@ -481,22 +469,21 @@ export default function Groups() {
                 )}
 
                 <div className="mt-3 flex flex-wrap gap-2">
-                  <button
-                    type="button"
+                  <Button
+                    size="sm"
                     onClick={() => previewMutation.mutate(selected.name)}
                     disabled={previewMutation.isPending}
-                    className="rounded-md border border-[var(--color-border)] px-2 py-1 text-xs hover:text-[var(--color-text)]"
                   >
                     Preview membership
-                  </button>
-                  <button
-                    type="button"
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="danger"
                     onClick={() => setDeleteOpen(true)}
                     disabled={!canOperator}
-                    className="rounded-md border border-[var(--color-border)] px-2 py-1 text-xs text-[var(--color-danger)] disabled:opacity-40"
                   >
                     Delete group
-                  </button>
+                  </Button>
                 </div>
 
                 <form
@@ -515,7 +502,7 @@ export default function Groups() {
                       onChange={(e) => setEditQuery(e.target.value)}
                       rows={3}
                       spellCheck={false}
-                      className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-2 font-mono text-xs"
+                      className="field font-mono text-xs"
                       placeholder={selected.query ? "" : "SELECT * FROM agents WHERE ..."}
                     />
                   </label>
@@ -524,17 +511,17 @@ export default function Groups() {
                     <input
                       value={editDescription ?? selected.description ?? ""}
                       onChange={(e) => setEditDescription(e.target.value)}
-                      className={inputClass}
+                      className="field"
                     />
                   </label>
                   <div>
-                    <button
+                    <Button
                       type="submit"
+                      size="sm"
                       disabled={!canOperator || editMutation.isPending}
-                      className="rounded-md border border-[var(--color-border)] px-2 py-1 text-xs disabled:opacity-40"
                     >
                       Save query
-                    </button>
+                    </Button>
                   </div>
                 </form>
               </div>
@@ -550,21 +537,16 @@ export default function Groups() {
           delete with 409.
         </p>
         <div className="mt-4 flex justify-end gap-2">
-          <button
-            type="button"
-            onClick={() => setDeleteOpen(false)}
-            className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs"
-          >
+          <Button variant="ghost" onClick={() => setDeleteOpen(false)}>
             Cancel
-          </button>
-          <button
-            type="button"
+          </Button>
+          <Button
+            variant="danger"
             onClick={() => deleteMutation.mutate(selectedName)}
             disabled={deleteMutation.isPending}
-            className="rounded-md border border-[var(--color-danger)]/60 bg-[var(--color-danger)]/10 px-3 py-1.5 text-xs text-[var(--color-danger)]"
           >
             Delete group
-          </button>
+          </Button>
         </div>
       </Modal>
     </section>

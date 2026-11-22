@@ -12,6 +12,10 @@ import { roleAtLeast } from "../lib/roles";
 import { EmptyState } from "../components/EmptyState";
 import { Modal } from "../components/Modal";
 import { Section } from "../components/Section";
+import { PageHeader } from "../components/ui/PageHeader";
+import { Button, buttonStyles } from "../components/ui/Button";
+import { Notice } from "../components/ui/Toast";
+import { StatusBadge } from "../components/StatusBadge";
 
 /**
  * Agent tokens (new-ui stage 8): mint a fleet token (shown once — the server
@@ -24,10 +28,12 @@ import { Section } from "../components/Section";
  * label, profile the snippet was minted for (#144), handle, cap usage.
  */
 
-const buttonClass =
-  "rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs hover:text-[var(--color-text)] disabled:opacity-40 disabled:hover:text-inherit";
-const inputClass =
-  "rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-sm";
+/** tone for the token state pill */
+function tokenTone(t: AgentTokenRow): string {
+  if (t.revoked_at) return "danger";
+  if (t.expired) return "muted";
+  return t.active ? "ok" : "muted";
+}
 
 function tokenState(t: AgentTokenRow): string {
   if (t.revoked_at) return "revoked";
@@ -85,13 +91,12 @@ export default function AgentTokens() {
 
   return (
     <section className="flex flex-col gap-4">
-      <div>
-        <h1 className="text-lg font-semibold">Agent tokens</h1>
-        <p className="mt-1 max-w-prose text-xs text-[var(--color-muted)]">
-          The credentials agents present on <code>/v1/opamp</code>. A fleet
-          token is not tied to an agent id and serves up to its cap.
-        </p>
-      </div>
+      <PageHeader
+        title="Agent tokens"
+        lede={
+          <>The credentials agents present on <code className="font-mono">/v1/opamp</code>. A fleet token is not tied to an agent id and serves up to its cap.</>
+        }
+      />
 
       <Section
         title="Mint a token"
@@ -110,7 +115,7 @@ export default function AgentTokens() {
               type="text"
               value={label}
               onChange={(e) => setLabel(e.target.value)}
-              className={inputClass}
+              className="field"
               placeholder="prod"
             />
           </label>
@@ -119,7 +124,7 @@ export default function AgentTokens() {
             <select
               value={agentType}
               onChange={(e) => setAgentType(e.target.value)}
-              className={inputClass}
+              className="field"
             >
               <option value="">default</option>
               {(types.data?.types ?? []).map((t) => (
@@ -137,7 +142,7 @@ export default function AgentTokens() {
               max={365}
               value={expiresDays}
               onChange={(e) => setExpiresDays(e.target.value)}
-              className={`${inputClass} w-28`}
+              className="field w-28"
               placeholder="never"
             />
           </label>
@@ -148,13 +153,13 @@ export default function AgentTokens() {
               min={1}
               value={maxAgents}
               onChange={(e) => setMaxAgents(e.target.value)}
-              className={`${inputClass} w-28`}
+              className="field w-28"
               placeholder="unlimited"
             />
           </label>
-          <button type="submit" className={buttonClass} disabled={mint.isPending || !canAdmin}>
+          <Button type="submit" variant="primary" disabled={mint.isPending || !canAdmin}>
             Mint token
-          </button>
+          </Button>
         </form>
         {!canAdmin && (
           <p className="mt-2 text-xs text-[var(--color-muted)]">
@@ -162,20 +167,21 @@ export default function AgentTokens() {
           </p>
         )}
         {mintError && (
-          <p role="alert" className="mt-2 text-xs text-[var(--color-danger)]">
+          <Notice kind="error" className="mt-3">
             {mintError}
-          </p>
+          </Notice>
         )}
         {minted && (
-          <div className="mt-3 rounded-md border border-[var(--color-accent)] p-3 text-xs">
-            <p className="font-medium text-[var(--color-warn)]">
+          <div className="card-2 mt-3 p-3">
+            <p className="flex items-center gap-2 text-[13px] font-medium text-[var(--color-warn)]">
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden><path d="M8 1.8l6 3v4.2c0 3-2.5 5-6 5.7-3.5-.7-6-2.7-6-5.7V4.8l6-3z" strokeLinejoin="round"/></svg>
               Copy it now — it will not be shown again.
             </p>
-            <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-all font-mono text-sm">
+            <pre className="mt-2 overflow-x-auto whitespace-pre-wrap break-all rounded-[var(--radius-sm)] bg-[var(--color-bg)] p-2.5 font-mono text-[13px]">
               {minted.token}
             </pre>
-            <p className="mt-2 text-[var(--color-muted)]">Snippet for the agents' config:</p>
-            <pre className="mt-1 overflow-x-auto whitespace-pre-wrap font-mono text-[11px] text-[var(--color-muted)]">
+            <p className="mt-2 text-xs text-[var(--color-muted)]">Snippet for the agents' config:</p>
+            <pre className="mt-1 overflow-x-auto whitespace-pre-wrap rounded-[var(--radius-sm)] bg-[var(--color-bg)] p-2.5 font-mono text-xs text-[var(--color-muted)]">
               {minted.collector_snippet}
             </pre>
           </div>
@@ -192,30 +198,30 @@ export default function AgentTokens() {
           />
         )}
         {tokens.data && tokens.data.tokens.length > 0 && (
-          <table className="w-full text-left text-xs">
+          <table className="data-table">
             <thead>
-              <tr className="text-[var(--color-muted)]">
-                <th className="py-1 pr-3 font-medium">State</th>
-                <th className="py-1 pr-3 font-medium">Label</th>
-                <th className="py-1 pr-3 font-medium">For</th>
-                <th className="py-1 pr-3 font-medium">Token</th>
-                <th className="py-1 pr-3 font-medium">Agents</th>
-                <th className="py-1 pr-3 font-medium">Expires</th>
-                <th className="py-1 font-medium" aria-label="actions" />
+              <tr>
+                <th>State</th>
+                <th>Label</th>
+                <th>For</th>
+                <th>Token</th>
+                <th>Agents</th>
+                <th>Expires</th>
+                <th aria-label="actions" />
               </tr>
             </thead>
             <tbody>
               {tokens.data.tokens.map((t) => (
-                <tr key={t.token_id} className="border-t border-[var(--color-border)]">
-                  <td className="py-1.5 pr-3">{tokenState(t)}</td>
-                  <td className="py-1.5 pr-3">{t.label ?? "—"}</td>
-                  <td className="py-1.5 pr-3">{t.agent_type ?? "—"}</td>
-                  <td className="py-1.5 pr-3 font-mono">{t.token_id}</td>
-                  <td className="py-1.5 pr-3">
+                <tr key={t.token_id}>
+                  <td><StatusBadge tone={tokenTone(t)} label={tokenState(t)} /></td>
+                  <td>{t.label ?? "—"}</td>
+                  <td className="text-xs">{t.agent_type ?? "—"}</td>
+                  <td className="font-mono text-xs">{t.token_id}</td>
+                  <td className="tnum text-xs">
                     {t.agents_used} of {t.max_agents ?? "unlimited"}
                   </td>
-                  <td className="py-1.5 pr-3">{t.expires_at ? t.expires_at.slice(0, 10) : "never"}</td>
-                  <td className="py-1.5 text-right">
+                  <td className="tnum text-xs">{t.expires_at ? t.expires_at.slice(0, 10) : "never"}</td>
+                  <td className="text-right">
                     {!t.revoked_at && !t.expired && (
                       <button
                         type="button"
@@ -224,7 +230,7 @@ export default function AgentTokens() {
                           setRevokeError(null);
                         }}
                         disabled={!canAdmin}
-                        className={buttonClass}
+                        className={buttonStyles({ variant: "ghost", size: "sm" })}
                         title={canAdmin ? "Revoke this token" : "Revoking needs the admin role"}
                       >
                         Revoke
@@ -250,17 +256,16 @@ export default function AgentTokens() {
           </p>
         )}
         <div className="flex justify-end gap-2">
-          <button type="button" className={buttonClass} onClick={() => setRevokeId(null)}>
+          <Button variant="ghost" onClick={() => setRevokeId(null)}>
             Cancel
-          </button>
-          <button
-            type="button"
-            className="rounded-md border border-[var(--color-danger)] px-3 py-1.5 text-xs font-medium text-[var(--color-danger)]"
+          </Button>
+          <Button
+            variant="danger"
             disabled={revoke.isPending}
             onClick={() => revokeId && revoke.mutate(revokeId)}
           >
             Revoke token
-          </button>
+          </Button>
         </div>
       </Modal>
     </section>

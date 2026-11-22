@@ -617,3 +617,29 @@ Improvements found while building stage 8; none block stage 9.
   password-only (current server model is password-only).
 - Light mode: dark-only for v1?
 - Where the UI should surface the audit log (#97) — read-only view in Admin?
+
+
+## Bugfixes and Changes 1
+
+- The homepage is the agents screen. Perhaps it should be a more generic landing page showing people the system
+- The agents page search box that accepts SQL: When I type `S` for `SELECT` the dropdown immediately shows me `capabilities` instead of `SELECT`
+- The agents homepage: When no agents are connected it should show me a "quickstart guide". I choose an agent type I want to connect, I can generate an API token and it gives me the snippet. Let's be friendly to newbie users and get them up and running quickly
+- The reports page: As above, when no agents are connected I should see a quickstart
+- The "remote config" page: Is this warning still true? "Config push is blocked by the security posture. Unmet: the server is not served over TLS: set PUBLIC_URL=https://<host> behind a TLS terminator, or TLS_TERMINATED_UPSTREAM=true once the proxy is in place (see docker/nginx.conf and docker/Caddyfile), config bodies would be stored unencrypted: set CONFIG_AT_REST_KEY to a base64-encoded 32-byte key (generate one with: python -c "import os,base64; print(base64.b64encode(os.urandom(32)).decode())") — or, for local development only, set OPAMP_ALLOW_PLAINTEXT_CONFIG_STORAGE=true and accept that any copy of the database exposes every exporter credential in the fleet (#98). Push stays refused until every requirement is met." I don't think it needs to be that prominent. Just an (i) modal or something or a "running in read only mode" would suffice. Plus I don't think it's even true. I'm sure I can push config the way it's running right now.
+- The "remote config" page: I have a saved group "test-group-1" and I click "saved group" button and I get an error:
+  Something went wrong
+Cannot access 'selectedGroup' before initialization.
+Try again
+Back to Agents
+- The UI should run on the original UI port of 8501
+- The help page looks horrible and needs a redesign / relayout
+- Alerts page: When I land on the alerts page, the "new agent" alert is prefilled. But when I try to check the "enabled" box it doesn't work. If I toggle to "agent disconnected" that enabled checkbox work. If I toggle back to "new agent" the "enabled" checkbox now works. Also, the checkboxes are tiny. Is there a standard UI framework or CSS library or something we can use?
+- Alerts page: It MIGHT be clear to some users what each alert type is for, but one sentence saying "receive an alert when a new agent connects to this server" is so much more user friendly
+- Is the UI mobile friendly? If not, make it so. We will NOT be designing a seperate mobile native app so this UI needs to work for both
+- Compliance page: It says "OPA is not enabled
+This server was started without an OPA connection, so there are no policies to validate and no checks to run." but doesn't point me anywhere (or give me an (i) hint) HOW I enable this or how I write policies or anything?
+- This system is agent friendly: if a user has their own OpenAI compatible endpoint + token (eg. OpenAI, opencode, openrouter, Claude code etc.) could we give them the option to enter their details and have their AI drive this in a chat/agent native way? We can't provide an LLM but if they Bring Your Own Agent then we could?
+- Sessions view: I see lots of expired sessions. That's great, but do they drop off or will they be there forever polluting the list? I also question the value of this since (I believe this app is currently only single user)?
+- Releases: Release emails
+Get one email when a new release is published — the address is stored by the project's signup service, not by this server, so it is not managed from here. Releases are listed at GitHub releases.  ... But it doesn't give me a box to sign up or anything?
+- The "extend session" logic is uneccessary. Remove it and clean up the code. This is a one person app so sessions on 6hrs is OK.

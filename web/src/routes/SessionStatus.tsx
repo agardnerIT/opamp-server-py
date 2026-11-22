@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Button } from "../components/ui/Button";
 import { Link, useRouter } from "@tanstack/react-router";
 import { ApiError } from "../api/errors";
 import { useExtendSession, useLogout, useSession } from "../api/session";
@@ -50,13 +51,13 @@ function ExtendForm({
 
   return (
     <form
-      className="mt-2 rounded-md border border-[var(--color-border)] p-3"
+      className="card-2 mt-2 p-3"
       onSubmit={(e) => {
         e.preventDefault();
         extend.mutate({ name, password });
       }}
     >
-      <p className="mb-2 text-[11px] text-[var(--color-muted)]">
+      <p className="mb-2 text-xs leading-relaxed text-[var(--color-muted)]">
         Re-authenticate: your current session is revoked and a fresh one is
         minted (audited).
       </p>
@@ -64,7 +65,7 @@ function ExtendForm({
         aria-label="Name"
         type="text"
         autoComplete="username"
-        className="mb-2 w-full rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1 text-xs"
+        className="field mb-2 text-xs"
         value={name}
         onChange={(e) => setName(e.target.value)}
       />
@@ -72,29 +73,26 @@ function ExtendForm({
         aria-label="Password"
         type="password"
         autoComplete="current-password"
-        className="mb-2 w-full rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1 text-xs"
+        className="field mb-2 text-xs"
         value={password}
         onChange={(e) => setPassword(e.target.value)}
         autoFocus
       />
       <div className="flex gap-2">
-        <button
+        <Button
           type="submit"
+          variant="primary"
+          size="sm"
           disabled={extend.isPending || password.length === 0}
-          className="rounded bg-[var(--color-accent)] px-2 py-1 text-xs font-medium text-white hover:opacity-90 disabled:opacity-50"
         >
           {extend.isPending ? "Extending…" : "Extend"}
-        </button>
-        <button
-          type="button"
-          onClick={onCancel}
-          className="rounded border border-[var(--color-border)] px-2 py-1 text-xs"
-        >
+        </Button>
+        <Button variant="ghost" size="sm" onClick={onCancel}>
           Cancel
-        </button>
+        </Button>
       </div>
       {error && (
-        <p role="alert" className="mt-2 text-[11px] text-[var(--color-danger)]">
+        <p role="alert" className="mt-2 text-xs text-[var(--color-danger)]">
           {error}
         </p>
       )}
@@ -110,7 +108,7 @@ export default function SessionStatus() {
 
   if (session.isPending) {
     return (
-      <div className="mt-auto px-4 py-4 text-xs text-[var(--color-muted)]">
+      <div className="mt-auto border-t border-[var(--color-border)] px-4 py-4 text-xs text-[var(--color-muted)]">
         Checking session…
       </div>
     );
@@ -119,8 +117,8 @@ export default function SessionStatus() {
   // 401 → the global unauthorized handler routes to /login; this is a fallback.
   if (session.isError || !session.data) {
     return (
-      <div className="mt-auto px-4 py-4 text-xs">
-        <Link to="/login" className="text-[var(--color-accent)] underline">
+      <div className="mt-auto border-t border-[var(--color-border)] px-4 py-4 text-xs">
+        <Link to="/login" className="text-[var(--color-accent)] hover:underline">
           Sign in
         </Link>
       </div>
@@ -130,14 +128,14 @@ export default function SessionStatus() {
   const me = session.data;
   if (!me.authenticated) {
     return (
-      <div className="mt-auto px-4 py-4 text-xs text-[var(--color-muted)]">
+      <div className="mt-auto border-t border-[var(--color-border)] px-4 py-4 text-xs leading-relaxed text-[var(--color-muted)]">
         Read-only session (no admin credential configured)
       </div>
     );
   }
 
   return (
-    <div className="mt-auto px-4 py-4 text-xs">
+    <div className="mt-auto border-t border-[var(--color-border)] px-4 py-4 text-xs">
       {extending ? (
         <ExtendForm
           initialName={me.method === "session" || me.method === "legacy" ? "" : me.name}
@@ -146,31 +144,27 @@ export default function SessionStatus() {
         />
       ) : (
         <>
-          <div className="font-medium text-[var(--color-text)]">{me.name}</div>
+          <div className="text-[13px] font-medium text-[var(--color-text)]">{me.name}</div>
           <div className="mt-0.5 text-[var(--color-muted)]">
             role <span className="text-[var(--color-text)]">{me.role}</span> ·{" "}
-            {minutesLeft(me.session_expires_at)}
+            <span className="tnum">{minutesLeft(me.session_expires_at)}</span>
           </div>
-          <div className="mt-2 flex gap-2">
-            <button
-              type="button"
-              onClick={() => setExtending(true)}
-              className="rounded border border-[var(--color-border)] px-2 py-1 hover:text-[var(--color-text)]"
-            >
+          <div className="mt-2 flex gap-1.5">
+            <Button variant="ghost" size="sm" onClick={() => setExtending(true)}>
               Extend
-            </button>
-            <button
-              type="button"
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
               disabled={logout.isPending}
               onClick={() =>
                 void logout.mutateAsync().then(() => {
                   void router.navigate({ to: "/login" });
                 })
               }
-              className="rounded border border-[var(--color-border)] px-2 py-1 hover:text-[var(--color-text)] disabled:opacity-50"
             >
               {logout.isPending ? "Signing out…" : "Sign out"}
-            </button>
+            </Button>
           </div>
         </>
       )}

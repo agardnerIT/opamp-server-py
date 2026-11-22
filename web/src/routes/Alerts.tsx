@@ -8,6 +8,10 @@ import {
 } from "../api/admin";
 import { EmptyState } from "../components/EmptyState";
 import { Section } from "../components/Section";
+import { PageHeader } from "../components/ui/PageHeader";
+import { Button } from "../components/ui/Button";
+import { Switch } from "../components/ui/Switch";
+import { Notice } from "../components/ui/Toast";
 
 /**
  * Alerts (new-ui stage 8). Per-event webhook config. The round-trip is the
@@ -36,11 +40,6 @@ const BODY_PLACEHOLDER = JSON.stringify(
   null,
   2,
 );
-
-const inputClass =
-  "w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 font-mono text-sm";
-const buttonClass =
-  "rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs hover:text-[var(--color-text)] disabled:opacity-40 disabled:hover:text-inherit";
 
 export default function Alerts() {
   const queryClient = useQueryClient();
@@ -112,17 +111,14 @@ export default function Alerts() {
 
   return (
     <section className="flex flex-col gap-4">
-      <div>
-        <h1 className="text-lg font-semibold">Alerts</h1>
-        <p className="mt-1 max-w-prose text-xs text-[var(--color-muted)]">
-          Webhook alerts for fleet events. The webhook URL and headers are
-          returned masked; saving unchanged keeps the stored secret.
-        </p>
-      </div>
+      <PageHeader
+        title="Alerts"
+        lede="Webhook alerts for fleet events. The webhook URL and headers are returned masked; saving unchanged keeps the stored secret."
+      />
 
       <div className="flex flex-wrap items-end gap-3">
-        <label className="flex flex-col gap-1 text-xs">
-          <span className="font-medium">Event</span>
+        <label className="flex flex-col gap-1">
+          <span className="text-[13px] font-medium">Event</span>
           <select
             value={effectiveEvent ?? ""}
             onChange={(e) => {
@@ -130,7 +126,7 @@ export default function Alerts() {
               setDraft(null); // reseed from the server config
               setMessage(null);
             }}
-            className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1.5 text-sm"
+            className="field"
           >
             {events.map((name) => (
               <option key={name} value={name}>
@@ -151,68 +147,64 @@ export default function Alerts() {
           return (
             <Section title={effectiveEvent.replace(/_/g, " ")} caption="Cloudevents webhook — placeholders: {event_type}, {message}, plus auto-filled {id} and {time}.">
               <div className="flex flex-col gap-3">
-                <label className="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={cfg.enabled}
-                    onChange={(e) => set({ enabled: e.target.checked })}
-                  />
-                  Enabled
-                </label>
-                <label className="flex flex-col gap-1 text-xs">
-                  <span className="font-medium">Webhook URL</span>
+                <Switch
+                  label="Enabled"
+                  checked={cfg.enabled}
+                  onChange={(next) => set({ enabled: next })}
+                />
+                <label className="flex flex-col gap-1">
+                  <span className="text-[13px] font-medium">Webhook URL</span>
                   <input
                     type="text"
                     value={cfg.webhook_url}
                     onChange={(e) => set({ webhook_url: e.target.value })}
                     spellCheck={false}
-                    className={inputClass}
+                    className="field"
                     placeholder="https://hooks.example.com/…"
                   />
                 </label>
-                <label className="flex flex-col gap-1 text-xs">
-                  <span className="font-medium">Headers (JSON)</span>
+                <label className="flex flex-col gap-1">
+                  <span className="text-[13px] font-medium">Headers (JSON)</span>
                   <input
                     type="text"
                     value={cfg.headers}
                     onChange={(e) => set({ headers: e.target.value })}
                     spellCheck={false}
-                    className={inputClass}
+                    className="field"
                     placeholder={HEADERS_PLACEHOLDER}
                   />
                 </label>
-                <label className="flex flex-col gap-1 text-xs">
-                  <span className="font-medium">Body template</span>
+                <label className="flex flex-col gap-1">
+                  <span className="text-[13px] font-medium">Body template</span>
                   <textarea
                     rows={8}
                     value={cfg.body_template}
                     onChange={(e) => set({ body_template: e.target.value })}
                     spellCheck={false}
-                    className={inputClass}
+                    className="field"
                     placeholder={BODY_PLACEHOLDER}
                   />
                 </label>
                 <div className="flex items-center gap-2">
-                  <button
+                  <Button
                     type="button"
-                    className={buttonClass}
+                    variant="primary"
                     disabled={busy}
                     onClick={() => save.mutate()}
                   >
                     Save
-                  </button>
-                  <button
+                  </Button>
+                  <Button
                     type="button"
-                    className={buttonClass}
                     disabled={busy}
                     onClick={() => test.mutate()}
                   >
                     Send test
-                  </button>
+                  </Button>
                   {message && (
-                    <span role="status" className={`text-xs ${message.ok ? "text-[var(--color-ok)]" : "text-[var(--color-danger)]"}`}>
+                    <Notice kind={message.ok ? "ok" : "error"} className="py-1.5">
                       {message.text}
-                    </span>
+                    </Notice>
                   )}
                 </div>
               </div>

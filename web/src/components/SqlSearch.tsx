@@ -45,7 +45,7 @@ export function SqlSearch({
 
   return (
     <div role="search" className="relative">
-      <label htmlFor={inputId} className="mb-1 block text-xs font-medium">
+      <label htmlFor={inputId} className="mb-1 block text-[13px] font-medium">
         {label}
       </label>
       <input
@@ -58,7 +58,7 @@ export function SqlSearch({
         aria-activedescendant={suggestions.length > 0 ? `${listId}-${active}` : undefined}
         autoComplete="off"
         spellCheck={false}
-        className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 font-mono text-sm outline-none focus:border-[var(--color-accent)]"
+        className="field font-mono text-[13px]"
         placeholder={placeholder}
         value={text}
         onChange={(e) => {
@@ -92,7 +92,7 @@ export function SqlSearch({
           id={listId}
           role="listbox"
           aria-label="SQL suggestions"
-          className="absolute z-10 mt-1 max-h-64 w-full overflow-y-auto rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-1 shadow-lg"
+          className="card absolute z-10 mt-1 max-h-64 w-full overflow-y-auto p-1 shadow-[var(--shadow-overlay)]"
         >
           {suggestions.map((s, i) => (
             <li
@@ -119,7 +119,7 @@ export function SqlSearch({
           ))}
         </ul>
       )}
-      <p className="mt-1 text-[11px] text-[var(--color-muted)]">
+      <p className="mt-1 text-xs text-[var(--color-faint)]">
         Read-only SQL over the live fleet. Description attributes are columns; suggestions
         come from the values this fleet reports. Tab accepts · Enter runs.
       </p>

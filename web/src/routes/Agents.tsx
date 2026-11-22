@@ -15,6 +15,9 @@ import { EmptyState } from "../components/EmptyState";
 import { SqlSearch } from "../components/SqlSearch";
 import { StatusBadge } from "../components/StatusBadge";
 import { AgentTypeBadge } from "../components/AgentTypeBadge";
+import { PageHeader } from "../components/ui/PageHeader";
+import { Button } from "../components/ui/Button";
+import { Checkbox } from "../components/ui/Checkbox";
 
 /**
  * Agents list (new-ui stage 5). Selection is server-side only (#132): the SQL
@@ -129,9 +132,9 @@ function HealthChips({
             aria-pressed={active}
             onClick={() => onChange(v)}
             className={
-              "rounded-md border px-2 py-1 text-xs " +
+              "inline-flex h-7 items-center rounded-[var(--radius-sm)] border px-2.5 text-xs font-medium transition-colors duration-[var(--duration-fast)] ease-[var(--ease-out)] " +
               (active
-                ? "border-[var(--color-accent)] bg-[var(--color-accent)]/10 text-[var(--color-text)]"
+                ? "border-[var(--color-accent)]/50 bg-[var(--color-accent-soft)] text-[var(--color-accent-strong)]"
                 : "border-[var(--color-border)] text-[var(--color-muted)]") +
               (disabled ? " opacity-50" : " hover:text-[var(--color-text)]")
             }
@@ -156,32 +159,31 @@ function ColumnPicker({
 }) {
   return (
     <details className="relative">
-      <summary className="cursor-pointer list-none rounded-md border border-[var(--color-border)] px-2 py-1 text-xs text-[var(--color-muted)] hover:text-[var(--color-text)]">
+      <summary className="inline-flex h-7 cursor-pointer list-none items-center rounded-[var(--radius-sm)] border border-[var(--color-border)] px-2.5 text-xs font-medium text-[var(--color-muted)] transition-colors duration-[var(--duration-fast)] ease-[var(--ease-out)] hover:text-[var(--color-text)]">
         Columns ({selected.length})
       </summary>
-      <ul className="absolute right-0 z-10 mt-1 max-h-72 w-64 overflow-y-auto rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-2 text-xs shadow-lg">
+      <ul className="card absolute right-0 z-10 mt-1 max-h-72 w-64 overflow-y-auto p-2 text-xs shadow-[var(--shadow-overlay)]">
         {columns.map((c) => (
-          <li key={c.name}>
-            <label className="flex cursor-pointer items-start gap-2 rounded px-1.5 py-1 hover:bg-[var(--color-bg)]">
-              <input
-                type="checkbox"
-                className="mt-0.5"
-                checked={selected.includes(c.name)}
-                onChange={(e) =>
-                  onChange(
-                    e.target.checked
-                      ? [...selected, c.name]
-                      : selected.filter((n) => n !== c.name),
-                  )
-                }
-              />
-              <span className="min-w-0">
-                <span className="font-mono">{c.sql_name}</span>
-                <span className="ml-1.5 text-[10px] uppercase text-[var(--color-muted)]">
-                  {c.kind}
+          <li key={c.name} className="rounded-[var(--radius-sm)] px-1 hover:bg-[var(--color-surface-2)]">
+            <Checkbox
+              className="w-full items-start py-1"
+              label={
+                <span className="min-w-0">
+                  <span className="font-mono">{c.sql_name}</span>
+                  <span className="ml-1.5 text-[10px] text-[var(--color-faint)]">
+                    {c.kind}
+                  </span>
                 </span>
-              </span>
-            </label>
+              }
+              checked={selected.includes(c.name)}
+              onChange={(next) =>
+                onChange(
+                  next
+                    ? [...selected, c.name]
+                    : selected.filter((n) => n !== c.name),
+                )
+              }
+            />
           </li>
         ))}
       </ul>
@@ -226,12 +228,11 @@ export default function Agents() {
 
   return (
     <section className="flex flex-col gap-4">
-      <div className="flex items-baseline justify-between">
-        <h1 className="text-lg font-semibold">Agents</h1>
-        <span className="text-xs text-[var(--color-muted)]">
-          {data ? `${total} connected` : ""}
-        </span>
-      </div>
+      <PageHeader
+        title="Agents"
+        lede="Everything connected to this server, selected with read-only SQL over the live fleet."
+        meta={data ? `${total} connected` : undefined}
+      />
 
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div className="min-w-0 flex-1 md:max-w-2xl">
@@ -256,7 +257,7 @@ export default function Agents() {
       {filtered && (
         <p className="text-xs text-[var(--color-muted)]">
           {activeQuery
-            ? <>Selection: <code className="font-mono">{activeQuery}</code></>
+            ? <>Selection: <code className="font-mono text-[var(--color-accent-strong)]">{activeQuery}</code></>
             : "Filtering by health (server-side)."}
         </p>
       )}
@@ -272,12 +273,9 @@ export default function Agents() {
               : String(agents.error)
           }
         >
-          <button
-            onClick={() => agents.refetch()}
-            className="rounded-md border border-[var(--color-border)] px-2 py-1 text-xs hover:text-[var(--color-text)]"
-          >
+          <Button size="sm" onClick={() => agents.refetch()}>
             Retry
-          </button>
+          </Button>
         </EmptyState>
       )}
 
@@ -293,13 +291,13 @@ export default function Agents() {
       )}
 
       {data && data.agents.length > 0 && (
-        <div className="overflow-x-auto rounded-lg border border-[var(--color-border)]">
-          <table className="w-full min-w-[48rem] text-left text-sm">
+        <div className="card overflow-x-auto">
+          <table className="data-table min-w-[48rem]">
             <thead>
-              <tr className="border-b border-[var(--color-border)] text-xs uppercase tracking-wide text-[var(--color-muted)]">
-                <th scope="col" className="px-3 py-2 font-medium">Agent</th>
+              <tr>
+                <th scope="col">Agent</th>
                 {selectedSchema.map((c) => (
-                  <th scope="col" key={c.name} className="px-3 py-2 font-medium">
+                  <th scope="col" key={c.name}>
                     {c.sql_name}
                   </th>
                 ))}
@@ -307,24 +305,21 @@ export default function Agents() {
             </thead>
             <tbody>
               {data.agents.map((agent) => (
-                <tr
-                  key={agent.id}
-                  className="border-b border-[var(--color-border)] last:border-0 hover:bg-[var(--color-surface)]"
-                >
-                  <td className="px-3 py-2">
+                <tr key={agent.id}>
+                  <td>
                     <Link
                       to="/agents/$agentId"
                       params={{ agentId: agent.id }}
                       search={activeQuery ? { q: activeQuery } : {}}
-                      className="font-medium hover:text-[var(--color-accent)] hover:underline"
+                      className="font-medium text-[var(--color-text)] hover:text-[var(--color-accent-strong)] hover:underline"
                       title={agent.id}
                     >
                       {agent.name ?? <em className="text-[var(--color-muted)]">unnamed</em>}
                     </Link>
-                    <div className="font-mono text-[11px] text-[var(--color-muted)]">{agent.id}</div>
+                    <div className="mt-0.5 font-mono text-[11px] text-[var(--color-faint)]">{agent.id}</div>
                   </td>
                   {selectedSchema.map((c) => (
-                    <td key={c.name} className="px-3 py-2 text-xs">
+                    <td key={c.name} className="text-xs">
                       <SchemaCell column={c} agent={agent} profiles={types.data?.types} />
                     </td>
                   ))}

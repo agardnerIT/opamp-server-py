@@ -4,6 +4,10 @@ import { getUpdates, putUpdateSettings, runUpdateCheck } from "../api/admin";
 import { useSession } from "../api/session";
 import { roleAtLeast } from "../lib/roles";
 import { EmptyState } from "../components/EmptyState";
+import { Section } from "../components/Section";
+import { PageHeader } from "../components/ui/PageHeader";
+import { Button } from "../components/ui/Button";
+import { Switch } from "../components/ui/Switch";
 
 /**
  * Updates (new-ui stage 8): whether this deployment checks for new releases,
@@ -12,9 +16,6 @@ import { EmptyState } from "../components/EmptyState";
  * REST API does not expose, so an iframe here would have to hard-code an
  * external URL (the single-origin rule the stage-7 notes set for reports).
  */
-
-const buttonClass =
-  "rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs hover:text-[var(--color-text)] disabled:opacity-40 disabled:hover:text-inherit";
 
 export default function Updates() {
   const session = useSession();
@@ -56,39 +57,37 @@ export default function Updates() {
 
   return (
     <section className="flex flex-col gap-4">
-      <div>
-        <h1 className="text-lg font-semibold">Updates</h1>
-        <p className="mt-1 max-w-prose text-xs text-[var(--color-muted)]">
-          Whether this deployment checks for new releases, and running a check.
-        </p>
-      </div>
+      <PageHeader
+        title="Updates"
+        lede="Whether this deployment checks for new releases, and running a check."
+      />
 
       {updates.isPending && <p className="text-sm text-[var(--color-muted)]">Loading…</p>}
       {updates.isError && <EmptyState title="Could not load update state" detail={String(updates.error)} />}
 
       {state && (
-        <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
-          <dl className="flex flex-wrap gap-x-8 gap-y-3 text-sm">
+        <div className="card p-4">
+          <dl className="flex flex-wrap gap-x-8 gap-y-3">
             <div className="flex min-w-0 flex-col gap-0.5">
-              <dt className="text-[11px] uppercase tracking-wide text-[var(--color-muted)]">Current</dt>
-              <dd className="font-mono">{state.current_version}</dd>
+              <dt className="text-xs text-[var(--color-faint)]">Current</dt>
+              <dd className="font-mono text-[13px]">{state.current_version}</dd>
             </div>
             <div className="flex min-w-0 flex-col gap-0.5">
-              <dt className="text-[11px] uppercase tracking-wide text-[var(--color-muted)]">Latest</dt>
-              <dd className="font-mono">
+              <dt className="text-xs text-[var(--color-faint)]">Latest</dt>
+              <dd className="font-mono text-[13px]">
                 {state.latest_tag ?? "unknown"}
                 {state.update_available && (
-                  <span className="ml-2 text-[var(--color-warn)]">update available</span>
+                  <span className="ml-2 font-sans text-xs font-medium text-[var(--color-warn)]">update available</span>
                 )}
               </dd>
             </div>
             <div className="flex min-w-0 flex-col gap-0.5">
-              <dt className="text-[11px] uppercase tracking-wide text-[var(--color-muted)]">Last checked</dt>
-              <dd>{state.checked_at?.replace("T", " ").slice(0, 19) ?? "never"}</dd>
+              <dt className="text-xs text-[var(--color-faint)]">Last checked</dt>
+              <dd className="tnum text-[13px]">{state.checked_at?.replace("T", " ").slice(0, 19) ?? "never"}</dd>
             </div>
             <div className="flex min-w-0 flex-col gap-0.5">
-              <dt className="text-[11px] uppercase tracking-wide text-[var(--color-muted)]">Automatic checks</dt>
-              <dd>{state.enabled ? "on" : "off"}</dd>
+              <dt className="text-xs text-[var(--color-faint)]">Automatic checks</dt>
+              <dd className="text-[13px]">{state.enabled ? "on" : "off"}</dd>
             </div>
           </dl>
           {state.error && (
@@ -105,38 +104,34 @@ export default function Updates() {
 
           {!disabled && (
             <div className="mt-4 flex flex-wrap items-center gap-2">
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  checked={state.enabled}
-                  disabled={!canAdmin}
-                  onChange={(e) => save.mutate(e.target.checked)}
-                />
-                Check for updates automatically
-              </label>
+              <Switch
+                label="Check for updates automatically"
+                checked={state.enabled}
+                disabled={!canAdmin}
+                onChange={(next) => save.mutate(next)}
+              />
               {!canAdmin && (
                 <span className="text-xs text-[var(--color-muted)]">
                   (changing this needs the admin role)
                 </span>
               )}
               {state.admin_override !== null && canAdmin && (
-                <button
-                  type="button"
-                  className={buttonClass}
+                <Button
+                  size="sm"
                   disabled={save.isPending}
                   onClick={() => save.mutate(null)}
                 >
                   Use deployment default
-                </button>
+                </Button>
               )}
-              <button
-                type="button"
-                className={buttonClass}
+              <Button
+                variant="primary"
+                size="sm"
                 disabled={!canAdmin || checkNow.isPending || !state.enabled}
                 onClick={() => checkNow.mutate()}
               >
                 Check now
-              </button>
+              </Button>
             </div>
           )}
           {(disabledError || rateError) && (
@@ -152,9 +147,8 @@ export default function Updates() {
         </div>
       )}
 
-      <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
-        <h2 className="text-sm font-semibold">Release emails</h2>
-        <p className="mt-1 max-w-prose text-xs text-[var(--color-muted)]">
+      <Section title="Release emails">
+        <p className="max-w-prose text-xs leading-relaxed text-[var(--color-muted)]">
           Get one email when a new release is published — the address is stored
           by the project's signup service, not by this server, so it is not
           managed from here.{" "}
@@ -173,7 +167,7 @@ export default function Updates() {
             </>
           )}
         </p>
-      </div>
+      </Section>
     </section>
   );
 }

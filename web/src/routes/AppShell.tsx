@@ -21,12 +21,18 @@ function NavLinks({ items, match }: { items: NavItem[]; match: ReturnType<typeof
         to={to}
         aria-current={active ? 'page' : undefined}
         className={
-          'rounded-md px-3 py-2 text-sm ' +
+          'relative flex h-8 items-center rounded-[var(--radius-sm)] px-3 text-[13px] font-medium transition-colors duration-[var(--duration-fast)] ease-[var(--ease-out)] ' +
           (active
-            ? 'bg-[var(--color-bg)] font-medium text-[var(--color-text)]'
-            : 'text-[var(--color-muted)] hover:text-[var(--color-text)]')
+            ? 'bg-[var(--color-surface-2)] text-[var(--color-text)]'
+            : 'text-[var(--color-muted)] hover:bg-[var(--color-surface-2)]/60 hover:text-[var(--color-text)]')
         }
       >
+        {active && (
+          <span
+            aria-hidden
+            className="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full bg-[var(--color-accent-bright)]"
+          />
+        )}
         {label}
       </Link>
     )
@@ -47,25 +53,35 @@ export default function AppShell() {
 
   return (
     <div className="flex min-h-screen">
-      <aside className="flex w-52 shrink-0 flex-col border-r border-[var(--color-border)] bg-[var(--color-surface)]">
-        <div className="px-4 py-4 text-sm font-semibold">OpAMP Console</div>
-        <nav aria-label="Main" className="flex flex-col gap-1 px-2">
+      <aside className="flex w-56 shrink-0 flex-col border-r border-[var(--color-border)] bg-[var(--color-surface)]">
+        <div className="flex items-center gap-2.5 px-4 py-5">
+          <span
+            aria-hidden
+            className="inline-block h-7 w-7 shrink-0 rounded-[var(--radius-sm)] bg-[linear-gradient(135deg,var(--color-accent-deep),var(--color-accent-bright))] shadow-[var(--inner-highlight)]"
+          />
+          <span className="font-display text-[15px] font-semibold tracking-[-0.01em]">
+            OpAMP Console
+          </span>
+        </div>
+        <nav aria-label="Main" className="flex flex-col gap-0.5 px-3">
           <NavLinks items={MAIN_NAV} match={match} />
         </nav>
         {adminItems.length > 0 && (
           <>
-            <div className="mt-4 px-4 text-[11px] uppercase tracking-wide text-[var(--color-muted)]">
+            <div className="mt-5 px-4 text-xs font-medium text-[var(--color-faint)]">
               Admin
             </div>
-            <nav aria-label="Admin" className="mt-1 flex flex-col gap-1 px-2">
+            <nav aria-label="Admin" className="mt-1 flex flex-col gap-0.5 px-3">
               <NavLinks items={adminItems} match={match} />
             </nav>
           </>
         )}
         <SessionStatus />
       </aside>
-      <main className="flex-1 overflow-auto p-6">
-        <Outlet />
+      <main className="min-w-0 flex-1 overflow-auto px-8 py-7">
+        <div className="mx-auto max-w-5xl">
+          <Outlet />
+        </div>
       </main>
     </div>
   )

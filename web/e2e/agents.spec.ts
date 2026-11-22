@@ -33,6 +33,18 @@ test("list shows both agent types with type + provenance", async ({ page }) => {
   await expect(table.getByText("pinned", { exact: true })).toBeVisible();
 });
 
+test("last heartbeat reads as an age for every agent, live or not", async ({ page }) => {
+  // The default column set includes the heartbeat; the cell is recency in words
+  // ("12s ago"), not a timestamp nobody can diff at a glance.
+  const live = page.getByRole("row", { name: /shop-prod-collector/ });
+  await expect(live.getByText(/^just now$|^\d+s ago$/)).toBeVisible();
+  // The unhealthy generic agent's fixture heartbeat is minutes old.
+  const quiet = page.getByRole("row", { name: /lab-generic-forwarder/ });
+  await expect(quiet.getByText(/^\d+m ago$/)).toBeVisible();
+  // The exact time is still one hover away.
+  await expect(quiet.locator("td span[title]").first()).toHaveAttribute("title", /\d/);
+});
+
 test("health chips filter server-side via the `healthy` parameter", async ({ page }) => {
   await page.getByRole("button", { name: "Healthy", exact: true }).click();
   await expect(page.getByRole("cell", { name: "shop-prod-collector" })).toBeVisible();

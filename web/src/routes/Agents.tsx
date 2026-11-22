@@ -18,6 +18,8 @@ import { AgentTypeBadge } from "../components/AgentTypeBadge";
 import { PageHeader } from "../components/ui/PageHeader";
 import { Button } from "../components/ui/Button";
 import { Checkbox } from "../components/ui/Checkbox";
+import { absoluteWhen, heartbeatAge } from "../lib/heartbeat";
+import { useNow } from "../lib/useNow";
 
 /**
  * Agents list (new-ui stage 5). Selection is server-side only (#132): the SQL
@@ -41,10 +43,13 @@ function SchemaCell({
   column,
   agent,
   profiles,
+  now,
 }: {
   column: QuerySchemaColumn;
   agent: AgentEntry;
   profiles: AgentTypeSummary[] | undefined;
+  /** Shared clock so every row's age is read at the same instant. */
+  now: number;
 }) {
   switch (column.name) {
     case "name":
@@ -74,7 +79,13 @@ function SchemaCell({
       return <StatusBadge tone={tone} label={label} />;
     }
     case "last_heartbeat":
-      return <>{formatWhen(agent.last_heartbeat)}</>;
+      // Age first, exact time on hover: recency is what an operator scans for,
+      // and it is shown for live agents too, not only as a death notice.
+      return (
+        <span title={absoluteWhen(agent.last_heartbeat)} className="whitespace-nowrap">
+          {heartbeatAge(agent.last_heartbeat, now)}
+        </span>
+      );
     case "connected_at":
       return <>{formatWhen(agent.connected_at)}</>;
     case "capabilities":
@@ -205,6 +216,9 @@ export default function Agents() {
   const schema = useQuery({ queryKey: ["agents-query-schema"], queryFn: getQuerySchema });
   const types = useAgentTypes();
   const agents = useAgents(activeQuery || undefined, activeQuery ? undefined : healthy);
+  // One clock for the whole table: every row's "last seen" is read at the same
+  // instant, and the ages keep ticking while the page is open.
+  const now = useNow();
 
   const columns = useMemo(() => {
     const all = schema.data?.columns ?? [];
@@ -322,7 +336,7 @@ export default function Agents() {
                   </td>
                   {selectedSchema.map((c) => (
                     <td key={c.name} className="text-xs">
-                      <SchemaCell column={c} agent={agent} profiles={types.data?.types} />
+                      <SchemaCell column={c} agent={agent} profiles={types.data?.types} now={now} />
                     </td>
                   ))}
                 </tr>

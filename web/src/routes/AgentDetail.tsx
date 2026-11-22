@@ -16,6 +16,8 @@ import { PageHeader } from "../components/ui/PageHeader";
 import { Button } from "../components/ui/Button";
 import { Switch } from "../components/ui/Switch";
 import { Notice } from "../components/ui/Toast";
+import { absoluteWhen, heartbeatAge } from "../lib/heartbeat";
+import { useNow } from "../lib/useNow";
 import { configObjects } from "../lib/configText";
 
 /**
@@ -258,6 +260,8 @@ export default function AgentDetail() {
   // `strict: false`: the component sits under the shell layout route, so the
   // root-relative match id does not resolve here (same as useSearch above).
   const { agentId } = useParams({ strict: false }) as { agentId: string };
+  // Relative "last heartbeat" ages tick while the page is open.
+  const now = useNow();
   const search = useSearch({ strict: false }) as { q?: string } | undefined;
   const carriedQuery = search?.q ? { q: search.q } : {};
   const agent = useQuery({
@@ -381,7 +385,9 @@ export default function AgentDetail() {
             : "Not enrolled"}
         </KeyValue>
         <KeyValue label="Last heartbeat">
-          {formatWhen(data.last_heartbeat)}
+          <span title={absoluteWhen(data.last_heartbeat)}>
+            {heartbeatAge(data.last_heartbeat, now)}
+          </span>
           <div className="text-[11px] text-[var(--color-muted)]">
             every {data.report_interval_seconds?.toFixed(1) ?? "?"}s · stale after{" "}
             {data.stale_timeout_seconds}s

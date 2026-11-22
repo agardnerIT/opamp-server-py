@@ -11,8 +11,12 @@
 import type { AgentEntry, AgentDetail, AgentTypeSummary } from "./endpoints";
 import type { GroupsResponse } from "./groups";
 
-const CONNECTED_AT = "2026-12-01T09:15:00Z";
-const HEARTBEAT = "2026-12-01T09:44:12Z";
+// Relative to page load. A fixed date would read "just now" whenever it was in
+// the future, and "62d ago" once it had passed — neither demos the "last seen"
+// rendering the console actually shows.
+const CONNECTED_AT = new Date(Date.now() - 29 * 60_000).toISOString(); // 29m ago
+const HEARTBEAT = new Date(Date.now() - 12_000).toISOString(); // 12s ago
+const QUIET_HEARTBEAT = new Date(Date.now() - 6 * 60_000).toISOString(); // 6m ago
 
 const OTCOL_ID = "6b1f3a4c-9d2e-4f70-8a1b-2c3d4e5f6071";
 const GENERIC_ID = "0f2e8d7c-6b5a-4938-8271-6a5b4c3d2e10";
@@ -163,7 +167,7 @@ const genericListEntry: AgentEntry = {
   health_status: "config_conflict",
   health_error: "exporter endpoint unreachable",
   connected_at: CONNECTED_AT,
-  last_heartbeat: HEARTBEAT,
+  last_heartbeat: QUIET_HEARTBEAT,
   capabilities: 2,
   capability_tags: [{ label: "Reports Health", icon: "❤️" }],
   remote_config_status: "FAILED",
@@ -663,6 +667,49 @@ export const fixtures = {
         values: ["otelcol", "generic"],
         agent_count: 2,
       },
+      // Timestamps and liveness cores, mirrored from `server/agent_query.py`:
+      // `last_heartbeat` is in the Agents page's default column set, so a mock
+      // schema without it silently drops the column the real server offers.
+      {
+        name: "connected_at",
+        sql_name: "connected_at",
+        kind: "core",
+        description: "When the server first saw this agent (UTC, YYYY-MM-DD HH:MM:SS)",
+        values: [],
+        agent_count: 2,
+      },
+      {
+        name: "last_heartbeat",
+        sql_name: "last_heartbeat",
+        kind: "core",
+        description: "Last OpAMP message (UTC, YYYY-MM-DD HH:MM:SS)",
+        values: [],
+        agent_count: 2,
+      },
+      {
+        name: "heartbeat_age_seconds",
+        sql_name: "heartbeat_age_seconds",
+        kind: "core",
+        description: "Seconds since the last OpAMP message",
+        values: [12, 360],
+        agent_count: 2,
+      },
+      {
+        name: "capabilities",
+        sql_name: "capabilities",
+        kind: "core",
+        description: "OpAMP capability bitmask",
+        values: [8, 2],
+        agent_count: 2,
+      },
+      {
+        name: "stale",
+        sql_name: "stale",
+        kind: "core",
+        description: "1 when the agent is past its own silence budget",
+        values: [0],
+        agent_count: 2,
+      },
       {
         name: "service.name",
         sql_name: '"service.name"',
@@ -688,7 +735,7 @@ export const fixtures = {
         agent_count: 1,
       },
     ],
-    count: 9,
+    count: 13,
     examples: [
       "SELECT * FROM agents",
       "SELECT * FROM agents WHERE healthy = 1",

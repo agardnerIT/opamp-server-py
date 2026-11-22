@@ -85,7 +85,7 @@ second dev server, and `tools/screenshot-quickstart.mjs` captures all three):
 | | |
 |---|---|
 | ![Overview](../docs/screenshots/console-overview.png) | ![Agents list](../docs/screenshots/console-agents-list.png) |
-| Overview (`/`): the fleet graphic — a measured, drawing line per agent — then health counts, type breakdown, config activity, entry cards | Agents list (`/agents`): server-side SQL selection, health chips, schema columns, type + provenance badges |
+| Overview (`/`): the fleet graphic — a measured, drawing line per agent, each chip carrying its heartbeat age — then health counts, type breakdown, config activity, entry cards | Agents list (`/agents`): server-side SQL selection, health chips, schema columns, type + provenance badges, last-seen ages |
 | ![Zero-agent quickstart](../docs/screenshots/console-overview-empty.png) | ![Token minted inline](../docs/screenshots/console-overview-token.png) |
 | Zero agents (`/`): the server/fleet graphic with dashed sockets, and the mint form inline — no trip through Agent tokens | Same page after minting: the once-only token, paste-ready snippet, endpoint, and a live wait that flips the page when the first agent checks in |
 | ![Agent detail](../docs/screenshots/console-agent-detail.png) | |
@@ -194,6 +194,17 @@ assumes a collector that the server did not say:
   list is shareable. Columns come from `GET /agents/query/schema` (core
   columns plus the attributes this fleet actually reports) via the column
   picker — never hard-coded collector fields.
+- **Last seen, in words, everywhere** (`lib/heartbeat.ts` + `lib/useNow.ts`):
+  the heartbeat renders as an age — `just now`, `12s ago`, `6m ago`, a date
+  past a week — in the Agents table (default column), on each chip of the
+  Overview fleet graphic, and on the detail page, for live agents as well as
+  quiet ones; the exact timestamp stays in the `title`. One clock per view
+  (`useNow`, 10s) keeps the ages ticking instead of freezing at fetch time.
+  It deliberately says *when*, not *whether*: staleness is the server's
+  call (`is_stale()`: `max(180s, 3 × observed gap)`, shared with the reaper and
+  the rollout gate), and the reaper removes a silent agent within ~15s of that,
+  so a browser-side "stale" verdict would be a guess shown for a moment.
+  For the fleet-wide answer use SQL instead: `stale = 1`.
 - **Detail adapts to the type** (`/agents/$agentId`): identity/health are
   common; the telemetry panels and the component inventory render from the
   agent's profile (`GET /agent/types`, `server/profiles/data/*.yaml`), so a

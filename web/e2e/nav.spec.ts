@@ -96,6 +96,8 @@ test("the Overview dashboard shows the fleet hero and activity strip", async ({ 
   await expect(graphic).toBeVisible();
   await expect(graphic.getByText("shop-prod-collector")).toBeVisible();
   await expect(page.getByText("Each line is a live OpAMP session.")).toBeVisible();
+  // Every chip carries its heartbeat age (compact), live agents included.
+  await expect(graphic.getByTitle(/^Last heartbeat /)).toHaveCount(2);
   // Activity strip links through to the underlying pages.
   await expect(page.getByText("Rollouts in progress")).toBeVisible();
   await expect(page.getByText("Alert events armed")).toBeVisible();

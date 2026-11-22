@@ -1,6 +1,8 @@
 import { useId, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { Link } from "@tanstack/react-router";
 import type { AgentEntry } from "../api/endpoints";
+import { absoluteWhen, heartbeatAgeCompact } from "../lib/heartbeat";
+import { useNow } from "../lib/useNow";
 import {
   connectorPath,
   MAX_FLEET_NODES,
@@ -32,6 +34,9 @@ export function FleetTopology({
 }) {
   const shown = agents.slice(0, MAX_FLEET_NODES);
   const hidden = agents.length - shown.length;
+  // Heartbeat recency on every chip, live or not — the graphic should show the
+  // conversation, not just that a row exists.
+  const now = useNow();
   // Sanitised: `useId` may contain punctuation that breaks `url(#…)`.
   const gradientId = `topology-${useId().replace(/[^a-zA-Z0-9_-]/g, "")}`;
 
@@ -155,6 +160,7 @@ export function FleetTopology({
               key={agent.id}
               agent={agent}
               index={i}
+              now={now}
               register={(el) => {
                 if (el) nodes.current.set(agent.id, el);
                 else nodes.current.delete(agent.id);
@@ -230,10 +236,12 @@ const ServerNode = ({
 function AgentNode({
   agent,
   index,
+  now,
   register,
 }: {
   agent: AgentEntry;
   index: number;
+  now: number;
   register: (el: HTMLDivElement | null) => void;
 }) {
   const dot =
@@ -261,6 +269,12 @@ function AgentNode({
           <span className="block truncate text-[10.5px] leading-tight text-[var(--color-muted)]">
             {agent.agent_type}
           </span>
+        </span>
+        <span
+          title={`Last heartbeat ${absoluteWhen(agent.last_heartbeat)}`}
+          className="tnum shrink-0 pr-0.5 text-[10px] text-[var(--color-faint)]"
+        >
+          {heartbeatAgeCompact(agent.last_heartbeat, now)}
         </span>
       </div>
     </Link>

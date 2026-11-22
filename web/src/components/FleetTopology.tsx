@@ -20,9 +20,9 @@ import {
  * own boxes and asks `lib/topology` for the path — the line always meets the
  * node edge, at any width, with no magic numbers.
  *
- * The connecting is the point: a new agent's line draws itself in (dash offset
- * on `pathLength=1`, staggered by `--i`), then a spark keeps travelling along
- * it. Both animations are killed by the reduced-motion rule in `index.css`.
+ * The connecting is the point: a new agent's line draws itself in from the
+ * agent's end (agents dial out to the server — dash offset on `pathLength=1`,
+ * staggered by `--i`), then a spark keeps travelling along it, agent → server. Both animations are killed by the reduced-motion rule in `index.css`.
  */
 export function FleetTopology({
   agents,

@@ -90,6 +90,12 @@ test("the Overview dashboard shows the fleet hero and activity strip", async ({ 
   // exact: the page meta line "2 agents connected" contains the same words.
   await expect(page.getByText("Agents connected", { exact: true })).toBeVisible();
   await expect(page.getByText("Agents by type")).toBeVisible();
+  // The fleet graphic above the counts draws one line per agent (the zero-agent
+  // variant has its own spec: `quickstart.spec.ts`).
+  const graphic = page.getByRole("group", { name: /agents connected to the server/i });
+  await expect(graphic).toBeVisible();
+  await expect(graphic.getByText("shop-prod-collector")).toBeVisible();
+  await expect(page.getByText("Each line is a live OpAMP session.")).toBeVisible();
   // Activity strip links through to the underlying pages.
   await expect(page.getByText("Rollouts in progress")).toBeVisible();
   await expect(page.getByText("Alert events armed")).toBeVisible();

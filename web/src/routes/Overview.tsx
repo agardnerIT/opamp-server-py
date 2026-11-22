@@ -11,9 +11,10 @@ import {
   listConfigRollouts,
 } from "../api/config";
 import { AgentTypeBadge } from "../components/AgentTypeBadge";
+import { ConnectFirstAgent } from "../components/ConnectFirstAgent";
 import { EmptyState } from "../components/EmptyState";
+import { FleetTopology } from "../components/FleetTopology";
 import { StatusBadge } from "../components/StatusBadge";
-import { buttonStyles } from "../components/ui/Button";
 import { PageHeader } from "../components/ui/PageHeader";
 
 /**
@@ -23,6 +24,13 @@ import { PageHeader } from "../components/ui/PageHeader";
  * endpoints (no new server surface): the fleet list + query schema for the
  * health/type counts, the config revisions and rollouts for activity, the
  * alerts config for what is armed.
+ *
+ * Two states, one page:
+ * - **fleet empty** → the server/fleet graphic next to the inline mint flow
+ *   (`ConnectFirstAgent`). Owner: "when there are no agents connected I want
+ *   generate API token right there". No trip through Agent tokens.
+ * - **fleet connected** → the same graphic as a compact hero above the counts,
+ *   with a measured, drawing line per agent.
  */
 
 /** Rollout states the strip treats as done (from RolloutMonitor's vocabulary). */
@@ -98,7 +106,10 @@ function useOverviewData() {
   const agents = useQuery({
     queryKey: ["agents", {}],
     queryFn: () => listAgents(),
-    refetchInterval: 30_000,
+    // Nothing connected yet means someone is probably about to connect one:
+    // poll briskly so the hero flips to the fleet view on its own.
+    refetchInterval: (query) =>
+      (query.state.data?.count ?? 0) === 0 ? 5_000 : 30_000,
   });
   const types = useQuery({
     queryKey: ["agent-types"],
@@ -151,8 +162,12 @@ export default function Overview() {
   return (
     <section className="flex flex-col gap-4">
       <PageHeader
-        title="Overview"
-        lede="The fleet at a glance — health, configuration activity, and where to go next."
+        title={total === 0 && fleet ? "Connect your first agent" : "Overview"}
+        lede={
+          total === 0 && fleet
+            ? "The server is running and waiting. Generate a token, paste it into one agent, and it will appear here the moment it checks in."
+            : "The fleet at a glance — health, configuration activity, and where to go next."
+        }
         meta={fleet ? `${total} agent${total === 1 ? "" : "s"} connected` : undefined}
       />
 
@@ -164,23 +179,16 @@ export default function Overview() {
       )}
 
       {fleet && total === 0 && (
-        /* The empty-fleet variant hands off to Stage C/D's quickstart; until
-           that lands it points at the connect guide (Help → agent types). */
-        <EmptyState
-          title="No agents connected yet"
-          detail="Point an OpAMP agent at this server and it will appear here. Help lists each agent type's connect snippet and the tokens they need."
-        >
-          <Link to="/help" className={buttonStyles({ size: "sm" })}>
-            Open Help
-          </Link>
-          <Link to="/agent-tokens" className={buttonStyles({ size: "sm" })}>
-            Agent tokens
-          </Link>
-        </EmptyState>
+        <div className="grid items-stretch gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,380px)]">
+          <FleetTopology agents={[]} className="min-h-[200px] sm:min-h-[220px]" />
+          <ConnectFirstAgent />
+        </div>
       )}
 
       {fleet && total > 0 && (
         <>
+          <FleetTopology agents={fleet.agents} className="min-h-[180px]" />
+
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4" aria-label="Fleet health">
             <Stat label="Agents connected" value={total} to="/agents" />
             <Stat label="Healthy" value={healthy} tone="ok" to="/agents" />

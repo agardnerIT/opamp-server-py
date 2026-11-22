@@ -53,6 +53,10 @@ const HANDLERS: Handler[] = [
     method: "GET",
     path: "/agents",
     respond: (request) => {
+      // Zero-agent variant (see `MOCK_EMPTY_FLEET_KEY`): the quickstart screens.
+      if (emptyFleet()) {
+        return { body: { agents: [], count: 0, filters: {} } };
+      }
       const url = new URL(request.url);
       const q = url.searchParams.get("q");
       // `q` wins over the ad-hoc parameters on the server, exactly as here;
@@ -985,6 +989,24 @@ function mockGroup(
  * Playwright, which never sees a real cookie jar against mock mode).
  */
 let sessionLive = false;
+
+/**
+ * Empty-fleet variant for the zero-agent screens (Overview quickstart,
+ * `e2e/quickstart.spec.ts`): `GET /agents` answers `{agents: [], count: 0}`
+ * while this key is set in localStorage. A page can flip it mid-test to watch
+ * the console move from "connect your first agent" to a connected fleet
+ * without a second dev server or a second build.
+ *
+ * ```js
+ * localStorage.setItem("opamp-mock-empty-fleet", "1");
+ * ```
+ */
+const MOCK_EMPTY_FLEET_KEY = "opamp-mock-empty-fleet";
+
+function emptyFleet(): boolean {
+  if (typeof localStorage === "undefined") return false;
+  return localStorage.getItem(MOCK_EMPTY_FLEET_KEY) === "1";
+}
 
 /** Role of the standing mock session (stage 9): name → role on login. */
 let sessionRole = "admin";

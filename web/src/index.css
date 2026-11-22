@@ -221,12 +221,125 @@ kbd {
 
 /* ------------------------------------------------------------- motion --- */
 
+/* ---------------------------------------------------------- fleet graph --- */
+
+/* The Overview hero: the server, the fleet, and a line per agent that draws
+   itself in when the node appears. `--i` (set inline per node) staggers the
+   draw so a fleet arrives one connection at a time instead of all at once. */
+@keyframes topology-draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+/* A spark travelling the same path once the line has drawn (connectivity you
+   can see is live, not a static diagram). */
+@keyframes topology-spark {
+  0% {
+    stroke-dashoffset: 0;
+    opacity: 0;
+  }
+  12%,
+  78% {
+    opacity: 0.9;
+  }
+  100% {
+    stroke-dashoffset: -1;
+    opacity: 0;
+  }
+}
+
+/* Agent node entrance — same 200ms enter curve as every other surface. */
+@keyframes topology-node-in {
+  from {
+    opacity: 0;
+    transform: translateX(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* The server's beacon while it has nobody to talk to. */
+@keyframes topology-ping {
+  0% {
+    transform: scale(0.9);
+    opacity: 0.55;
+  }
+  70%,
+  100% {
+    transform: scale(1.9);
+    opacity: 0;
+  }
+}
+
+/* "waiting for agents" / "waiting for the first agent" pulse. */
+@keyframes topology-wait {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.topology-link {
+  stroke-dasharray: 1;
+  stroke-dashoffset: 1;
+  animation: topology-draw 620ms var(--ease-out) forwards;
+  animation-delay: calc(var(--i, 0) * 80ms);
+}
+
+.topology-spark {
+  stroke-dasharray: 0.09 0.91;
+  opacity: 0;
+  animation: topology-spark 2.8s linear infinite;
+  animation-delay: calc(700ms + var(--i, 0) * 80ms);
+}
+
+.topology-node {
+  opacity: 0;
+  animation: topology-node-in var(--duration-enter) var(--ease-out) forwards;
+  animation-delay: calc(var(--i, 0) * 80ms);
+}
+
+/* Dashed stubs into the empty sockets: "an agent will attach here", as
+   opposed to the solid, drawing lines above (already connected). */
+@keyframes topology-slot-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 0.55;
+  }
+}
+
+.topology-slot {
+  stroke-dasharray: 2 6;
+  stroke-linecap: round;
+  opacity: 0.55;
+  animation: topology-slot-in 400ms var(--ease-out) both;
+}
+
+.topology-ping {
+  animation: topology-ping 2.4s var(--ease-out) infinite;
+}
+
+.topology-wait {
+  animation: topology-wait 1.6s ease-in-out infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
   *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
+    /* Delays would otherwise hold a 0.01ms animation at its `from` frame —
+       i.e. an invisible line or node — for the length of the stagger. */
+    animation-delay: 0s !important;
     transition-duration: 0.01ms !important;
   }
 }

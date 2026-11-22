@@ -56,6 +56,7 @@ node tools/screenshot-agents.mjs         # agents list, collector detail
 node tools/screenshot-read-pages.mjs     # groups, reports
 node tools/screenshot-remote-config.mjs  # the config stepper
 node tools/screenshot-admin.mjs          # alerts, tokens, sessions, compliance, updates
+node tools/screenshot-quickstart.mjs     # zero-agent quickstart + connected Overview
 ```
 
 ## Auth (cookie sessions, stage 3)
@@ -77,12 +78,16 @@ Consequences baked into this codebase:
 
 Latest screens (mock-mode fleet fixtures, refreshed through 2027-ui Stage B —
 Stage A design system; Stage B moved `/` to an Overview dashboard and the
-agents table to `/agents`):
+agents table to `/agents`. The zero-agent screens are the quickstart: the
+`opamp-mock-empty-fleet` switch in `src/api/mock.ts` renders them without a
+second dev server, and `tools/screenshot-quickstart.mjs` captures all three):
 
 | | |
 |---|---|
 | ![Overview](../docs/screenshots/console-overview.png) | ![Agents list](../docs/screenshots/console-agents-list.png) |
-| Overview (`/`): fleet health counts, type breakdown, config activity strip, entry cards | Agents list (`/agents`): server-side SQL selection, health chips, schema columns, type + provenance badges |
+| Overview (`/`): the fleet graphic — a measured, drawing line per agent — then health counts, type breakdown, config activity, entry cards | Agents list (`/agents`): server-side SQL selection, health chips, schema columns, type + provenance badges |
+| ![Zero-agent quickstart](../docs/screenshots/console-overview-empty.png) | ![Token minted inline](../docs/screenshots/console-overview-token.png) |
+| Zero agents (`/`): the server/fleet graphic with dashed sockets, and the mint form inline — no trip through Agent tokens | Same page after minting: the once-only token, paste-ready snippet, endpoint, and a live wait that flips the page when the first agent checks in |
 | ![Agent detail](../docs/screenshots/console-agent-detail.png) | |
 | Agent detail: profile-declared telemetry panels, component inventory, masked config flagged | |
 | ![Agents with session slot](../docs/screenshots/console-agents-session.png) | ![Login error](../docs/screenshots/console-login-error.png) |
@@ -97,6 +102,33 @@ agents table to `/agents`):
 | Alerts: per-event webhooks, Switch-enabled, masked secrets kept on save | Agent tokens: mint (shown once) and revoke, state pills |
 | ![Sessions](../docs/screenshots/console-sessions.png) | ![Updates](../docs/screenshots/console-updates.png) |
 | Sessions: every honoured admin session, per-row revoke | Updates: release checks, automatic-check switch, GitHub releases link |
+
+## Overview and the zero-agent quickstart
+
+`/` is the only page with two shapes, chosen by `GET /agents`:
+
+- **Fleet empty** → the server/fleet graphic beside `ConnectFirstAgent`: label
+  (optional) + agent type, then one primary **Generate API token**. The mint is
+  the server's own `POST /agent-tokens`, so the response carries the once-only
+  token, the `endpoint` and the paste-ready `collector_snippet` for the chosen
+  profile — the page holds no snippet copy of its own. After minting, the panel
+  polls `GET /agents` every 5s (and offers **Check again**) and announces the
+  first agent by name; when one connects, the panel goes away and the page
+  becomes the connected Overview.
+- **Fleet connected** → the same graphic as a compact hero above the counts.
+
+`components/FleetTopology.tsx` draws one line per agent into a **measured**
+layout: it reads its own DOM boxes (ResizeObserver) and asks
+`lib/topology.ts` for each path, so the line meets the node edge at any width,
+with no magic numbers. A new agent's line draws itself in (dash offset on
+`pathLength=1`, staggered by `--i`) and then carries a travelling spark; the
+zero-agent state shows the same sockets with dashed stubs instead. All of that
+is CSS in `index.css` and is disabled by `prefers-reduced-motion`.
+
+The zero-agent screens are reachable in mock mode without a second server:
+`localStorage.setItem("opamp-mock-empty-fleet", "1")` makes the mock's
+`GET /agents` answer an empty fleet (`src/api/mock.ts`); `e2e/quickstart.spec.ts`
+uses it for the whole journey (empty → mint → agent appears → connected hero).
 
 ## Read pages: Reports, Groups, Help (stage 7)
 

@@ -465,7 +465,146 @@ const rollouts = [
   },
 ];
 
+/* ------------------------------------------------------------------ */
+/* Admin pages (stage 8): alerts, agent tokens, sessions, compliance,  */
+/* updates. Alert webhook fields carry the server's redaction sentinel — */
+/* the UI round-trips it verbatim and the server keeps the stored secret. */
+/* ------------------------------------------------------------------ */
+
+const alerts = {
+  types: ["webhook"],
+  events: ["new_agent", "agent_disconnected", "compliance_violation", "config_drift"],
+  config: {
+    events: {
+      new_agent: {
+        enabled: true,
+        webhook_url: "https://hooks.example.com/T000/B000/***REDACTED***",
+        headers: "***REDACTED***",
+        body_template: JSON.stringify(
+          {
+            specversion: "1.0",
+            type: "io.opentelemetry.opamp.agent.{event_type}",
+            source: "opamp-server",
+            id: "{id}",
+            time: "{time}",
+            datacontenttype: "application/json",
+            data: { message: "{message}" },
+          },
+          null,
+          2,
+        ),
+      },
+      agent_disconnected: { enabled: false, webhook_url: "", headers: "", body_template: "" },
+      compliance_violation: { enabled: false, webhook_url: "", headers: "", body_template: "" },
+      config_drift: { enabled: false, webhook_url: "", headers: "", body_template: "" },
+    },
+  },
+};
+
+const agentTokens = {
+  tokens: [
+    {
+      token_id: "tok_8f21c0",
+      label: "prod fleet",
+      agent_id: null,
+      agent_type: "otelcol",
+      created_at: "2026-11-20T09:00:00Z",
+      expires_at: null as string | null,
+      max_agents: 15,
+      agents_used: 1,
+      last_seen_at: "2026-12-01T10:40:00Z",
+      revoked_at: null as string | null,
+      expired: false,
+      active: true,
+    },
+    {
+      token_id: "tok_44aa19",
+      label: "old lab token",
+      agent_id: null,
+      agent_type: null,
+      created_at: "2026-10-02T09:00:00Z",
+      expires_at: "2026-11-01T09:00:00Z",
+      max_agents: null,
+      agents_used: 0,
+      last_seen_at: null,
+      revoked_at: null,
+      expired: true,
+      active: false,
+    },
+  ],
+  count: 2,
+};
+
+const adminSessions = {
+  sessions: [
+    {
+      session_id: "9f2ab48c7711",
+      principal_id: "legacy",
+      principal: "admin (shared password)",
+      created_at: "2026-12-01T08:00:00Z",
+      last_seen_at: "2026-12-01T10:44:00Z",
+      expires_at: "2026-12-01T11:00:00Z",
+      client_ip: "127.0.0.1",
+      user_agent: "Mozilla/5.0 (Macintosh)",
+      expired: false,
+    },
+    {
+      session_id: "5d0e91b3aa22",
+      principal_id: "alice",
+      principal: "alice",
+      created_at: "2026-12-01T07:15:00Z",
+      last_seen_at: "2026-12-01T09:30:00Z",
+      expires_at: "2026-12-01T10:15:00Z",
+      client_ip: "10.0.0.7",
+      user_agent: "Mozilla/5.0 (X11; Linux)",
+      expired: true,
+    },
+  ],
+};
+
+const policyValidation = {
+  opa_enabled: true,
+  policies: [
+    {
+      filename: "require-batch-processor.rego",
+      valid: true,
+      errors: [] as string[],
+      warnings: [] as string[],
+      name: "require-batch-processor",
+      description: "Every collector must use the batch processor",
+    },
+    {
+      filename: "broken-policy.rego",
+      valid: false,
+      errors: ["Missing package declaration: package opamp.agent.compliance.<name>"],
+      warnings: [] as string[],
+      name: null as string | null,
+      description: null as string | null,
+    },
+  ],
+};
+
+const updates = {
+  current_version: "0.9.0",
+  latest_version: "0.9.1",
+  latest_tag: "v0.9.1",
+  update_available: true,
+  checked_at: "2026-12-01T10:00:00Z",
+  next_check_at: "2026-12-01T11:00:00Z",
+  enabled: true,
+  deployment_enabled: true,
+  admin_override: null as boolean | null,
+  source: "github",
+  error: null as string | null,
+  releases_url: "https://github.com/opamp-server-py/releases",
+};
+
 export const fixtures = {
+  alerts,
+  agentTokens,
+  adminSessions,
+  policyValidation,
+  updates,
   agents: {
     agents: [collectorListEntry, genericListEntry],
     count: 2,

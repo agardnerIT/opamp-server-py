@@ -481,7 +481,7 @@ via `tools/screenshot-read-pages.mjs`. **Still to do against a live server**
 
 ---
 
-## Stage 8 — Admin pages (status: **todo**)
+## Stage 8 — Admin pages (status: **done**, 2026-12-02)
 
 Depends on: stage 3 (auth/roles).
 
@@ -489,6 +489,46 @@ Port parity for: Alerts (incl. webhook redaction round-trip rules —
 `<redacted>` sentinel = keep stored value, memory.md ~125), Compliance,
 Agent tokens (mint/revoke with confirm dialogs), Sessions (list/revoke),
 Updates, Release emails. Each is small; batch them.
+
+### Notes for next stage (written 2026-12-02 when stage 8 closed)
+
+All gates green: `npm run build` (tsc strict), vitest 71 (7 new in
+`mock.test.ts`), oxlint, Playwright 22 (5 new in `e2e/admin.spec.ts`).
+Screenshots: `docs/screenshots/console-{alerts,agent-tokens,sessions,compliance,updates}.png`
+via `tools/screenshot-admin.mjs`. Everything ran against the stateful mock;
+stage 9 owns the live pass and the role-denial cases.
+
+- **Where the pieces live**: `src/api/admin.ts` owns ALL six admin surfaces
+  (alerts, agent tokens, admin sessions, compliance, updates) — typed payloads
+  mirror the `dict`-returning handlers in `server/main.py`; components never
+  import the generated schema.
+- **Alert redaction is a round-trip, not a guard**: `webhook_url`/`headers`
+  render the `***REDACTED***` sentinel verbatim and PUT passes it back
+  unchanged (the alerts analogue of the config `<redacted>` rule; the sentinel
+  IS the API contract here — `server/alerts.py merge_redacted`). "Send test"
+  uses `/alerts/test`'s `event_config` escape hatch to validate unsaved
+  settings — Streamlit's implicit autosave-then-test is gone.
+- **Slimmed vs Streamlit, deliberately** (owner's "less is more" instruction):
+  - Alerts: an event *selector* instead of tabs; one draft at a time.
+  - Sessions: per-row Revoke button (Streamlit made the operator retype the
+    12-char id — typo bait); confirm via the shared `Modal`.
+  - Compliance: fleet-wide verdicts already live on the Agents list rows, so
+    this page keeps only policy validation, the admin reload, and a single
+    on-demand agent check (Streamlit's multiselect batch is gone).
+  - Updates and **Release emails are one page now**: the signup form lives on
+    the project's update Worker, which the REST API does not expose, and an
+    iframe would have to hard-code an external URL (same single-origin rule
+    stage 7 set for reports). The route `/release-emails` is gone — nav,
+    `nav.test.ts` and `e2e/nav.spec.ts` updated with it.
+- **Mock gotchas for the next session**: the mock session now survives full
+  page navigations by mirroring the module flag into `localStorage`
+  (`mock.ts::sessionActive/setSessionLive`) — Playwright `goto` reloads the
+  module, and admin endpoints 401 while signed out, so this is load-bearing.
+  The e2e/dev server for screenshots MUST be started with
+  `VITE_USE_MOCK_API=1 npm run dev` — without it, requests hit the Vite proxy
+  and login 401s against nothing.
+- Role hints only: mint/revoke buttons disable below `admin` with a caption;
+  the server remains the authority (stage 9 owns denial-case coverage).
 
 ---
 
@@ -518,6 +558,26 @@ Depends on: stage 9 sign-off by the owner. **Do not start without it.**
 4. Keep `opampctl` / MCP / client layers untouched (they do not use the UI).
 
 ---
+
+## Stage 11 — Stage-8 polish backlog (status: **todo**)
+
+Improvements found while building stage 8; none block stage 9.
+
+1. **Alert secret UX**: the `***REDACTED***` sentinel renders inside the
+   webhook/headers inputs. Honest, but easy to misread as a literal value —
+   consider a masked-field with a "replace secret" affordance that sends the
+   sentinel when untouched.
+2. **Alert headers validation**: the headers field is free-text JSON; the
+   server 422s on garbage. Validate client-side before save.
+3. **Batch compliance re-check**: stage 8 dropped Streamlit's multiselect
+   batch check; if the owner misses it, add a fleet re-check (loop or a bulk
+   endpoint) rather than reintroducing the multiselect.
+4. **Expose the email-subscribe URL via the API** (e.g. in `GET /updates`):
+   would let the Updates page link to the real signup form instead of GitHub
+   releases.
+5. **`session_id` reuse**: `GET /auth/sessions` returns a 12-char hash prefix;
+   if a later server change makes ids non-prefixes, the per-row Revoke flow
+   needs no change — the prefix contract is the server's to keep.
 
 ## Open questions (ask the owner before deciding unilaterally)
 

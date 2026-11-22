@@ -71,7 +71,6 @@ describe("visibleNav", () => {
       "/agent-tokens",
       "/sessions",
       "/updates",
-      "/release-emails",
     ]);
   });
 });

@@ -120,7 +120,7 @@ const HANDLERS: Handler[] = [
     method: "GET",
     path: "/auth/me",
     respond: () =>
-      sessionLive
+      sessionActive()
         ? { body: fixtures.me }
         : { body: UNAUTHORIZED, status: 401 },
   },
@@ -133,7 +133,7 @@ const HANDLERS: Handler[] = [
       try {
         const body = (await request.json()) as { password?: unknown };
         if (body.password === fixtures.validPassword) {
-          sessionLive = true;
+          setSessionLive(true);
           return { body: fixtures.session, status: 201 };
         }
         return { body: { detail: "invalid credentials" }, status: 401 };
@@ -146,8 +146,8 @@ const HANDLERS: Handler[] = [
     method: "DELETE",
     path: "/auth/session",
     respond: () => {
-      const was = sessionLive;
-      sessionLive = false;
+      const was = sessionActive();
+      setSessionLive(false);
       return { body: { logged_out: was } };
     },
   },
@@ -608,10 +608,210 @@ const HANDLERS: Handler[] = [
       return { body: rollback };
     },
   },
+
+  /* ---------------------------------------------------------------- */
+  /* Admin pages (stage 8): alerts, tokens, sessions, compliance,      */
+  /* updates. Read endpoints answer signed-in; mutating ones too — the */
+  /* mock runs as role `admin`, so role-denial cases stay Playwright   */
+  /* territory against a real server (stage 9 owns those).             */
+  /* ---------------------------------------------------------------- */
+  {
+    method: "GET",
+    path: "/alerts",
+    respond: () => (sessionActive() ? { body: fixtures.alerts } : { body: UNAUTHORIZED, status: 401 }),
+  },
+  {
+    method: "PUT",
+    path: "/alerts",
+    respond: async (request) => {
+      if (!sessionActive()) return { body: UNAUTHORIZED, status: 401 };
+      const body = (await request.json()) as {
+        events?: Record<string, Record<string, unknown>>;
+      };
+      // Round-trip semantics: a sentinel field keeps the stored value.
+      const events = fixtures.alerts.config.events as Record<string, Record<string, unknown>>;
+      for (const [event, cfg] of Object.entries(body.events ?? {})) {
+        const stored = events[event];
+        if (stored) {
+          for (const key of Object.keys(cfg)) {
+            if (cfg[key] === "***REDACTED***" && key in stored) {
+              cfg[key] = stored[key];
+            }
+          }
+        }
+        events[event] = { ...events[event], ...cfg };
+      }
+      return { body: { config: fixtures.alerts.config } };
+    },
+  },
+  {
+    method: "POST",
+    path: "/alerts/test",
+    respond: (request) => {
+      if (!sessionActive()) return { body: UNAUTHORIZED, status: 401 };
+      void request; // body accepted, outcome fixed — the mock has no webhooks.
+      return { body: { success: true, error: null } };
+    },
+  },
+  {
+    method: "GET",
+    path: "/agent-tokens",
+    respond: () =>
+      sessionActive() ? { body: fixtures.agentTokens } : { body: UNAUTHORIZED, status: 401 },
+  },
+  {
+    method: "POST",
+    path: "/agent-tokens",
+    respond: async (request) => {
+      if (!sessionActive()) return { body: UNAUTHORIZED, status: 401 };
+      const body = (await request.json().catch(() => ({}))) as {
+        label?: string;
+        expires_in_days?: number | null;
+        max_agents?: number | null;
+        agent_type?: string | null;
+      };
+      if (body.agent_type && !fixtures.agentTypes.types.some((t) => t.name === body.agent_type)) {
+        return { body: { detail: `no profile named '${body.agent_type}'` }, status: 422 };
+      }
+      const token = {
+        token_id: `tok_${nextId.token++}`, // pretend-random handle
+        label: body.label ?? null,
+        agent_id: null,
+        agent_type: body.agent_type ?? null,
+        created_at: new Date().toISOString(),
+        expires_at: body.expires_in_days
+          ? new Date(Date.now() + body.expires_in_days * 86_400_000).toISOString()
+          : null,
+        max_agents: body.max_agents ?? null,
+        agents_used: 0,
+        last_seen_at: null,
+        revoked_at: null,
+        expired: false,
+        active: true,
+      };
+      (fixtures.agentTokens.tokens as unknown[]).unshift(token);
+      fixtures.agentTokens.count += 1;
+      return {
+        status: 201,
+        body: {
+          token: `mock-${token.token_id}-not-a-real-credential`,
+          token_id: token.token_id,
+          label: token.label,
+          agent_type: token.agent_type,
+          created_at: token.created_at,
+          expires_at: token.expires_at,
+          max_agents: token.max_agents,
+          endpoint: "http://127.0.0.1:4320/v1/opamp",
+          collector_snippet: `# paste into extensions.opampextension\nserver: ${token.token_id}`,
+          note: "Shown once and not recoverable.",
+        },
+      };
+    },
+  },
+  {
+    method: "DELETE",
+    path: (path) => {
+      const m = /^\/agent-tokens\/([^/]+)$/.exec(path);
+      return m ? { token_id: m[1] } : null;
+    },
+    respond: (_request, params) => {
+      if (!sessionActive()) return { body: UNAUTHORIZED, status: 401 };
+      const token = (fixtures.agentTokens.tokens as { token_id: string; revoked_at: string | null; active: boolean }[])
+        .find((t) => t.token_id === params.token_id);
+      if (!token || token.revoked_at) {
+        return { body: { detail: "no such token, or already revoked" }, status: 404 };
+      }
+      token.revoked_at = new Date().toISOString();
+      token.active = false;
+      return { body: { token_id: token.token_id, revoked: true } };
+    },
+  },
+  {
+    method: "GET",
+    path: "/auth/sessions",
+    respond: () =>
+      sessionActive() ? { body: fixtures.adminSessions } : { body: UNAUTHORIZED, status: 401 },
+  },
+  {
+    method: "DELETE",
+    path: (path) => {
+      const m = /^\/auth\/sessions\/([^/]+)$/.exec(path);
+      return m ? { session_id: m[1] } : null;
+    },
+    respond: (_request, params) => {
+      if (!sessionActive()) return { body: UNAUTHORIZED, status: 401 };
+      if (params.session_id.length < 6) {
+        return { body: { detail: "session id must be at least 6 characters" }, status: 422 };
+      }
+      const sessions = fixtures.adminSessions.sessions;
+      const idx = sessions.findIndex((s) => s.session_id.startsWith(params.session_id));
+      if (idx < 0) return { body: { detail: "no session with that id" }, status: 404 };
+      sessions.splice(idx, 1);
+      return { body: { session_id: params.session_id, revoked: true } };
+    },
+  },
+  {
+    method: "GET",
+    path: "/compliance/validate",
+    respond: () => ({ body: fixtures.policyValidation }),
+  },
+  {
+    method: "POST",
+    path: "/compliance/reload",
+    respond: () =>
+      sessionActive()
+        ? { body: { success: true } }
+        : { body: { detail: "Authentication required" }, status: 401 },
+  },
+  {
+    method: "POST",
+    path: (path) => {
+      const m = /^\/compliance\/check\/([^/]+)$/.exec(path);
+      return m ? { agent_id: m[1] } : null;
+    },
+    respond: (_request, params) => {
+      if (!sessionActive()) return { body: UNAUTHORIZED, status: 401 };
+      const detail = fixtures.agentDetails[params.agent_id];
+      if (!detail) return { body: { detail: "Agent not found" }, status: 404 };
+      const compliance = (detail as { compliance?: { compliant?: boolean | null } }).compliance;
+      return {
+        body: {
+          agent_id: params.agent_id,
+          compliant: compliance?.compliant ?? null,
+          violations: [],
+        },
+      };
+    },
+  },
+  {
+    method: "GET",
+    path: "/updates",
+    respond: () => ({ body: fixtures.updates }),
+  },
+  {
+    method: "PUT",
+    path: "/updates/settings",
+    respond: async (request) => {
+      if (!sessionActive()) return { body: UNAUTHORIZED, status: 401 };
+      const body = (await request.json()) as { enabled?: boolean | null };
+      fixtures.updates.admin_override = body.enabled ?? null;
+      fixtures.updates.enabled = body.enabled ?? fixtures.updates.deployment_enabled;
+      return { body: fixtures.updates };
+    },
+  },
+  {
+    method: "POST",
+    path: "/updates/check",
+    respond: () => {
+      if (!sessionActive()) return { body: UNAUTHORIZED, status: 401 };
+      fixtures.updates.checked_at = new Date().toISOString();
+      return { body: fixtures.updates };
+    },
+  },
 ];
 
 /** Mutable config-flow state (module scope, like the session flag). */
-const nextId = { proposal: 1, revision: 1, rollout: 1, group: 3 };
+const nextId = { proposal: 1, revision: 1, rollout: 1, group: 3, token: 3 };
 const proposals = new Map<string, MockProposal>();
 const fixtureRevisions: Record<string, unknown>[] = [...fixtures.revisions];
 const rolloutsState: MockRollout[] = [...(fixtures.rollouts as MockRollout[])];
@@ -746,6 +946,29 @@ function mockGroup(
  * Playwright, which never sees a real cookie jar against mock mode).
  */
 let sessionLive = false;
+
+/**
+ * The mock session must survive full page navigations (Playwright `goto`
+ * reloads the module): in a browser the flag is mirrored into localStorage —
+ * same spirit as the httpOnly cookie it stands in for. In node (vitest) the
+ * module flag alone is used.
+ */
+const MOCK_SESSION_KEY = "opamp-mock-session-live";
+
+function sessionActive(): boolean {
+  if (typeof localStorage === "undefined") return sessionLive;
+  return sessionLive || localStorage.getItem(MOCK_SESSION_KEY) === "1";
+}
+
+function setSessionLive(on: boolean): void {
+  sessionLive = on;
+  try {
+    if (on) localStorage.setItem(MOCK_SESSION_KEY, "1");
+    else localStorage.removeItem(MOCK_SESSION_KEY);
+  } catch {
+    /* storage unavailable (node, privacy mode) — the flag still works */
+  }
+}
 
 const LATENCY_MS = 50;
 const UNAUTHORIZED = { detail: "session expired or missing" } as const;

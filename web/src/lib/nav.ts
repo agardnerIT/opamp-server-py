@@ -29,7 +29,8 @@ export const ADMIN_NAV: NavItem[] = [
   { to: "/agent-tokens", label: "Agent tokens", minRole: "admin" },
   { to: "/sessions", label: "Sessions", minRole: "admin" },
   { to: "/updates", label: "Updates", minRole: "operator" },
-  { to: "/release-emails", label: "Release emails", minRole: "operator" },
+  // Release emails folded into Updates (stage 8): the signup form lives on
+  // the project's update Worker, which the REST API does not expose.
 ];
 
 /** Minimum role for the whole Admin section (its least-privileged page). */

@@ -20,7 +20,6 @@ const ROUTES = [
   ["/agent-tokens", "Agent tokens"],
   ["/sessions", "Sessions"],
   ["/updates", "Updates"],
-  ["/release-emails", "Release emails"],
 ] as const;
 
 test("signed in as admin: Admin section visible, every page reachable", async ({

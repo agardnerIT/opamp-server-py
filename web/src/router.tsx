@@ -16,7 +16,6 @@ import Compliance from './routes/Compliance'
 import AgentTokens from './routes/AgentTokens'
 import Sessions from './routes/Sessions'
 import Updates from './routes/Updates'
-import ReleaseEmails from './routes/ReleaseEmails'
 import NotFound from './routes/NotFound'
 import RootError from './routes/RootError'
 
@@ -101,11 +100,6 @@ const updatesRoute = createRoute({
   path: '/updates',
   component: Updates,
 })
-const releaseEmailsRoute = createRoute({
-  getParentRoute: () => shellRoute,
-  path: '/release-emails',
-  component: ReleaseEmails,
-})
 
 const routeTree = rootRoute.addChildren([
   loginRoute,
@@ -121,7 +115,6 @@ const routeTree = rootRoute.addChildren([
     agentTokensRoute,
     sessionsRoute,
     updatesRoute,
-    releaseEmailsRoute,
   ]),
 ])
 

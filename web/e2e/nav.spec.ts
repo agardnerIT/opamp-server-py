@@ -105,10 +105,21 @@ test("the Overview dashboard shows the fleet hero and activity strip", async ({ 
 });
 
 test("unknown URLs render the not-found page", async ({ page }) => {
+  // Signed in first: an *anonymous* visitor who follows "Back to Overview" is
+  // bounced to /login by the 401 handler, which made this assertion a race
+  // (the URL is "/" for one tick). The link's destination is what is under
+  // test, so give the session that can stay on it.
+  await page.goto("/login");
+  await page.getByLabel("Name").fill("admin");
+  await page.getByLabel("Password").fill(CORRECT);
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page).toHaveURL("/");
+
   await page.goto("/definitely-not-a-page");
   await expect(
     page.getByRole("heading", { level: 1, name: "Page not found" }),
   ).toBeVisible();
   await page.getByRole("link", { name: "Back to Overview" }).click();
   await expect(page).toHaveURL("/");
+  await expect(page.getByRole("heading", { level: 1, name: "Overview" })).toBeVisible();
 });

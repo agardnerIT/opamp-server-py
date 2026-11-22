@@ -30,10 +30,25 @@ test("an empty fleet lands on the quickstart with the token form inline", async 
   await expect(graphic.getByText("Server", { exact: false }).first()).toBeVisible();
   await expect(page.getByText("No agents connected — the server is listening.")).toBeVisible();
 
-  // The point of the page: mint without leaving it.
+  // The point of the page: mint without leaving it — and the expiry default
+  // is named, not implied.
   await expect(page.getByRole("button", { name: "Generate API token" })).toBeVisible();
   await expect(page.getByLabel("Label")).toBeVisible();
   await expect(page.getByLabel("Agent type")).toBeVisible();
+  const expires = page.getByLabel("Expires");
+  await expect(expires).toHaveValue("");
+  await expect(expires.getByRole("option", { name: "Never (default)" })).toHaveCount(1);
+  await expect(page.getByText("No expiry: the token works until you revoke it.")).toBeVisible();
+});
+
+test("the expiry choice is sent and shown back on the minted token", async ({ page }) => {
+  await page.getByLabel("Expires").selectOption("30");
+  await expect(page.getByText("This token stops working in 30 days.")).toBeVisible();
+  await page.getByRole("button", { name: "Generate API token" }).click();
+  await expect(page.getByText("Copy it now — it is not shown again.")).toBeVisible();
+  // The mock honours `expires_in_days`: the minted card states the date rather
+  // than leaving the operator to remember what they picked.
+  await expect(page.getByText(/Expires \d{4}-\d{2}-\d{2}\./)).toBeVisible();
 });
 
 test("minting shows the token once, with its snippet and a live wait", async ({ page }) => {

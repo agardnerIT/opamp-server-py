@@ -108,13 +108,15 @@ second dev server, and `tools/screenshot-quickstart.mjs` captures all three):
 `/` is the only page with two shapes, chosen by `GET /agents`:
 
 - **Fleet empty** → the server/fleet graphic beside `ConnectFirstAgent`: label
-  (optional) + agent type, then one primary **Generate API token**. The mint is
-  the server's own `POST /agent-tokens`, so the response carries the once-only
-  token, the `endpoint` and the paste-ready `collector_snippet` for the chosen
-  profile — the page holds no snippet copy of its own. After minting, the panel
-  polls `GET /agents` every 5s (and offers **Check again**) and announces the
-  first agent by name; when one connects, the panel goes away and the page
-  becomes the connected Overview.
+  (optional), agent **type**, and an **expiry** picker whose default option is
+  literally "Never (default)" — the server's own default, stated rather than
+  implied (with a hint line spelling out what no expiry means). Then one primary
+  **Generate API token**. The mint is the server's own `POST /agent-tokens`, so
+  the response carries the once-only token, its expiry, the `endpoint` and the
+  paste-ready `collector_snippet` for the chosen profile — the page holds no
+  snippet copy of its own. After minting, the panel polls `GET /agents` every 5s
+  (and offers **Check again**) and announces the first agent by name; when one
+  connects, the panel goes away and the page becomes the connected Overview.
 - **Fleet connected** → the same graphic as a compact hero above the counts.
 
 `components/FleetTopology.tsx` draws one line per agent into a **measured**

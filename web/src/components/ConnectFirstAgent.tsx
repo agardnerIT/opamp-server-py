@@ -44,6 +44,9 @@ export function ConnectFirstAgent() {
 
   const [label, setLabel] = useState("");
   const [agentType, setAgentType] = useState("");
+  // Empty string = the server's own default (a token that never expires). The
+  // option text says so; an operator should not have to know the default.
+  const [expiresDays, setExpiresDays] = useState("");
   const [minted, setMinted] = useState<MintedToken | null>(null);
   const [mintError, setMintError] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
@@ -53,6 +56,7 @@ export function ConnectFirstAgent() {
       mintFleetToken({
         label: label.trim() || undefined,
         agent_type: agentType || undefined,
+        expires_in_days: expiresDays ? Number(expiresDays) : undefined,
       }),
     onSuccess: (result) => {
       setMinted(result);
@@ -104,21 +108,43 @@ export function ConnectFirstAgent() {
               />
             </label>
             <label className="flex flex-col gap-1 text-xs">
-              <span className="font-medium">Agent type</span>
+              <span className="font-medium">Expires</span>
               <select
-                value={agentType}
-                onChange={(e) => setAgentType(e.target.value)}
+                value={expiresDays}
+                onChange={(e) => setExpiresDays(e.target.value)}
                 className="field"
               >
-                <option value="">default</option>
-                {(types.data?.types ?? []).map((t) => (
-                  <option key={t.name} value={t.name}>
-                    {t.display_name}
-                  </option>
-                ))}
+                <option value="">Never (default)</option>
+                <option value="1">In 1 day</option>
+                <option value="7">In 7 days</option>
+                <option value="30">In 30 days</option>
+                <option value="90">In 90 days</option>
+                <option value="365">In 365 days</option>
               </select>
             </label>
           </div>
+
+          <label className="flex flex-col gap-1 text-xs">
+            <span className="font-medium">Agent type</span>
+            <select
+              value={agentType}
+              onChange={(e) => setAgentType(e.target.value)}
+              className="field"
+            >
+              <option value="">default</option>
+              {(types.data?.types ?? []).map((t) => (
+                <option key={t.name} value={t.name}>
+                  {t.display_name}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <p className="text-[11.5px] leading-relaxed text-[var(--color-muted)]">
+            {expiresDays
+              ? `This token stops working in ${expiresDays} day${expiresDays === "1" ? "" : "s"}.`
+              : "No expiry: the token works until you revoke it. Pick a window if it might leak."}
+          </p>
 
           <Button type="submit" variant="primary" size="lg" disabled={mint.isPending || !canMint}>
             {mint.isPending ? "Generating…" : "Generate API token"}
@@ -151,7 +177,10 @@ export function ConnectFirstAgent() {
             </pre>
             <p className="mt-2 text-[11.5px] text-[var(--color-muted)]">
               Agents connect to{" "}
-              <code className="text-[var(--color-text)]">{minted.endpoint}</code>
+              <code className="text-[var(--color-text)]">{minted.endpoint}</code>.{" "}
+              {minted.expires_at
+                ? `Expires ${minted.expires_at.slice(0, 10)}.`
+                : "No expiry — revoke it when you are done."}
             </p>
           </div>
 

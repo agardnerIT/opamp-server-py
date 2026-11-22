@@ -25,6 +25,7 @@ console.log("saved ../docs/screenshots/console-overview-empty.png");
 // waiting state, which is the screen an operator is looking at when their
 // first agent arrives.
 await page.getByLabel("Label").fill("prod");
+await page.getByLabel("Expires").selectOption("30");
 await page.getByRole("button", { name: "Generate API token" }).click();
 await page.getByText("Copy it now", { exact: false }).waitFor();
 await page.waitForTimeout(400);

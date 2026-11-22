@@ -947,6 +947,22 @@ def current_principal(request: Request) -> Optional[Principal]:
 # ---------------------------------------------------------------- enforcement
 
 
+def _challenge_headers(request: Request) -> Dict[str, str]:
+    """Authentication hint for a 401 — but never to a browser.
+
+    A browser turns any 401 carrying `WWW-Authenticate: Basic` into the native
+    basic-auth popup, and (once credentials are entered) attaches
+    `Authorization: Basic` to every later request on the origin — which, per
+    `authenticate()`'s contract, outranks the session cookie. That both breaks
+    the cookie-session UI and traps it in a popup loop. Browsers mark every
+    fetch/navigation with `Sec-Fetch-Dest`; API clients (curl, opampctl,
+    scripts) do not, so the challenge is kept for them only.
+    """
+    if request.headers.get("sec-fetch-dest") is not None:
+        return {}
+    return {"WWW-Authenticate": 'Basic realm="opamp", Bearer'}
+
+
 def require_roles(request: Request, required: str) -> Principal:
     """Enforce `required` and return the caller. Raises `HTTPException` otherwise.
 
@@ -1024,7 +1040,7 @@ def require_roles(request: Request, required: str) -> Principal:
         raise HTTPException(
             status_code=401,
             detail="invalid credentials",
-            headers={"WWW-Authenticate": 'Basic realm="opamp", Bearer'},
+            headers=_challenge_headers(request),
         )
 
     if not role_satisfies(principal.role, required):

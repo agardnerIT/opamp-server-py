@@ -751,6 +751,30 @@ class TestCookieSessions:
         assert me.status_code == 200
         assert me.json()["method"] == "session" and me.json()["role"] == "admin"
 
+    def test_401_challenge_is_not_sent_to_browsers(self, client, legacy):
+        """A 401 + `WWW-Authenticate: Basic` makes a browser pop the native
+        basic-auth dialog (and any entered credentials then outrank the cookie
+        on every later request). Browser-initiated requests are marked by
+        `Sec-Fetch-Dest`; the challenge is for API clients only."""
+        # API client (no Sec-Fetch-*): challenge present, as before.
+        plain = client.get("/auth/me", headers=anonymous())
+        assert plain.status_code == 401
+        assert "www-authenticate" in plain.headers
+
+        # Browser fetch (Sec-Fetch-Dest present): no challenge, no popup.
+        browser = client.get(
+            "/auth/me", headers={**anonymous(), "Sec-Fetch-Dest": "empty"}
+        )
+        assert browser.status_code == 401
+        assert "www-authenticate" not in browser.headers
+
+        # Browser navigation is covered too (Sec-Fetch-Dest: document).
+        navigate = client.get(
+            "/auth/me", headers={**anonymous(), "Sec-Fetch-Dest": "document"}
+        )
+        assert navigate.status_code == 401
+        assert "www-authenticate" not in navigate.headers
+
     def test_header_wins_over_the_cookie(self, client, legacy):
         first = login(client, "", legacy)["token"]
         second = login(client, "", legacy)["token"]

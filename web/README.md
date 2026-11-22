@@ -54,6 +54,37 @@ Latest screens (mock-mode fleet fixtures):
 | Agents list + session slot (role, expiry, Extend, Sign out) | Login with the 401 message |
 | ![Nav parity with Admin section](../docs/screenshots/console-nav-admin.png) | |
 | Sidebar at nav parity (stage 4): main pages + role-gated Admin section | |
+| ![Remote Config stepper](../docs/screenshots/console-remote-config.png) | |
+| Remote Config (stage 6): target → edit → review → propose → approve, with the rollout monitor below after creation | |
+
+## Remote Config (stage 6)
+
+The highest-stakes flow, built around **review before action**, not around a big
+red Push button (`src/components/config/ComposeStepper.tsx`):
+
+- **Propose delivers nothing.** Target (ad-hoc ids or a saved group — the
+  server re-resolves it) → edit (one object, prefilled decoded from an
+  agent's report) → review (the #100 pipeline verdict + a line diff against
+  the agent's current config) → propose (immutable revisions). Approve is a
+  separate step requiring the `approver` role; **creating the rollout IS the
+  approval**, and it releases the canary only.
+- **`<redacted>` is un-pushable in the UI too**: the editor refuses the
+  sentinel and prefill refuses a redacted report — pushing one wipes fleet
+  credentials, so it never gets as far as the server's 422.
+- **Terminal states stay terminal**: a `FAILED`/auto-reverted revision is
+  poisoned; the Revisions tab offers Reactivate (a dialog with an audited
+  reason, validation re-runs first), never an auto-retry. A paused rollout
+  shows its one reason (`RolloutMonitor`) and Resume is offered only for
+  causes fixable on the agent — abort (operator) and roll back (approver, a
+  NEW gated rollout) stay visibly different decisions.
+- **Diff** (`src/lib/textDiff.ts`): LCS line diff, unit-tested; shown only
+  when a single agent is in scope — a diff against a moving set is not a
+  review.
+
+Playwright: `e2e/remote-config.spec.ts` drives the whole stepper against the
+stateful mock transport (the mock makes "create rollout = approval"); the live
+offer→approve→push→apply round-trip is stage 9's pass. Screenshot:
+`tools/screenshot-remote-config.mjs`.
 
 ## Agents (stage 5)
 

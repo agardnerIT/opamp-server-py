@@ -283,6 +283,105 @@ const agentDetails: Record<string, AgentDetail> = {
   [GENERIC_ID]: genericDetail,
 };
 
+/* ------------------------------------------------------------------ */
+/* Config push (stage 6). Bodies live only in handlers that receive     */
+/* them; these payloads are metadata, as the server's D8 rule keeps them.*/
+/* ------------------------------------------------------------------ */
+
+/** `GET /config/posture` — everything met, push allowed, not insecure. */
+const configPosture = {
+  allowed: true,
+  insecure: false,
+  unmet: [],
+  config_push: { enabled: true, insecure: false, agent_auth: true, audit: true, tls: false, config_at_rest: "encrypted" },
+  requirements: {
+    agent_auth: { met: true, detail: "fleet token configured" },
+    audit: { met: true, detail: "audit log enabled" },
+    tls: { met: true, detail: "not required on loopback" },
+    config_push_enabled: { met: true, detail: "OPAMP_CONFIG_PUSH_ENABLED=true" },
+  },
+};
+
+/** `GET /groups` — one saved SQL selection covering both agents. */
+const groups = {
+  groups: [
+    {
+      group_id: "grp-mock-1",
+      name: "all-collectors",
+      selector_kind: "query",
+      query: "SELECT * FROM agents WHERE agent_type = 'otelcol'",
+      definition: null,
+      include: [],
+      exclude: [],
+      description: "Every collector in the fleet",
+      owner: "admin",
+      member_count: 1,
+      members: [OTCOL_ID],
+      sources: { query: [OTCOL_ID], included: [], excluded: [] },
+      unknown_pins: [],
+      health_defined: [],
+    },
+  ],
+  count: 1,
+};
+
+/** Pre-existing revision history: an active one and a poisoned one. */
+const revisions = [
+  {
+    revision_id: "rev-mock-a1",
+    agent_id: OTCOL_ID,
+    proposal_id: "prop-mock-old",
+    status: "active",
+    config_hash: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
+    author: "admin",
+    created_at: CONNECTED_AT,
+    approved_by: "admin",
+    approved_at: HEARTBEAT,
+    note: "initial pipeline",
+    parent_revision_id: null,
+    withdrawn: false,
+    failed_at: null,
+    failure_detail: null,
+    verdict: { valid: true, structure_checked: true, profile: "otelcol" },
+    group_id: null,
+    group_name: null,
+  },
+  {
+    revision_id: "rev-mock-p1",
+    agent_id: GENERIC_ID,
+    proposal_id: "prop-mock-old",
+    status: "poisoned",
+    config_hash: "b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7",
+    author: "admin",
+    created_at: CONNECTED_AT,
+    approved_by: "admin",
+    approved_at: HEARTBEAT,
+    note: "osquery object test",
+    parent_revision_id: null,
+    withdrawn: false,
+    failed_at: HEARTBEAT,
+    failure_detail: "agent reported FAILED: expected a single osquery.json object",
+    verdict: { valid: true, structure_checked: false, profile: "generic" },
+    group_id: null,
+    group_name: null,
+  },
+];
+
+/** A completed rollout, so the Rollouts tab has history on first paint. */
+const rollouts = [
+  {
+    rollout_id: "roll-mock-old",
+    proposal_id: "prop-mock-older",
+    kind: "rollout",
+    status: "completed",
+    created_at: CONNECTED_AT,
+    batch: { current: 1, count: 1 },
+    agents: 2,
+    paused_reason: null,
+    states: { applied: 2 },
+  },
+];
+
 export const fixtures = {
   agents: {
     agents: [collectorListEntry, genericListEntry],
@@ -398,6 +497,10 @@ export const fixtures = {
     ttl_seconds: 3600,
     idle_timeout_seconds: 900,
   },
+  configPosture,
+  groups,
+  revisions,
+  rollouts,
   /** `GET /auth/me` for a live session. */
   me: {
     authenticated: true,

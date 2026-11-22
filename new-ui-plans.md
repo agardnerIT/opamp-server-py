@@ -357,7 +357,7 @@ matters (panels, telemetry, capability tags).
 
 ---
 
-## Stage 6 — Remote Config + the push/release approval flow (status: **todo**)
+## Stage 6 — Remote Config + the push/release approval flow (status: **done**, 2026-11-22)
 
 Depends on: stage 5 primitives.
 
@@ -382,6 +382,54 @@ Tasks:
 Done when: an offer→approve→push→apply round-trip is doable entirely in the
 new UI against the live server; Playwright covers the stepper with a mocked
 API; screenshots in README.
+
+### Notes for next stage (written 2026-11-22 when stage 6 closed)
+
+All gates green: `npm run build` (tsc strict), vitest 57, oxlint, Playwright 14
+(3 new in `e2e/remote-config.spec.ts`). Screenshot:
+`docs/screenshots/console-remote-config.png` via `tools/screenshot-remote-config.mjs`.
+**Still to do against a live server** (stage 9 owns the live pass): the real
+offer→approve→push→apply round-trip — everything here was verified against the
+stateful mock transport.
+
+- **Where the pieces live** (reuse, do not re-invent):
+  `src/api/config.ts` (typed wrappers + narrow interfaces for posture, groups
+  read-only, validate, propose/approve/reject/reactivate, rollouts — the
+  generated schema types the defaulted `ConfigScope` booleans as required, so
+  `proposeConfig` fills them), `src/components/config/ComposeStepper.tsx`
+  (steps 1–5 + monitor), `src/components/config/RolloutMonitor.tsx` (batch
+  progress, pause-reason help, abort/resume/rollback with confirm dialogs —
+  reused by the Rollouts tab), `src/components/config/Diff.tsx` +
+  `src/lib/textDiff.ts` (LCS line diff, unit-tested), `src/components/Modal.tsx`
+  (native `<dialog>`: focus trap + Esc for free — the Radix/shadcn decision
+  deferred until a page needs more than confirm dialogs; one less dep tree).
+- **Role gating is client-side hints only** (`roleAtLeast` from
+  `useSession().data.role`): Approve & roll out, Resume, Reactivate, Rollback
+  need `approver`; Validate/Propose need `operator`. The server re-checks
+  everything.
+- **Scope coverage**: targeting supports ad-hoc agent-id selection and saved
+  groups (`{agents}` / `{group}` scopes). The raw `filter` scope and
+  `include_future` are NOT in the UI — deliberately (saved groups cover the
+  selection-reuse case). Stage 7 (Groups) should not re-add targeting UI; it
+  extends `ComposeStepper`'s scope builder only if the owner asks.
+- **Scope-change 409 handling**: on a 409 from propose, the stepper reveals
+  the `confirm_scope_change` checkbox with the server's own words — it is not
+  shown preemptively.
+- **Stage-6 task 5 ("release management parity with the Streamlit Updates
+  page") did not match reality**: the Streamlit Updates page is only the
+  update-check toggle/check (`GET /updates`, `PUT /updates/settings`,
+  `POST /updates/check`) — there is no offers/manifest release API on the
+  server (`server/manifest.py` is only the OCB manifest generator at
+  `POST /agent/{id}/manifest`). That page therefore stays with stage 8
+  (the `Updates.tsx` stub already says stage 8). Nothing release-shaped was
+  dropped.
+- **Gate seeding**: the dry-run plan seeds the gate input; the created rollout
+  always sends the gate explicitly — the box is the decision, never the server
+  default (same rule as the Streamlit page).
+- Mock mode is now stateful for config: propose/reject/reactivate/rollout
+  handlers mutate module state (`proposals`, `rolloutsState` in `mock.ts`).
+  E2E must navigate by sidebar links after mock login — a full `page.goto`
+  reloads the JS context and the session flag with it (cost 3 red tests).
 
 ---
 

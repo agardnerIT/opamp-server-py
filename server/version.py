@@ -7,4 +7,4 @@ available at runtime. `tests/test_version.py` keeps it in sync with
 `pyproject.toml`, which is what `release.py` reads.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.4.0"

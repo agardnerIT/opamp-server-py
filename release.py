@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 ####################################################################
@@ -253,6 +254,26 @@ def main():
             print("Aborted")
             return 0
     
+    # The tag must match the runtime version (#46). `server/version.py` is what
+    # the in-product update check compares against GitHub releases — if it lags
+    # the tag, released instances claim "0.2.0" forever and nag a bogus update.
+    version_py = Path("server/version.py").read_text()
+    runtime_version = re.search(r'__version__ = "([^"]+)"', version_py)
+    pyproject_version = re.search(r'^version = "([^"]+)"',
+                                  Path("pyproject.toml").read_text(), re.MULTILINE)
+    tag_version = new_version.lstrip("v")
+    if not runtime_version or not pyproject_version \
+            or runtime_version.group(1) != tag_version \
+            or pyproject_version.group(1) != tag_version:
+        print(
+            f"Refusing to tag {new_version}: the runtime version does not match.\n"
+            f"  tag:            {tag_version}\n"
+            f"  server/version.py: {runtime_version.group(1) if runtime_version else 'NOT FOUND'}\n"
+            f"  pyproject.toml:    {pyproject_version.group(1) if pyproject_version else 'NOT FOUND'}\n"
+            "Bump server/version.py and pyproject.toml first (tests/test_version.py enforces this too)."
+        )
+        return 1
+
     # Check if tag already exists
     existing_tags = get_all_tags()
     if new_version in existing_tags:

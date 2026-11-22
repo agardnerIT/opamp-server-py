@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "opamp-server-py"
-version = "0.2.0"
+version = "0.4.0"
 description = "OpenTelemetry OpAMP server with OPA compliance, OCB manifest generation, an opampctl CLI, and an AI-agent-friendly REST API"
 readme = "README.md"
 requires-python = ">=3.10"

@@ -670,6 +670,59 @@ class OpampClient:
             body["confirm_scope_change"] = True
         return self._post("/config/revisions", json=body)
 
+    def push_config(
+        self,
+        config_map: Dict[str, Any],
+        scope: Dict[str, Any],
+        *,
+        note: Optional[str] = None,
+        allow_endpoint_change: bool = False,
+        override_reason: Optional[str] = None,
+        confirm_scope_change: bool = False,
+        confirm_endpoint_change: bool = False,
+        confirm_unchecked_structure: bool = False,
+        canary_percent: Optional[float] = None,
+        max_agents_per_batch: Optional[int] = None,
+        max_percent_per_batch: Optional[float] = None,
+        health_gate_seconds: Optional[int] = None,
+        ttl_minutes: Optional[int] = None,
+        restart_after_apply: bool = False,
+    ) -> Dict[str, Any]:
+        """``POST /config/push`` — validate, approve and stage in one action (approver).
+
+        The single-action form of ``propose_config`` + ``create_config_rollout``: the
+        #100 pipeline runs first, then the revisions are activated and the canary is
+        released. Requires ``approver`` because the action *is* the approval.
+
+        Validating first (`validate_config`) is the read-only question; there is no
+        dry run on the push itself — it either validates and stages, or writes nothing.
+        """
+        body: Dict[str, Any] = {
+            "config_map": config_map,
+            "scope": scope,
+        }
+        for name, value in (
+            ("note", note),
+            ("override_reason", override_reason),
+            ("canary_percent", canary_percent),
+            ("max_agents_per_batch", max_agents_per_batch),
+            ("max_percent_per_batch", max_percent_per_batch),
+            ("health_gate_seconds", health_gate_seconds),
+            ("ttl_minutes", ttl_minutes),
+        ):
+            if value is not None:
+                body[name] = value
+        for name, enabled in (
+            ("allow_endpoint_change", allow_endpoint_change),
+            ("confirm_scope_change", confirm_scope_change),
+            ("confirm_endpoint_change", confirm_endpoint_change),
+            ("confirm_unchecked_structure", confirm_unchecked_structure),
+            ("restart_after_apply", restart_after_apply),
+        ):
+            if enabled:
+                body[name] = True
+        return self._post("/config/push", json=body)
+
     def list_config_revisions(
         self,
         agent: Optional[str] = None,

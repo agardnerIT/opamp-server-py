@@ -1,11 +1,10 @@
 import { expect, test } from "@playwright/test";
 
 /**
- * The config-push stepper end-to-end against the stateful mock transport
- * (new-ui stage 6 done-when, mocked-API half): target → edit → validate →
- * propose → plan → approve & roll out → monitor → abort. The mock makes
- * "create rollout = approval", so the whole lifecycle is exercisable without
- * the live server; the live round-trip is stage 9's pass.
+ * The config-push stepper end-to-end against the stateful mock transport:
+ * target → edit → validate → push → monitor → abort. The push is one action
+ * (no proposal step, no dry run); the mock keeps the same approval semantics,
+ * so the whole lifecycle is exercisable without the live server.
  */
 
 const CORRECT = "opamp-mock-password"; // fixtures.validPassword
@@ -35,7 +34,7 @@ async function login(page: import("@playwright/test").Page) {
   await expect(page.getByTestId("compose-stepper")).toBeVisible();
 }
 
-test("full stepper: propose → plan → approve → rollout → abort", async ({ page }) => {
+test("full stepper: validate → push → rollout → abort", async ({ page }) => {
   await login(page);
 
   // 1. Target: ad-hoc, select the collector.
@@ -50,18 +49,11 @@ test("full stepper: propose → plan → approve → rollout → abort", async (
   await page.getByRole("button", { name: "Validate" }).click();
   await expect(page.getByTestId("verdict-panel")).toContainText("Valid —");
 
-  // 4. Propose → proposal row appears.
-  await page.getByRole("button", { name: "Propose revision" }).click();
-  await expect(page.getByTestId("proposal-status")).toContainText("proposed");
+  // 4. Push: validate + activate + stage in one action.
+  await page.getByTestId("push-config").click();
 
-  // 5. Plan the rollout, then create it (the approval).
-  await page.getByRole("button", { name: "Plan the rollout (dry run)" }).click();
-  await expect(page.getByText(/Rollout plan/)).toBeVisible();
-  await expect(page.getByText(/1 batch\(es\), canary 1 agent/)).toBeVisible();
-  await page.getByTestId("approve-rollout").click();
-
-  // 6. Monitor: running rollout, canary batch in flight.
-  await expect(page.getByText("6. Roll out")).toBeVisible();
+  // 5. Monitor: running rollout, canary batch in flight.
+  await expect(page.getByText("5. Roll out")).toBeVisible();
   const monitor = page.getByText(/Batch 1\/1/);
   await expect(monitor).toBeVisible();
 
@@ -77,7 +69,19 @@ test("redacted bodies are refused before anything is sent", async ({ page }) => 
   await page.getByLabel("Config body").fill('exporters: <redacted>');
   await expect(page.getByText(/wipe every credential/)).toBeVisible();
   await expect(page.getByRole("button", { name: "Validate" })).toBeDisabled();
-  await expect(page.getByRole("button", { name: "Propose revision" })).toBeDisabled();
+  await expect(page.getByTestId("push-config")).toBeDisabled();
+});
+
+test("switching to a saved group does not throw", async ({ page }) => {
+  // Regression: `targetIds()` read `selectedGroup` during render before its
+  // declaration — a TDZ ReferenceError the moment the saved-group mode opened.
+  const failures: string[] = [];
+  page.on("pageerror", (error) => failures.push(error.message));
+  await login(page);
+  await page.getByRole("button", { name: "Saved group" }).click();
+  await page.getByLabel("Saved group").selectOption({ index: 1 });
+  await expect(page.getByText(/agent\(s\) in scope/)).toBeVisible();
+  expect(failures).toEqual([]);
 });
 
 test("rollouts and revisions history tabs render", async ({ page }) => {

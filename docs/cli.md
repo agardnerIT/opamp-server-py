@@ -51,6 +51,10 @@ opampctl config reactivate prop-… --reason "component now installed"
 opampctl agents config rollback <agent-id> --note "v2 broke tracing"
 opampctl --db data/opamp.db config revisions     # offline: read the store directly
 
+# One-shot push: validate -> activate -> staged rollout (no separate proposal, no dry run)
+opampctl config push --file collector.yaml --attr environment=prod   # approver
+opampctl config push --file collector.yaml --agents a,b --canary-percent 10 --max-percent 10
+
 # Staged rollouts (#101)
 opampctl config rollout plan prop-…            # dry run: batches, canary, caps
 opampctl config rollout create prop-…          # approver: canary released, rest held

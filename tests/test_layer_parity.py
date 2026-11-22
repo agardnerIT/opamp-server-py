@@ -70,6 +70,8 @@ ROUTE_TO_CLIENT = {
     ("POST", "/updates/check"): "check_updates",
     ("PUT", "/updates/settings"): "set_update_check",
     ("POST", "/config/revisions"): "propose_config",
+    # One-shot validate → push: no proposal step, still an approver action.
+    ("POST", "/config/push"): "push_config",
     ("GET", "/config/revisions"): "list_config_revisions",
     ("GET", "/config/revisions/{proposal_id}"): "get_config_proposal",
     ("POST", "/config/revisions/{proposal_id}/approve"): "approve_config",
@@ -96,6 +98,7 @@ ROUTE_TO_CLIENT = {
 # Routes whose CLI spelling differs from the client method name.
 CLI_COMMANDS = {
     "config propose": ("config", "propose"),
+    "config push": ("config", "push"),
     "config validate": ("config", "validate"),
     "config revisions": ("config", "revisions"),
     "config show": ("config", "show"),

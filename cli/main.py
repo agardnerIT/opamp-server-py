@@ -616,6 +616,101 @@ def config_propose(
     )
 
 
+@config_app.command("push")
+def config_push(
+    file: Path = typer.Option(..., "--file", "-f", exists=True, dir_okay=False,
+                              help="Config body to push"),
+    content_type: str = typer.Option("text/yaml", "--content-type",
+                                     help="MIME type of the body"),
+    agent: Optional[str] = typer.Option(None, "--agent", "-a", help="Target agent id"),
+    agents: Optional[str] = typer.Option(None, "--agents",
+                                         help="Comma-separated target agent ids"),
+    attr: List[str] = typer.Option([], "--attr",
+                                   help="Selector: --attr environment=prod (repeatable)"),
+    group: List[str] = typer.Option([], "--group", "-g",
+                                    help="Target a saved selector instead (see `groups list`)"),
+    include_future: bool = typer.Option(
+        False, "--include-future",
+        help="With a selector or group: also apply to agents that match it later",
+    ),
+    use_stored_resolution: bool = typer.Option(
+        False, "--use-stored-resolution",
+        help="With a health-defined group: push to the last recorded membership",
+    ),
+    confirm_scope_change: bool = typer.Option(
+        False, "--confirm-scope-change",
+        help="With a group that resolved smaller than last time: acknowledge the dropped list",
+    ),
+    allow_endpoint_change: bool = typer.Option(
+        False, "--allow-endpoint-change",
+        help="Permit moving the opamp endpoint away from this server (approver confirms again)",
+    ),
+    override_reason: Optional[str] = typer.Option(
+        None, "--override-reason",
+        help="Record why a policy violation is acceptable (audited)",
+    ),
+    role: str = typer.Option("", "--role",
+                             help="Agent-defined role for this config object (v0.20.0)"),
+    note: Optional[str] = typer.Option(None, "--note", help="Reason, recorded in the audit log"),
+    canary_percent: Optional[float] = typer.Option(
+        None, "--canary-percent", help="Canary size as a percentage [default: server setting]",
+    ),
+    max_agents: Optional[int] = typer.Option(
+        None, "--max-agents", help="Absolute batch cap [default: server setting]"
+    ),
+    max_percent: Optional[float] = typer.Option(
+        None, "--max-percent", help="Batch cap as a percentage [default: server setting]"
+    ),
+    health_gate: Optional[int] = typer.Option(
+        None, "--health-gate", help="Seconds a batch must stay green [default: server setting]"
+    ),
+    ttl_minutes: Optional[int] = typer.Option(
+        None, "--ttl-minutes", help="Cancel a stalled rollout after N minutes [default: 60]"
+    ),
+    restart: bool = typer.Option(
+        False, "--restart", help="Queue a restart for each agent once its batch passes"
+    ),
+    confirm_unchecked_structure: bool = typer.Option(
+        False, "--confirm-unchecked-structure",
+        help="Acknowledge that no structural checks ran for at least one target",
+    ),
+) -> None:
+    """Validate a config and push it as a staged rollout — no proposal step (approver).
+
+    Runs the #100 pipeline first, then activates the revision and releases the canary
+    only. The rest of the fleet is promoted one batch per health gate. Use
+    `opampctl config validate` for the read-only check; there is no dry run here.
+    """
+    config_map = _read_config_file(file, role=role)
+    config_map[""]["content_type"] = content_type
+
+    scope = _group_targets(agent, agents, attr, group)
+    if scope.get("filter") or scope.get("group"):
+        scope["include_future"] = include_future
+    if use_stored_resolution:
+        if not scope.get("group"):
+            _fail("--use-stored-resolution only applies with --group")
+        scope["use_stored_resolution"] = True
+
+    _run(
+        lambda oc: oc.push_config(
+            config_map,
+            scope=scope,
+            note=note,
+            allow_endpoint_change=allow_endpoint_change,
+            override_reason=override_reason,
+            confirm_scope_change=confirm_scope_change,
+            confirm_unchecked_structure=confirm_unchecked_structure,
+            canary_percent=canary_percent,
+            max_agents_per_batch=max_agents,
+            max_percent_per_batch=max_percent,
+            health_gate_seconds=health_gate,
+            ttl_minutes=ttl_minutes,
+            restart_after_apply=restart,
+        )
+    )
+
+
 @config_app.command("revisions")
 def config_revisions(
     agent: Optional[str] = typer.Option(None, "--agent", "-a", help="Filter by agent id"),

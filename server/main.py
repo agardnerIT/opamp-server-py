@@ -3279,6 +3279,36 @@ class ProposeConfigRequest(BaseModel):
     confirm_scope_change: bool = False
 
 
+class PushConfigRequest(BaseModel):
+    """Body for `POST /config/push`: validate, approve and stage in one action.
+
+    The two-phase proposal is still what the server stores (one immutable revision per
+    agent, `approved_by` recorded), but the operator does not have to *see* it: the
+    single push runs validation, activation and the staged rollout. `approver` is still
+    required — the action is the approval.
+
+    `extra="forbid"`: a mistyped `canary_percent` that silently does nothing is a
+    blast-radius bug.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    config_map: Dict[str, Any]
+    scope: ConfigScope
+    note: Optional[str] = None
+    allow_endpoint_change: bool = False
+    override_reason: Optional[str] = None
+    confirm_scope_change: bool = False
+    confirm_endpoint_change: bool = False
+    confirm_unchecked_structure: bool = False
+    canary_percent: Optional[float] = Field(None, ge=0, le=100)
+    max_agents_per_batch: Optional[int] = Field(None, ge=1)
+    max_percent_per_batch: Optional[float] = Field(None, ge=0, le=100)
+    health_gate_seconds: Optional[int] = Field(None, ge=0)
+    ttl_minutes: Optional[int] = Field(None, ge=0)
+    restart_after_apply: bool = False
+
+
 class ApproveConfigRequest(BaseModel):
     """Body for approving a proposal (#99). An override needs a recorded reason."""
 
@@ -5102,6 +5132,174 @@ def apply_config_revision(
     `dry_run: true` plans without approving.
     """
     return create_config_rollout(body, proposal_id, request, _gate, _audit)
+
+
+def _public_verdict(verdict: "config_validation.Verdict") -> Dict[str, Any]:
+    """The `/config/validate` shape of a verdict, reused by the one-shot push.
+
+    `Verdict.to_dict()` is the *stored* shape (`ok`, Finding objects); the API has
+    always spoken `valid` + message strings + `details`. Two shapes for one answer is
+    how a UI renders "valid: undefined", so both routes go through this.
+    """
+    return {
+        "valid": verdict.ok,
+        "errors": verdict.error_messages,
+        "details": [finding.to_dict() for finding in verdict.errors],
+        "warnings": verdict.warning_messages,
+        "warning_details": [finding.to_dict() for finding in verdict.warnings],
+        "policy": verdict.policy,
+        "fingerprint": verdict.fingerprint(),
+        "config_hash": (
+            remote_config.compute_hash(verdict.normalised)
+            if verdict.normalised
+            else None
+        ),
+        "size_bytes": _config_size(verdict.normalised),
+        "objects": len(verdict.normalised) or None,
+        "profile": verdict.profile,
+        "profile_source": verdict.profile_source,
+        "structure_checked": verdict.structure_checked,
+    }
+
+
+@app.post(
+    "/config/push",
+    tags=["config"],
+    summary="Validate, approve and stage a config in one push (approver)",
+)
+def push_config(
+    body: PushConfigRequest,
+    request: Request,
+    _gate=Depends(posture.config_push_gate),
+    _audit=Depends(require_audit("config.push")),
+):
+    """Validate a config and push it as a staged rollout — no separate proposal step.
+
+    The flow is **validate → push**: `POST /config/validate` shows the verdict, then
+    this route does the three writes a two-phase flow would have split across propose
+    and create-rollout:
+
+    1. one immutable revision per target agent (`proposed`), kept as history;
+    2. activation, superseding the agent's previous revision, with every assignment
+       **held** so no polling agent can collect it before its batch is released;
+    3. the rollout, canary first, gated on the same health evidence (`POST
+       /config/rollouts` semantics).
+
+    Requires `approver` — the single action now covers the approval a second person
+    used to give, so the role is the thing that stays. A blocked config writes no
+    revision (the pipeline runs before the first mutation) and a rollout that fails
+    after activation marks the new revisions `rejected` with the reason, so a failed
+    push never leaves a `proposed` proposal behind.
+
+    There is no dry run: validating is the read-only question, and the push either
+    validates and stages or writes nothing.
+
+    The per-agent bodies are still not readable from this route's response; read
+    `GET /agent/{id}/config` (redacted) as before.
+    """
+    principal = require_roles(request, ROLE_APPROVER)
+    try:
+        scope = config_control.parse_scope(
+            body.scope.model_dump(),
+            agents=AGENT_REGISTRY.list_all(),
+            actor=principal.name,
+            use_stored_resolution=body.scope.use_stored_resolution,
+            confirm_scope_change=body.confirm_scope_change,
+        )
+        prepared = config_control.prepare(
+            body.config_map,
+            scope=scope,
+            agents=AGENT_REGISTRY.list_all(),
+            allow_endpoint_change=body.allow_endpoint_change,
+            override_reason=body.override_reason,
+        )
+    except config_control.ConfigControlError as exc:
+        # Nothing has been written yet, so there is no partial state to clean up.
+        raise _control_error(exc)
+
+    proposal_id = remote_config.new_proposal_id()
+    audit_action(
+        principal,
+        "config.push",
+        target_kind="proposal",
+        target_id=proposal_id,
+        config_hash=prepared["config_hash"],
+        agent_count=len(prepared["targets"]),
+        objects=len(prepared["config_map"]),
+        scope_kind=prepared["scope_kind"],
+        override_reason=body.override_reason,
+        note=body.note,
+        group_id=prepared["scope"].get("group_id"),
+        group_name=prepared["scope"].get("group_name"),
+        canary_percent=body.canary_percent,
+        max_agents_per_batch=body.max_agents_per_batch,
+        restart_after_apply=body.restart_after_apply,
+        confirm_endpoint_change=body.confirm_endpoint_change,
+        confirm_scope_change=body.confirm_scope_change,
+        confirm_unchecked_structure=body.confirm_unchecked_structure,
+    )
+
+    config_control.propose(
+        prepared, author=principal.name, proposal_id=proposal_id, note=body.note
+    )
+    if prepared["scope"].get("group_id"):
+        groups.record_push_resolution(
+            prepared["scope"],
+            prepared["targets"],
+            actor=principal.name,
+            reason=groups.REASON_PROPOSE,
+        )
+        PROM_GROUP_MEMBERSHIP_CHANGES.labels(reason=groups.REASON_PROPOSE).inc()
+
+    try:
+        result = rollout.create_rollout(
+            proposal_id,
+            approver=principal.name,
+            agents=AGENT_REGISTRY.list_all(),
+            note=body.note,
+            canary_percent_value=body.canary_percent,
+            max_agents_per_batch_value=body.max_agents_per_batch,
+            max_percent_per_batch_value=body.max_percent_per_batch,
+            gate_seconds=body.health_gate_seconds,
+            ttl_minutes_value=body.ttl_minutes,
+            allow_endpoint_change_confirmed=body.confirm_endpoint_change,
+            confirm_scope_change=body.confirm_scope_change,
+            confirm_unchecked_structure=body.confirm_unchecked_structure,
+            override_reason=body.override_reason,
+            restart_after_apply=body.restart_after_apply,
+        )
+    except (rollout.RolloutError, config_control.ConfigControlError) as exc:
+        detail = getattr(exc, "detail", str(exc))
+        # The proposal exists now. Mark it rejected rather than leaving a pending
+        # revision that a later "approve" could fire against a fleet that moved on.
+        try:
+            config_control.reject(
+                proposal_id,
+                approver=principal.name,
+                reason=f"push failed: {detail}",
+            )
+        except config_control.ConfigControlError:
+            pass
+        audit_action(
+            principal,
+            "config.push",
+            target_kind="proposal",
+            target_id=proposal_id,
+            config_hash=prepared["config_hash"],
+            result="error",
+            error=str(detail)[:500],
+        )
+        raise HTTPException(
+            status_code=getattr(exc, "status_code", 409), detail=detail
+        )
+
+    PROM_CONFIG_PUSHES.labels(result="pushed").inc()
+    return {
+        **result,
+        "proposal_id": proposal_id,
+        "config_hash": prepared["config_hash"],
+        "validate": _public_verdict(prepared["verdict"]),
+    }
 
 
 @app.get(

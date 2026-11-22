@@ -7,7 +7,8 @@ restarts and is idempotent.
 
 - [The Remote Config page (UI)](#the-remote-config-page-ui)
 - [Push a config](#push-a-config)
-- [Propose → approve → roll back](#propose--approve--roll-back-99)
+- [Validate → push (one action)](#validate--push-one-action)
+- [Propose → approve → roll back (two-phase)](#propose--approve--roll-back-99)
 - [Staged rollouts](#staged-rollouts-101)
 - [What validation can and cannot promise](#what-validation-can-and-cannot-promise-100)
 - [Config objects](#config-objects-68)
@@ -138,6 +139,28 @@ How delivery works:
   `confirm_unchecked_structure`: nobody, including the server, checked that the config
   leaves the agent able to start. The acknowledgement is stored on the revision and in
   the audit row.
+
+## Validate → push (one action)
+
+`POST /config/push` is the flow the console's compose stepper uses: **validate, then
+push**. It runs the #100 pipeline, stores one immutable revision per target, activates
+it with every assignment held (so no polling agent can collect a config whose batch has
+not been released), and starts the staged rollout — canary first, gated after that.
+
+No proposal is visible to the operator, and none is left behind: a config that fails
+validation writes nothing, and a rollout that fails after activation marks the new
+revisions `rejected` with the reason. There is no dry run: `POST /config/validate` is
+the read-only question, and the push either validates and stages or writes nothing. The
+push requires `approver` — the single action is the approval, and `approved_by` is
+still recorded on every revision.
+
+```
+opampctl config push --file collector.yaml --group prod-emea --canary-percent 5
+```
+
+The two-phase API below still exists for scripted/engineered approvals (operator
+proposes, a different approver decides). It is the same lifecycle; the one-shot push
+just skips the intermediate pause.
 
 ## Propose → approve → roll back (#99)
 

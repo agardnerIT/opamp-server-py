@@ -95,7 +95,7 @@ second dev server, and `tools/screenshot-quickstart.mjs` captures all three):
 | ![Nav parity with Admin section](../docs/screenshots/console-nav-admin.png) | |
 | Sidebar at nav parity: main pages + role-gated Admin section, active-nav marker | |
 | ![Remote Config stepper](../docs/screenshots/console-remote-config.png) | |
-| Remote Config: target → edit → review → propose → approve, with the rollout monitor below after creation | |
+| Remote Config: target → edit → review → push (no proposal step), with the batch plan and rollout monitor | |
 | ![Groups](../docs/screenshots/console-groups.png) | ![Reports](../docs/screenshots/console-reports.png) |
 | Groups: search → save → inspect (kind, pins, drift) → preview/edit/delete, all server-resolved | Reports: the fleet's profiles decide which reports are offered; the server's markdown, rendered and downloadable |
 | ![Alerts](../docs/screenshots/console-alerts.png) | ![Agent tokens](../docs/screenshots/console-agent-tokens.png) |

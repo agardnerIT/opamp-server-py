@@ -784,6 +784,39 @@ def test_abort_stops_promotion_within_one_tick_and_leaves_applied_agents_alone(c
                 assert remote_config.REGISTRY.get(agent_id)["held"] is True
 
 
+def test_abort_reholds_a_released_batch_and_the_monitor_stops_saying_in_flight(client):
+    """Acceptance: abort closes the delivery window `_promote` opens.
+
+    `_promote` drops the hold *before* delivering, so an agent whose batch was
+    released but that never received anything (offline at promote time, delivery
+    'queued' or 'unchanged') is pending with its hold already off. Abort must put
+    that hold back on — otherwise the aborted config is collected on the agent's
+    next poll and the rollout widens after the fact — and the rollout view must
+    stop calling the stopped batch "in_flight".
+    """
+    agent_ids = _register(client, 2)
+    proposal_id = _propose(client, agent_ids)
+    # Gate 0, 100% canary and per batch: both agents in one released batch.
+    created = _create(proposal_id, canary_percent_value=100.0)
+    assert created["batch"]["count"] == 1
+    for agent_id in agent_ids:
+        # The batch was released: holds were dropped before the delivery attempt.
+        assert (remote_config.REGISTRY.get(agent_id) or {}).get("held") is False
+
+    aborted = rollout.abort(created["rollout_id"], reason="stop")
+    assert aborted["status"] == "aborted"
+    for agent_id in agent_ids:
+        assert (remote_config.REGISTRY.get(agent_id) or {}).get("held") is True, (
+            f"{agent_id} must stay held after the abort"
+        )
+    # The next poll collects nothing: the hold makes the assignment undeliverable.
+    assert all(poll(agent_id) is False for agent_id in agent_ids)
+    # The stopped batch reads ABORTED, not IN_FLIGHT (0 applied · 1 pending made it
+    # look like the abort had not landed).
+    assert aborted["batches"][0]["status"] == "aborted"
+    assert aborted["agents"]["states"]["applied"] == 0
+
+
 def test_a_ttl_expired_rollout_is_cancelled_and_audited(client):
     """Acceptance: TTL cancels a stalled rollout and audits the reason."""
     agent_ids = _register(client, 3)
@@ -924,3 +957,56 @@ def test_a_held_assignment_is_undeliverable_and_says_so(client):
     assert decision.deliver is False
     assert decision.reason == "held_by_rollout"
     assert "batch is promoted" in remote_config.REASON_DETAILS["held_by_rollout"]
+
+
+# ------------------------------------------------------- one-shot push (#99/#101)
+
+
+def test_push_validates_activates_and_stages_in_one_call(client):
+    """The proposal step is an implementation detail: validate → push, one action."""
+    agent_ids = _register(client, 3)
+    response = client.post(
+        "/config/push",
+        json={
+            "config_map": CONFIG_V2,
+            "scope": {"agents": agent_ids},
+            # 3 agents: a 1-agent canary, then 2 (34% → ceil 2). No waiting here.
+            "health_gate_seconds": 0,
+            "canary_percent": 0,
+            "max_percent_per_batch": 34,
+        },
+        headers=admin_headers(),
+    )
+    assert response.status_code == 200, response.text
+    created = response.json()
+    assert created["status"] == "running"
+    assert created["config_hash"]
+    assert created["proposal_id"].startswith("prop-")
+
+    # The revisions are real history: one active revision per target, nothing proposed.
+    revisions = remote_config.REGISTRY.store.list_revisions(limit=10)
+    assert {row["status"] for row in revisions} == {"active"}
+    assert len(revisions) == 3
+
+    # Only the canary was released; the rest is held by the rollout, not delivered.
+    canary = created["batches"][0]["agent_ids"][0]
+    others = [a for a in agent_ids if a != canary]
+    assert remote_config.REGISTRY.get(canary)["held"] is False
+    for agent_id in others:
+        assert remote_config.REGISTRY.get(agent_id)["held"] is True
+
+
+def test_push_refuses_a_broken_config_before_writing(client):
+    agent_ids = _register(client, 1)
+    response = client.post(
+        "/config/push",
+        json={
+            "config_map": {"": {"body": "receivers: [", "content_type": "text/yaml"}},
+            "scope": {"agents": agent_ids},
+        },
+        headers=admin_headers(),
+    )
+    assert response.status_code == 422, response.text
+    assert remote_config.REGISTRY.store.list_revisions(limit=100) == []
+    assert remote_config.REGISTRY.get(agent_ids[0]) is None
+

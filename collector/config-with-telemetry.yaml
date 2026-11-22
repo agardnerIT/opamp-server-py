@@ -29,7 +29,7 @@ extensions:
     agent_description:
       include_resource_attributes: false
       non_identifying_attributes:
-        agent.name: collector4
+        agent.name: collector5
         description: foobar
         environment: development
     capabilities:
@@ -40,7 +40,7 @@ extensions:
     ppid_poll_interval: 5s
     server:
       http:
-        polling_interval: 5s
+        polling_interval: 15s
         endpoint: ${env:OPAMP_SERVER_URL:-http://host.docker.internal:4320/v1/opamp}
         headers:
           Authorization: "Bearer ${env:OPAMP_SERVER_TOKEN}"

@@ -15,10 +15,39 @@ export interface ConfigObject {
   contentType: string | null;
 }
 
+const BASE64_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+
+/**
+ * Decode an OpAMP `body` (a protobuf `bytes` field, so `MessageToDict` reports
+ * base64) to text. Mirrors `server/redaction.decode_text_body`'s conservative
+ * guards: length, padding, a strict alphabet and a printable ratio, so a plain
+ * YAML/JSON string that merely looks base64-shaped is never re-interpreted.
+ * Returns null when the value is not plausibly base64 text.
+ */
+function decodeBody(value: string): string | null {
+  if (value.length < 8 || value.length % 4 !== 0 || !BASE64_RE.test(value)) return null;
+  let text: string;
+  try {
+    const binary = atob(value);
+    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return null;
+  }
+  if (!text) return null;
+  let printable = 0;
+  for (const char of text) {
+    if (char >= " " || char === "\n" || char === "\r" || char === "\t") printable += 1;
+  }
+  return printable / text.length < 0.95 ? null : text;
+}
+
 function entryBody(entry: Record<string, unknown>): string | null {
   const body = entry.body;
   if (typeof body !== "string") return null;
-  return body;
+  // Prefill and the diff both read this: handing back the base64 blob is the
+  // "loaded from agent" bug where the editor showed `Y29ubmVjdG9yczo...`.
+  return decodeBody(body) ?? body;
 }
 
 function entryField(entry: Record<string, unknown>, name: string): string | null {

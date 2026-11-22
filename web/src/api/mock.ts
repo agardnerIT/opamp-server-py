@@ -378,6 +378,143 @@ const HANDLERS: Handler[] = [
     },
   },
   {
+    // One-shot validate → push (no proposal step). Same approval semantics as
+    // `POST /config/rollouts`: the canary is released, the rest stays pending.
+    method: "POST",
+    path: "/config/push",
+    respond: async (request) => {
+      const body = (await request.json()) as {
+        scope?: { agents?: string[]; group?: string };
+        note?: string | null;
+        canary_percent?: number | null;
+        max_agents_per_batch?: number | null;
+        max_percent_per_batch?: number | null;
+        health_gate_seconds?: number | null;
+        restart_after_apply?: boolean;
+      };
+      const denied = sessionActive() ? roleDenied("approver") : { body: UNAUTHORIZED, status: 401 };
+      if (denied) return denied;
+
+      const target = body.scope?.agents ?? (body.scope?.group ? groupMembers(body.scope.group) : []);
+      if (target.length === 0) {
+        return { body: { detail: "the scope resolved to no agents" }, status: 422 };
+      }
+      const ordered = [...target].sort();
+      const canaryPct = body.canary_percent ?? 5;
+      const maxAgents = body.max_agents_per_batch ?? 25;
+      const maxPct = body.max_percent_per_batch ?? 25;
+      const step = Math.max(1, Math.min(maxAgents, Math.ceil((ordered.length * maxPct) / 100)));
+      const canary = Math.max(1, Math.min(step, Math.ceil((ordered.length * canaryPct) / 100)));
+      const batches = [ordered.slice(0, canary)];
+      for (let index = canary; index < ordered.length; index += step) {
+        batches.push(ordered.slice(index, index + step));
+      }
+      const gate = body.health_gate_seconds ?? 90;
+      const plan = {
+        agents: ordered.length,
+        batch: {
+          count: batches.length,
+          canary_percent: canaryPct,
+          max_agents_per_batch: body.max_agents_per_batch ?? null,
+          max_percent_per_batch: body.max_percent_per_batch ?? null,
+          size: step,
+          health_gate_seconds: gate,
+          ttl_minutes: 60,
+          restart_after_apply: body.restart_after_apply ?? false,
+        },
+        batches: batches.map((members, index) => ({
+          batch: index,
+          agents: members.length,
+          agent_ids: members,
+        })),
+      };
+      const verdict = { valid: true, structure_checked: true, profile: "otelcol" };
+
+      const proposal: MockProposal = {
+        proposal_id: `prop-mock-${nextId.proposal++}`,
+        status: "active",
+        config_hash: "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+        agents: ordered.length,
+        revisions: ordered.map((agent_id) => ({
+          agent_id,
+          revision_id: `rev-${agent_id.slice(0, 4)}-${nextId.revision++}`,
+        })),
+        note: body.note ?? null,
+        created_at: new Date().toISOString(),
+      };
+      proposals.set(proposal.proposal_id, proposal);
+      fixtureRevisions.push(
+        ...proposal.revisions.map((r) => ({
+          revision_id: r.revision_id,
+          agent_id: r.agent_id,
+          proposal_id: proposal.proposal_id,
+          status: "active",
+          config_hash: proposal.config_hash,
+          author: "admin",
+          created_at: proposal.created_at,
+          approved_by: "admin",
+          approved_at: proposal.created_at,
+          note: proposal.note,
+          parent_revision_id: null,
+          withdrawn: false,
+          failed_at: null,
+          failure_detail: null,
+          verdict,
+          group_id: null,
+          group_name: null,
+        })),
+      );
+      const rollout: MockRollout = {
+        rollout_id: `roll-mock-${nextId.rollout++}`,
+        proposal_id: proposal.proposal_id,
+        kind: "rollout",
+        status: "running",
+        created_at: new Date().toISOString(),
+        expires_at: null,
+        completed_at: null,
+        paused_reason: null,
+        pause_detail: null,
+        approver: "admin",
+        note: body.note ?? null,
+        config_hash: proposal.config_hash,
+        batch: {
+          current: 0,
+          count: batches.length,
+          size: step,
+          canary_percent: canaryPct,
+          max_agents_per_batch: body.max_agents_per_batch ?? null,
+          max_percent_per_batch: body.max_percent_per_batch ?? null,
+          health_gate_seconds: gate,
+          ttl_minutes: 60,
+          restart_after_apply: body.restart_after_apply ?? false,
+          started_at: new Date().toISOString(),
+        },
+        agents: {
+          total: ordered.length,
+          states: {
+            delivered: batches[0].length,
+            pending: ordered.length - batches[0].length,
+          },
+        },
+        batches: [
+          { ...plan.batches[0], status: "in_flight", states: { delivered: batches[0].length } },
+          ...plan.batches
+            .slice(1)
+            .map((b) => ({ ...b, status: "pending", states: { pending: b.agents } })),
+        ],
+      };
+      rolloutsState.push(rollout);
+      return {
+        body: {
+          ...rollout,
+          proposal_id: proposal.proposal_id,
+          config_hash: proposal.config_hash,
+          validate: verdict,
+        },
+      };
+    },
+  },
+  {
     method: "POST",
     path: "/config/revisions",
     respond: async (request) => {

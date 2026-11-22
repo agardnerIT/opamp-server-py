@@ -1200,6 +1200,64 @@ def _queue_restarts(
     return queued
 
 
+def preview_plan(
+    agent_ids: Sequence[str],
+    *,
+    canary_percent_value: Optional[float] = None,
+    max_agents_per_batch_value: Optional[int] = None,
+    max_percent_per_batch_value: Optional[float] = None,
+    gate_seconds: Optional[int] = None,
+    ttl_minutes_value: Optional[int] = None,
+    restart_after_apply: bool = False,
+) -> Dict[str, Any]:
+    """The batches and caps for a target set — **pure**, no proposal, no store.
+
+    Shared by `preview_rollout()` (a stored proposal) and `POST /config/push`'s dry
+    run (a config that has not been stored yet), so the plan an operator reads before
+    pushing is the plan the engine will execute.
+    """
+    ordered = sorted({str(agent_id) for agent_id in agent_ids})
+    gate = health_gate_seconds() if gate_seconds is None else int(gate_seconds)
+    ttl = ttl_minutes() if ttl_minutes_value is None else int(ttl_minutes_value)
+    batches = plan_batches(
+        ordered,
+        canary_percent_value=canary_percent_value,
+        max_agents_per_batch_value=max_agents_per_batch_value,
+        max_percent_per_batch_value=max_percent_per_batch_value,
+    )
+    return {
+        "agents": len(ordered),
+        "batch": {
+            "count": len(batches),
+            "canary_percent": (
+                canary_percent() if canary_percent_value is None else canary_percent_value
+            ),
+            "max_agents_per_batch": (
+                max_agents_per_batch()
+                if max_agents_per_batch_value is None
+                else max_agents_per_batch_value
+            ),
+            "max_percent_per_batch": (
+                max_percent_per_batch()
+                if max_percent_per_batch_value is None
+                else max_percent_per_batch_value
+            ),
+            "size": batch_size(
+                len(ordered),
+                max_agents_per_batch_value=max_agents_per_batch_value,
+                max_percent_per_batch_value=max_percent_per_batch_value,
+            ),
+            "health_gate_seconds": gate,
+            "ttl_minutes": ttl,
+            "restart_after_apply": bool(restart_after_apply),
+        },
+        "batches": [
+            {"batch": index, "agents": len(members), "agent_ids": members}
+            for index, members in enumerate(batches)
+        ],
+    }
+
+
 def preview_rollout(
     proposal_id: str,
     *,
@@ -1233,13 +1291,14 @@ def preview_rollout(
     if not agent_ids:
         raise RolloutError(409, f"proposal {proposal_id} targets no agents")
 
-    gate = health_gate_seconds() if gate_seconds is None else int(gate_seconds)
-    ttl = ttl_minutes() if ttl_minutes_value is None else int(ttl_minutes_value)
-    batches = plan_batches(
+    plan = preview_plan(
         agent_ids,
         canary_percent_value=canary_percent_value,
         max_agents_per_batch_value=max_agents_per_batch_value,
         max_percent_per_batch_value=max_percent_per_batch_value,
+        gate_seconds=gate_seconds,
+        ttl_minutes_value=ttl_minutes_value,
+        restart_after_apply=restart_after_apply,
     )
     verdict = (proposal["revisions"][0] or {}).get("verdict") or {}
     return {
@@ -1247,35 +1306,7 @@ def preview_rollout(
         "proposal_id": proposal_id,
         "config_hash": proposal.get("config_hash"),
         "status": "planned",
-        "agents": len(agent_ids),
-        "batch": {
-            "count": len(batches),
-            "canary_percent": (
-                canary_percent() if canary_percent_value is None else canary_percent_value
-            ),
-            "max_agents_per_batch": (
-                max_agents_per_batch()
-                if max_agents_per_batch_value is None
-                else max_agents_per_batch_value
-            ),
-            "max_percent_per_batch": (
-                max_percent_per_batch()
-                if max_percent_per_batch_value is None
-                else max_percent_per_batch_value
-            ),
-            "size": batch_size(
-                len(agent_ids),
-                max_agents_per_batch_value=max_agents_per_batch_value,
-                max_percent_per_batch_value=max_percent_per_batch_value,
-            ),
-            "health_gate_seconds": gate,
-            "ttl_minutes": ttl,
-            "restart_after_apply": bool(restart_after_apply),
-        },
-        "batches": [
-            {"batch": index, "agents": len(members), "agent_ids": members}
-            for index, members in enumerate(batches)
-        ],
+        **plan,
         "verdict": verdict or None,
         "delivery": {
             "state": "unchanged",
@@ -1413,6 +1444,19 @@ def abort(
         paused_reason="aborted",
         pause_detail=(reason or "aborted by an operator")[:2000],
     )
+    # Close the delivery window the docstring above promises is closed. `_promote`
+    # drops the hold *before* delivering, so an agent whose batch was released but
+    # whose delivery was refused (offline, throttled) is "pending" with the hold
+    # already off — without this it would collect the aborted config on its next
+    # poll and the abort could widen after the fact. Re-hold everything that has
+    # not applied; already-applied agents are untouched (abort is not a recall).
+    current_batch = int(rollout.get("current_batch") or 0)
+    reheld = 0
+    for row in store.agents(rollout_id):
+        if row["state"] == "applied" or row["batch_index"] > current_batch:
+            continue  # keeps its config / was never released
+        remote_config.REGISTRY.set_held(row["agent_id"], True)
+        reheld += 1
     summary = summary_of(rollout_id)
     actor = getattr(principal, "name", None) or "system"
     logger.bind(
@@ -1421,10 +1465,11 @@ def abort(
         actor=actor,
         applied=summary.get("applied"),
         pending=summary.get("pending"),
+        reheld=reheld,
     ).warning(
         f"rollout {rollout_id} aborted by {actor}: {summary.get('applied')} agent(s) "
         f"already applied are untouched, {summary.get('pending')} un-promoted agent(s) "
-        "stay held"
+        f"stay held ({reheld} hold(s) re-applied over released batches)"
     )
     audit.audit_event(
         "config.rollout.abort",
@@ -1437,6 +1482,7 @@ def abort(
         reason=reason,
         applied=summary.get("applied"),
         pending=summary.get("pending"),
+        reheld=reheld,
     )
     publish_metrics()
     return view(rollout_id)
@@ -1586,13 +1632,22 @@ def view(rollout_id: str) -> Dict[str, Any]:
         if index < int(rollout.get("current_batch") or 0):
             status = "applied"
         elif index == int(rollout.get("current_batch") or 0):
-            status = (
-                "paused"
-                if rollout.get("status") == SQLiteRolloutStore.STATUS_PAUSED
-                else "in_flight"
-            )
             if rollout.get("status") == SQLiteRolloutStore.STATUS_COMPLETED:
                 status = "applied"
+            elif rollout.get("status") in (
+                SQLiteRolloutStore.STATUS_ABORTED,
+                SQLiteRolloutStore.STATUS_CANCELLED,
+            ):
+                # A stopped rollout's current batch is not "in flight" — nothing
+                # is being promoted any more. Say so in the batch's own words so
+                # the monitor cannot read ABORTED next to an IN_FLIGHT batch.
+                status = rollout.get("status")
+            else:
+                status = (
+                    "paused"
+                    if rollout.get("status") == SQLiteRolloutStore.STATUS_PAUSED
+                    else "in_flight"
+                )
         batches.append(
             {
                 "batch": index,

@@ -32,6 +32,30 @@ describe("configObjects", () => {
     expect(configObjects({})).toEqual([]);
   });
 
+  it("base64-decodes an agent-reported body (OpAMP `bytes` in MessageToDict)", () => {
+    const yaml = "receivers:\n  otlp:\n    protocols:\n      grpc:\n";
+    const body = btoa(yaml);
+    const objects = configObjects({
+      configMap: { configMap: { "": { body, contentType: "text/yaml" } } },
+    });
+    expect(objects[0].body).toBe(yaml);
+  });
+
+  it("surfaces a `<redacted>` sentinel hidden inside a base64 body", () => {
+    const body = btoa('exporters:\n  otlp:\n    headers:\n      Authorization: "<redacted>"\n');
+    const objects = configObjects({
+      configMap: { configMap: { "": { body, contentType: "text/yaml" } } },
+    });
+    expect(objects[0].body).toContain("<redacted>");
+  });
+
+  it("leaves a plain body alone when it is too short or not base64", () => {
+    const objects = configObjects({
+      configMap: { configMap: { "": { body: "receivers: {}\n", contentType: "text/yaml" } } },
+    });
+    expect(objects[0].body).toBe("receivers: {}\n");
+  });
+
   it("keeps `<redacted>` sentinels opaque and untouched", () => {
     const objects = configObjects({
       configMap: { configMap: { "": { body: 'Authorization: "<redacted>"', contentType: "text/yaml" } } },

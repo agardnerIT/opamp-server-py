@@ -17,7 +17,7 @@ agents.
 
 - **Select agents with SQL** — `SELECT * FROM agents WHERE host_arch = 'amd64'`, saved
   as named groups ([guide](docs/sql-agent-queries.md))
-- **Push config safely** — propose → approve → canary → staged rollout, with
+- **Push config safely** — validate → push → canary → staged rollout, with
   validation, encryption and an audit trail ([docs](docs/remote-config.md))
 - **Type-blind by protocol, typed by profile** — what the server knows about an agent
   comes from a YAML dictionary, not from a product name in the code
@@ -228,7 +228,7 @@ the full variable list is in [configuration.md](docs/configuration.md).
 | [docs/connect-collectors.md](docs/connect-collectors.md) | WebSocket, TLS, polling, naming, distro matrix, OCB |
 | [docs/agent-tokens.md](docs/agent-tokens.md) | Fleet vs bound tokens, first run, rotation, cutover |
 | [docs/transports.md](docs/transports.md) | Wire limits, gzip, full-state asks, liveness, duplicate uids |
-| [docs/remote-config.md](docs/remote-config.md) | Push, propose → approve, rollouts, validation, secrets |
+| [docs/remote-config.md](docs/remote-config.md) | Push, validate → push (and the two-phase API), rollouts, validation, secrets |
 | [docs/groups.md](docs/groups.md) | Named SQL selectors as push targets |
 | [docs/sql-agent-queries.md](docs/sql-agent-queries.md) | The SQL language, schema, examples, errors |
 | [docs/agent-profiles.md](docs/agent-profiles.md) | The agent-type dictionary and its guardrails |

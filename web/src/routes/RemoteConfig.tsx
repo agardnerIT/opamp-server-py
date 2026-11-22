@@ -35,7 +35,7 @@ export default function RemoteConfig() {
     <div className="flex flex-col gap-4">
       <PageHeader
         title="Remote Config"
-        lede="Propose → review → approve → canary → gated batches. Nothing is delivered to a whole fleet without evidence that the canary came back healthy."
+        lede="Validate → push → canary → gated batches. The push is the approval; nothing reaches the rest of the fleet without evidence that the canary came back healthy."
       />
 
       {posture.data && <PostureBanner posture={posture.data} />}

@@ -1,5 +1,5 @@
-// One-off capture for the stage-6 screenshot: the Remote Config stepper after
-// a proposal exists, plus the rollout monitor (mock fleet, stateful handlers).
+// One-off capture: the Remote Config stepper at the validate → push step,
+// against the mock fleet.
 //   npm run dev -- --port 5199 --strictPort   (VITE_USE_MOCK_API=1)
 //   node tools/screenshot-remote-config.mjs
 import { chromium } from "@playwright/test";
@@ -17,7 +17,7 @@ await page.waitForURL(`${BASE}/`, { timeout: 60_000 });
 await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Remote Config" }).click();
 await page.getByTestId("compose-stepper").waitFor();
 
-// Drive the stepper to a meaningful state: target, body, validate, propose.
+// Drive the stepper to a meaningful state: target, body, validate.
 await page.getByLabel(/Select shop-prod-collector/).check();
 await page
   .getByLabel("Config body")
@@ -26,8 +26,6 @@ await page
   );
 await page.getByRole("button", { name: "Validate" }).click();
 await page.getByTestId("verdict-panel").waitFor();
-await page.getByRole("button", { name: "Propose revision" }).click();
-await page.getByTestId("proposal-status").waitFor();
 await page.waitForTimeout(300);
 await page.screenshot({ path: OUT, fullPage: true });
 console.log(`saved ${OUT}`);

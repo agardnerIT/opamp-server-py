@@ -112,7 +112,8 @@ opampctl agents compliance <agent-id>
 | Push a config (approver) | `agents config set <id> --file f.yaml` | — (never exposed) | `PUT /agent/{id}/config` |
 | Withdraw a config (approver) | `agents config withdraw <id>` | — | `DELETE /agent/{id}/config` |
 | Validate a config (safe) | `config validate --file f.yaml` | `validate_config` | `POST /config/validate` |
-| Propose a revision (draft) | `config propose --file f.yaml --attr env=prod` | `propose_config` (write-gated) | `POST /config/revisions` |
+| **Push** (validate + stage, no proposal step) | `config push --file f.yaml --attr env=prod` | — (never exposed) | `POST /config/push` |
+| Propose a revision (draft, optional two-phase) | `config propose --file f.yaml --attr env=prod` | `propose_config` (write-gated) | `POST /config/revisions` |
 | Propose to a saved selector | `config propose --file f.yaml --group prod-emea` | `propose_config` with `scope={"group": …}` | `POST /config/revisions` (`scope.group`) |
 | List/save groups | `groups list` / `groups create -n macos-au --query "SELECT ..."` | `list_groups` / `create_group` (write-gated) | `GET /groups` / `POST /groups` |
 | One group, its members and history | `groups show prod-emea` | `get_group` | `GET /groups/{id}` |

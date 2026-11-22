@@ -939,3 +939,34 @@ host *was* fixed: `osquery.config_plugin=opamp`, exactly one `battery_stats` in
   snippet with endpoint/token substituted, the #144 path working for a second
   product). Admin password in `/tmp/opamp-admin-pw`, capture payloads in
   `/tmp/falco-capture/payloads/` (both tmp — gone after reboot).
+
+## Config push: validate → push, 2027-01
+
+- The owner removed the visible **proposal step**: the flow is validate → push.
+  `POST /config/push` runs `config_control.prepare()` (the #100 pipeline), then
+  `propose()` + `rollout.create_rollout()` internally — one immutable revision per
+  agent still exists, `approved_by` is still recorded, and every non-canary assignment
+  is still held. Requires `approver` (the action is the approval); there is **no dry
+  run** — `POST /config/validate` is the read-only question. A rollout failure after
+  activation marks the new revisions `rejected`, so no pending proposal is left
+  behind. This deployment has no principals: the legacy `admin` is the only identity
+  and passes every role gate.
+- Layers: `opamp_client.push_config`, `opampctl config push` (propose's scope flags +
+  rollout knobs + `--dry-run`); no MCP tool (D9 — a push is an approval). The console
+  stepper is now Target → Edit → Validate → Push → Roll out; the Streamlit page is
+  untouched (stage-10 cut-over) and still shows propose/approve.
+- `rollout.preview_plan()` is the pure batch planner shared by `preview_rollout()` and
+  the push route's plan (the console shows the caps as fields; there is no preview).
+- **Percentage caps work** (`plan_batches`: ceil rounding; canary clamped to the step;
+  minimum one agent). On small fleets the percentage is effectively ignored — 1% of 3
+  agents rounds up to 1, and 25%/batch of 3 is 1 — which is correct, not a bug. The
+  console now exposes canary %, max agents/batch, max %/batch and the health gate.
+- **Base64 prefill (#104's React port):** `effective_config` bodies are protobuf
+  `bytes`, so `MessageToDict` reports base64. `web/src/lib/configText.ts` now decodes
+  with the server's conservative guards (length/padding/alphabet/printable ratio), so
+  prefill and the diff show YAML. A `<redacted>` sentinel inside a base64 body now
+  surfaces as text, which makes the client-side refusal work as designed.
+- **Saved-group TDZ:** `selectedGroup` was declared after `diffAgentId`, and
+  `targetIds()` runs during render → `Cannot access 'selectedGroup' before
+  initialization` on switching to Saved group. Hoisted; e2e regression asserts no
+  `pageerror`.

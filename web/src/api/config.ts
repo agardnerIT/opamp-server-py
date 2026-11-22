@@ -125,6 +125,62 @@ export async function proposeConfig(input: ProposeConfigInput): Promise<ProposeR
   );
 }
 
+/* ------------------------------------------------------------------ */
+/* One-shot push (validate → push, no proposal step)                   */
+/* ------------------------------------------------------------------ */
+
+/** `POST /config/push` — the single action behind the stepper's final button. */
+export interface PushConfigInput {
+  configMap: Record<string, unknown>;
+  scope: ConfigScope;
+  note?: string | null;
+  allowEndpointChange?: boolean;
+  confirmScopeChange?: boolean;
+  confirmEndpointChange?: boolean;
+  confirmUncheckedStructure?: boolean;
+  overrideReason?: string | null;
+  canaryPercent?: number | null;
+  maxAgentsPerBatch?: number | null;
+  maxPercentPerBatch?: number | null;
+  healthGateSeconds?: number | null;
+  ttlMinutes?: number | null;
+  restartAfterApply?: boolean;
+}
+
+/**
+ * `POST /config/push` — validate, activate and stage in one action (approver).
+ * There is no dry run: `validateConfig` is the read-only question.
+ */
+export async function pushConfig(
+  input: PushConfigInput,
+): Promise<RolloutView & { proposal_id: string }> {
+  const result = await unwrap<RolloutView & { proposal_id: string }>(
+    api.POST("/config/push", {
+      body: {
+        config_map: input.configMap,
+        scope: {
+          ...input.scope,
+          include_future: input.scope.include_future ?? false,
+          use_stored_resolution: input.scope.use_stored_resolution ?? false,
+        },
+        note: input.note ?? null,
+        allow_endpoint_change: input.allowEndpointChange ?? false,
+        override_reason: input.overrideReason ?? null,
+        confirm_scope_change: input.confirmScopeChange ?? false,
+        confirm_endpoint_change: input.confirmEndpointChange ?? false,
+        confirm_unchecked_structure: input.confirmUncheckedStructure ?? false,
+        canary_percent: input.canaryPercent ?? null,
+        max_agents_per_batch: input.maxAgentsPerBatch ?? null,
+        max_percent_per_batch: input.maxPercentPerBatch ?? null,
+        health_gate_seconds: input.healthGateSeconds ?? null,
+        ttl_minutes: input.ttlMinutes ?? null,
+        restart_after_apply: input.restartAfterApply ?? false,
+      },
+    }),
+  );
+  return result;
+}
+
 /** One revision's metadata — `config_control.revision_view()` (never a body, D8). */
 export interface ConfigRevision {
   revision_id: string;

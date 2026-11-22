@@ -60,6 +60,12 @@ export interface paths {
          *     (default 900) of inactivity. With only the legacy `ADMIN_PASSWORD` configured,
          *     any name (or none, or `admin`) works; with principals, `name` must match one.
          *
+         *     Browser clients may use the cookie the response sets (`opamp_admin_session`,
+         *     httpOnly, SameSite=Strict, `Secure` over https — `ADMIN_COOKIE_SECURE` forces
+         *     it on/off) instead of sending the token in a header; scripts keep sending
+         *     `Authorization: Bearer <token>`, which wins when both are presented. Log out
+         *     with `DELETE /auth/session` — it revokes the session and clears the cookie.
+         *
          *     Failed logins are counted per `(identity, client IP)` and answered with 429 +
          *     `Retry-After` once `ADMIN_LOGIN_MAX_ATTEMPTS` (default 5) is exceeded, with
          *     exponential backoff; the response never reveals whether the name exists. Key the
@@ -70,8 +76,9 @@ export interface paths {
          * Log out (revoke your session)
          * @description Revoke the session token used for this request. Requires a session token.
          *
-         *     Idempotent: `{"logged_out": false}` means it was already gone. HTTP Basic
-         *     callers have no session to revoke and get 400.
+         *     Also clears the browser session cookie when one was set (idempotent).
+         *     `{"logged_out": false}` means the session was already gone. HTTP Basic callers
+         *     have no session to revoke and get 400.
          */
         delete: operations["delete_session_auth_session_delete"];
         options?: never;
@@ -1867,6 +1874,48 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/config/push": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Validate, approve and stage a config in one push (approver)
+         * @description Validate a config and push it as a staged rollout — no separate proposal step.
+         *
+         *     The flow is **validate → push**: `POST /config/validate` shows the verdict, then
+         *     this route does the three writes a two-phase flow would have split across propose
+         *     and create-rollout:
+         *
+         *     1. one immutable revision per target agent (`proposed`), kept as history;
+         *     2. activation, superseding the agent's previous revision, with every assignment
+         *        **held** so no polling agent can collect it before its batch is released;
+         *     3. the rollout, canary first, gated on the same health evidence (`POST
+         *        /config/rollouts` semantics).
+         *
+         *     Requires `approver` — the single action now covers the approval a second person
+         *     used to give, so the role is the thing that stays. A blocked config writes no
+         *     revision (the pipeline runs before the first mutation) and a rollout that fails
+         *     after activation marks the new revisions `rejected` with the reason, so a failed
+         *     push never leaves a `proposed` proposal behind.
+         *
+         *     There is no dry run: validating is the read-only question, and the push either
+         *     validates and stages or writes nothing.
+         *
+         *     The per-agent bodies are still not readable from this route's response; read
+         *     `GET /agent/{id}/config` (redacted) as before.
+         */
+        post: operations["push_config_config_push_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/config/rollouts/{rollout_id}": {
         parameters: {
             query?: never;
@@ -2347,6 +2396,64 @@ export interface components {
              * @default false
              */
             confirm_scope_change: boolean;
+        };
+        /**
+         * PushConfigRequest
+         * @description Body for `POST /config/push`: validate, approve and stage in one action.
+         *
+         *     The two-phase proposal is still what the server stores (one immutable revision per
+         *     agent, `approved_by` recorded), but the operator does not have to *see* it: the
+         *     single push runs validation, activation and the staged rollout. `approver` is still
+         *     required — the action is the approval.
+         *
+         *     `extra="forbid"`: a mistyped `canary_percent` that silently does nothing is a
+         *     blast-radius bug.
+         */
+        PushConfigRequest: {
+            /** Config Map */
+            config_map: {
+                [key: string]: unknown;
+            };
+            scope: components["schemas"]["ConfigScope"];
+            /** Note */
+            note?: string | null;
+            /**
+             * Allow Endpoint Change
+             * @default false
+             */
+            allow_endpoint_change: boolean;
+            /** Override Reason */
+            override_reason?: string | null;
+            /**
+             * Confirm Scope Change
+             * @default false
+             */
+            confirm_scope_change: boolean;
+            /**
+             * Confirm Endpoint Change
+             * @default false
+             */
+            confirm_endpoint_change: boolean;
+            /**
+             * Confirm Unchecked Structure
+             * @default false
+             */
+            confirm_unchecked_structure: boolean;
+            /** Canary Percent */
+            canary_percent?: number | null;
+            /** Max Agents Per Batch */
+            max_agents_per_batch?: number | null;
+            /** Max Percent Per Batch */
+            max_percent_per_batch?: number | null;
+            /** Health Gate Seconds */
+            health_gate_seconds?: number | null;
+            /** Ttl Minutes */
+            ttl_minutes?: number | null;
+            /**
+             * Restart After Apply
+             * @default false
+             */
+            restart_after_apply: boolean;
         };
         /**
          * ReactivateConfigRequest
@@ -4510,6 +4617,39 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["RolloutRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    push_config_config_push_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PushConfigRequest"];
             };
         };
         responses: {

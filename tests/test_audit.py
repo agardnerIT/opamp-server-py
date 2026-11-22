@@ -588,6 +588,9 @@ AUDITED_ROUTES = {
     # #81: config push is the most privileged mutation in the server, so each of
     # these records before it acts (pre-write, then act — #97).
     ("PUT", "/agent/{agent_id}/config"): "config.push",
+    # One-shot validate → push (no proposal step): it validates before writing, records
+    # the decision under `config.push`, and a rollout failure appends `result="error"`.
+    ("POST", "/config/push"): "config.push",
     ("DELETE", "/agent/{agent_id}/config"): "config.withdraw",
     ("POST", "/config/apply"): "config.apply",
     # #99: the control plane. Propose records the intent (and its verdict), approve

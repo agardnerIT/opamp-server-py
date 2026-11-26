@@ -222,3 +222,6 @@ collector/supervisor-state/
 # OpAMP supervisor runtime state (instance identity) — do not commit
 collector/supervisor-state/
 .supervisor/
+
+# Supervisor driver-model plan — LOCAL ONLY, see AGENTS.md (lives in its own repo when proven)
+planning/supervisor-driver-model/

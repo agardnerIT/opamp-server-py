@@ -42,6 +42,16 @@ What this means in practice:
 - If a product has no standard-OpAMP path, the answer is "open an issue on
   their repo", not "add a shim here".
 
+## LOCAL-ONLY planning: `planning/supervisor-driver-model/` (standing note, 2026-11-24)
+
+The supervisor driver-model plan in `planning/supervisor-driver-model/` is
+**LOCAL TEST ONLY — do NOT commit or push it.** An earlier session pushed it
+to `origin` by mistake; it has been recalled from remote history. It is
+gitignored so `git add -A` / `git add .` will not pick it up — keep it that
+way. If / when the approach is proven, it moves to **its own repo**
+(working name `opamp-agent`); until then no session should commit it here,
+reference it from committed docs, or open the upstream PR draft it contains.
+
 ## Non-Interactive Shell Commands
 
 **ALWAYS use non-interactive flags** with file operations to avoid hanging on confirmation prompts.

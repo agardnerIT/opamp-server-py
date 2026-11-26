@@ -309,13 +309,14 @@ Broadcasts are sent to a segment, not to an audience.
 
 Two options, in order of preference:
 
-1. **Iframe the Worker's signup form** (`st.components.v1.iframe`). The
-   dashboard passes only `UPDATE_SUBSCRIBE_URL`. The email goes browser →
-   Worker, never through the self-hosted server. The Worker form owns the
-   consent text, Turnstile, success and error states.
-2. **Server-side POST** from the Streamlit form. Simpler to test, but the
-   operator's server becomes the sender and the Worker sees the instance's IP.
-   It also needs CORS if done from the browser.
+1. **Iframe the Worker's signup form** in the console's Updates page. The page
+   passes only `UPDATE_SUBSCRIBE_URL`. The email goes browser → Worker, never
+   through the self-hosted server. The Worker form owns the consent text,
+   Turnstile, success and error states. (If a CSP is ever added to
+   `docker/ui.nginx.conf`, it needs `frame-src` for the Worker's origin.)
+2. **Server-side POST** from the console. Simpler to test, but the operator's
+   server becomes the sender and the Worker sees the instance's IP. It also
+   needs CORS if done from the browser.
 
 Either way:
 

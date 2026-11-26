@@ -26,8 +26,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # 3.12 is what Dockerfile.server and Dockerfile.ui ship, so a failure
-        # there blocks a release. 3.11 is the low end of what the metadata
+        # 3.12 is what Dockerfile.server ships, so a failure there blocks a
+        # release. 3.11 is the low end of what the metadata
         # advertises (requires-python >=3.10); 3.13 is what developers actually
         # run locally (see the protobuf runtime-version note in memory.md).
         python-version: ["3.11", "3.12", "3.13"]
@@ -43,13 +43,12 @@ jobs:
           cache: pip
           cache-dependency-path: |
             requirements.txt
-            requirements-ui.txt
             pyproject.toml
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt -r requirements-ui.txt
+          pip install -r requirements.txt
           pip install -e ".[mcp]" pytest
 
       - name: Run test suite
@@ -58,6 +57,32 @@ jobs:
         # the installed httpx). A test needing a socket is a test that will
         # flake in CI.
         run: python -m pytest -q --durations=10
+
+  console:
+    # The console (web/) is the product UI since the stage-10 cutover: it ships as
+    # an image built by Dockerfile.ui, so a broken bundle must fail here rather
+    # than in a release build. `npm ci` means the committed lockfile is the gate.
+    # Playwright is local-only (it needs browsers and a dev server); build, unit
+    # and lint are the checks that can run offline and deterministically.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install console dependencies
+        run: npm ci
+      - name: Build (tsc strict + vite)
+        run: npm run build
+      - name: Unit tests (vitest)
+        run: npm run test
+      - name: Lint (oxlint)
+        run: npm run lint
 
   worker:
     # #46: the release-email Worker is TypeScript, so it needs its own job. It is

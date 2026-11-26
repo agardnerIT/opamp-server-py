@@ -1,13 +1,15 @@
 # OpAMP Console — frontend
 
 React 19 + TypeScript (strict) + Vite + Tailwind v4 + shadcn/ui (Radix) +
-TanStack Query/Router. See `../new-ui-plans.md` for the staged plan; this UI
-replaces the Streamlit UI (`ui/`) page by page until full parity.
+TanStack Query/Router. See `../new-ui-plans.md` for the staged plan.
 
-**All stages through 9 are done** (auth, agents, remote config, read pages,
-admin pages, test + screenshot parity) — this UI is at feature parity with
-Streamlit and ready for the stage-10 cutover sign-off. Screenshots below are
-the current console, regenerated per the [Screenshots](#screenshots) section.
+**This is the product UI.** Stage 10 cut over: `ui/` (Streamlit), `.streamlit/`
+and `requirements-ui.txt` are deleted, and port 8501 belongs to the console.
+`Dockerfile.ui` builds `web/dist` in a Node stage and serves it from nginx
+(`../docker/ui.nginx.conf`), which also proxies `/api` to the server service on
+the same origin — that is what keeps the session cookie same-site and the
+deployment free of CORS. Screenshots below are the current console, regenerated
+per the [Screenshots](#screenshots) section.
 
 ## Development
 
@@ -16,10 +18,10 @@ npm install
 npm run dev            # http://localhost:8501 (product port), proxies /api -> 127.0.0.1:4320
 ```
 
-Port 8501 is Streamlit's old port — the owner wants the console on it
-(2027-ui Stage B). `strictPort` is false, so if the compose stack's Streamlit
-UI currently owns 8501 the dev server starts on the next port up instead of
-refusing; at cut-over the port is fully handed over.
+8501 is the product port (Streamlit's old one). `strictPort` is false, so if the
+compose stack's built `ui` container owns 8501 the dev server starts on the next
+port up instead of refusing — stop `ui` (`docker compose stop ui`) if you want
+vite on 8501 itself.
 
 The FastAPI server must be running for live data (see `../startDevStack.sh`).
 Without it, run against the built-in fixtures:
@@ -37,6 +39,10 @@ npm run lint    # oxlint
 npm run e2e     # Playwright (mock-mode dev server: auth, agents, stepper, admin, roles)
 npm run e2e:live # Playwright live smoke (boots a throwaway read-only server on :4330)
 ```
+
+CI runs `build`, `test` and `lint` on every push (`.github/workflows/ci.yml`), and
+`npm ci` is the install in CI and in the image — so `package-lock.json` must be
+committed with any dependency change. Playwright runs locally, not in CI.
 
 `e2e:live` is the mock suite's complement: it starts a real FastAPI server
 (temp `DATA_DIR`, throwaway `ADMIN_PASSWORD`, config push off) on port 4330 —
@@ -59,6 +65,16 @@ node tools/screenshot-admin.mjs          # alerts, tokens, sessions, compliance,
 node tools/screenshot-quickstart.mjs     # zero-agent quickstart + connected Overview
 ```
 
+## The shipped image
+
+`../Dockerfile.ui` is the deployment: a Node stage runs `npm ci` + `npm run build`,
+then nginx serves `dist/` and proxies `/api` (prefix stripped) to `server:4320`.
+`docker-compose.yml` publishes it on `127.0.0.1:8501`. The container has no
+`env_file` and no volume on purpose — the console holds no configuration, no
+credentials and no database; it reads the fleet over the API like the CLI does.
+`docker-compose.dev.yml` rebuilds the same image from source, and its optional
+`console` profile (port 8502) runs this vite dev server in a container.
+
 ## Auth (cookie sessions, stage 3)
 
 The browser authenticates with the httpOnly `opamp_admin_session` cookie the
@@ -73,8 +89,8 @@ Consequences baked into this codebase:
   form is also a 401, but it is already on `/login` and surfaces inline.
 - "Extend" in the session slot is the audited re-auth (`extendSession`): fresh
   credentials, DELETE old session, then POST the new one. The order is inverted
-  from the Streamlit flow because the cookie must still point at the old session
-  when the DELETE lands.
+  from what any password-first flow would do because the cookie must still point
+  at the old session when the DELETE lands.
 
 Latest screens (mock-mode fleet fixtures, refreshed through 2027-ui Stage B —
 Stage A design system; Stage B moved `/` to an Overview dashboard and the
@@ -224,15 +240,15 @@ against the mock dev server (`VITE_USE_MOCK_API=1`, port 5199).
 
 ## Navigation (stage 4)
 
-The sidebar mirrors `ui/app.py`'s `st.navigation` tree so every Streamlit page
-stays reachable during the migration: Agents (`/`, default), Reports, Groups,
-Remote Config, Help, plus an **Admin** section (Alerts, Compliance, Agent
-tokens, Sessions, Updates, Release emails) with flat URLs like Streamlit's.
-The Admin section and its admin-only items (Agent tokens, Sessions) are gated
-client-side by the role ladder in `src/lib/roles.ts` — a hint only; the
-server's `require_roles` is the authority. Pages not yet built render a
-`StubPage`; unknown URLs land on the root `NotFound`; route render crashes hit
-the `RootError` boundary.
+The sidebar keeps the names and flat URLs the retired Streamlit pages had, so
+nothing was renamed in the cutover: Overview (`/`, default), Agents (`/agents`),
+Reports, Groups, Remote Config, Help, plus an **Admin** section (Alerts,
+Compliance, Agent tokens, Sessions, Updates). `Release emails` folded into
+Updates — the signup form lives on the project's update Worker, which the REST
+API does not expose. The Admin section and its admin-only items (Agent tokens,
+Sessions) are gated client-side by the role ladder in `src/lib/roles.ts` — a hint
+only; the server's `require_roles` is the authority. Unknown URLs land on the
+root `NotFound`; route render crashes hit the `RootError` boundary.
 
 ## Regenerating the API types
 

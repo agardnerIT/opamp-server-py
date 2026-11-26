@@ -71,15 +71,11 @@ def environment_keys(service: dict) -> set[str]:
     return keys
 
 
-#: Values that describe this compose stack, not the deployment. A container cannot
-#: read either of them from `.env`: the UI writes to a throwaway directory because the
-#: real volume is read-only for it, and it must address the `server` service rather
-#: than the `localhost` that a `.env` copied from `.env.sample` will contain. These may
-#: be hardcoded, and they are the *only* hardcoded settings allowed.
-TOPOLOGY = {
-    "SERVER_ADDRESS",  # which host the UI talks to
-    "DATA_DIR",  # where a read-only-volume service keeps its scratch SQLite
-}
+#: Values that describe this compose stack, not the deployment. Since the stage-10
+#: cutover the console holds no configuration at all (nginx serving a static bundle),
+#: so this allowlist is empty in practice and kept only as the gate: anything hardcoded
+#: here wins over `.env`, and that is only acceptable for topology.
+TOPOLOGY: set[str] = set()
 
 
 def env_file_services() -> list[str]:
@@ -91,13 +87,18 @@ def env_file_services() -> list[str]:
     ]
 
 
-def test_both_services_read_the_whole_dot_env():
+def test_the_server_reads_the_whole_dot_env():
     reading = env_file_services()
-    assert {"server", "ui"} <= set(reading), (
+    assert "server" in reading, (
         f"only {reading} load `{ENV_FILE}`. Compose interpolation in `environment:` "
         "covers a subset of the documented settings; the rest reach a container only "
         "through `env_file:`"
     )
+    # The console deliberately has none: it is a static bundle behind nginx, so it
+    # holds no configuration and no credentials. An `env_file:` there would put the
+    # whole `.env` — including CONFIG_AT_REST_KEY — inside the one container whose
+    # only job is serving files, for settings it cannot use.
+    assert "ui" not in reading
 
 
 def test_a_missing_dot_env_stays_a_supported_posture():

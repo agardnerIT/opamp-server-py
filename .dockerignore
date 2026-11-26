@@ -18,3 +18,11 @@ data/*.db-shm
 data/update-check.json
 data/update-settings.json
 docker/data
+
+# The console is built inside its own image (Dockerfile.ui runs `npm ci`), so the
+# host copy is never needed in the build context — and node_modules is larger than
+# the source tree it would slow down.
+web/node_modules
+web/dist
+web/test-results
+web/playwright-report

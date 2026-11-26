@@ -12,8 +12,6 @@ Every case below is one of the issue's acceptance criteria.
 import base64
 import json
 
-import yaml
-
 from server import effective_config
 from server.effective_config import (
     content_types,
@@ -279,53 +277,6 @@ class TestComponentReadCost:
         assert len(calls) == 2
 
 
-class TestUiCanRenderANonEmptyKey:
-    def test_display_yaml_uses_the_collector_object(self):
-        """The panel used to read `configMap[""]` inline, twice — so it showed nothing."""
-        from ui.config_view import display_config_yaml
-
-        rendered = display_config_yaml(json.dumps(_doc(collector=CONFIG)))
-        assert rendered is not None
-        assert "otlp" in rendered
-        # The display adds the telemetry pipeline the dashboard would configure.
-        assert "telemetry:" in rendered
-
-    def test_display_yaml_prefers_the_expanded_object(self):
-        from ui.config_view import display_config_yaml
-
-        rendered = display_config_yaml(json.dumps(_doc(**{"": CONFIG, "raw": RAW})))
-        shown = yaml.safe_load(rendered)
-        # If the `raw` object had won, there would be no `extensions` section at all.
-        assert shown["service"]["extensions"] == ["opamp"]
-
-    def test_a_non_interpreting_profile_never_gets_a_pipeline_added(self):
-        """#121: the augmentation is gated by the agent's *profile*, not by a shape.
-
-        `_COLLECTOR_SECTIONS` made this module decide what a collector config is for
-        every agent. The page now passes the resolved profile, so a `generic` agent's
-        body — which this server does not interpret — is displayed exactly as it was
-        reported: no injected `processors.batch`, no invented `traces` pipeline.
-        """
-        from server import profiles
-        from ui.config_view import display_config_yaml
-
-        rendered = display_config_yaml(
-            json.dumps(_doc(collector=CONFIG)), profile=profiles.get("generic")
-        )
-        assert rendered is not None
-        shown = yaml.safe_load(rendered)
-        assert "processors" not in shown
-        assert shown["service"] == yaml.safe_load(CONFIG)["service"]
-        assert "telemetry" not in shown["service"]
-
-    def test_display_yaml_is_none_when_nothing_parses(self):
-        from ui.config_view import display_config_yaml
-
-        assert display_config_yaml(json.dumps(_doc(**{"": "nope: [["}))) is None
-        assert display_config_yaml("") is None
-        assert display_config_yaml("not json") is None
-
-
 class TestNoDriftBetweenCallers:
     def test_state_re_exports_the_shared_function(self):
         """`from server.state import parse_effective_config` must be the same object."""
@@ -334,12 +285,17 @@ class TestNoDriftBetweenCallers:
         assert from_state is effective_config.parse_effective_config
 
     def test_the_old_hardcoded_lookup_is_gone(self):
-        """Guard against the empty-key lookup being re-inlined somewhere."""
+        """Guard against the empty-key lookup being re-inlined somewhere.
+
+        The Streamlit page that used to own this read is gone (new-ui-plans stage
+        10); the guard stays on the server tree, where the mistake would now be a
+        shared-helper regression rather than a display bug.
+        """
         from pathlib import Path
 
         root = Path(__file__).resolve().parents[1]
         offenders = []
-        for path in list(root.glob("server/*.py")) + list(root.glob("ui/**/*.py")):
+        for path in root.glob("server/*.py"):
             if path.name == "effective_config.py":
                 continue
             text = path.read_text()
@@ -374,308 +330,14 @@ def _osquery_doc():
 
 
 class TestAJsonAgentConfigIsReadable:
-    """An osquery agent's config is JSON, and the panel used to show none of it.
+    """An osquery agent's config is JSON, and the component path must keep refusing it.
 
-    The server only read bodies the agent declared as YAML, so the "Configuration"
-    panel said "No config object in this agent's report is readable as YAML" for an
-    agent that was demonstrably running a schedule. Display opts in to JSON; the
-    component/identity paths must not, or osquery looks like a collector profile.
+    The display half of this contract lived in the Streamlit panel and moved to the
+    console (`web/src/routes/AgentDetail.tsx`); what belongs here is the server rule
+    the console relies on: a JSON body is readable *only* when asked for explicitly,
+    or osquery starts looking like a collector profile.
     """
 
     def test_the_component_path_still_refuses_json(self):
         assert parse_effective_config(_osquery_doc()) == {}
         assert objects(_osquery_doc())[0].parsed is False
-
-    def test_display_accepts_the_json_body(self):
-        from ui.config_view import display_config_yaml
-
-        rendered = display_config_yaml(json.dumps(_osquery_doc()))
-
-        assert rendered is not None
-        shown = yaml.safe_load(rendered)
-        assert shown["schedule"]["battery_percentage"]["query"] == (
-            "SELECT percent_remaining FROM battery;"
-        )
-        assert shown["schedule"]["battery_percentage"]["interval"] == 30
-
-    def test_a_non_collector_config_is_not_rewritten_as_one(self):
-        from ui.config_view import display_config_yaml
-
-        shown = yaml.safe_load(display_config_yaml(json.dumps(_osquery_doc())))
-
-        # The collector augmentation would invent these. Showing (and offering for
-        # download) a config the agent never ran is worse than showing nothing.
-        for invented in ("receivers", "processors", "exporters", "service", "extensions"):
-            assert invented not in shown
-
-
-#: The body an operator copied out of the UI before #131 was fixed: base64, because
-#: that is how `MessageToDict` renders a protobuf `bytes` body. It is not a mistake
-#: the operator made — it is what the panel showed them.
-BATTERY_SCHEDULE = {
-    "schedule": {
-        "battery_stats": {
-            "query": "SELECT percent_remaining FROM battery;",
-            "interval": 32,
-        }
-    }
-}
-
-
-class TestTheEditorGetsDecodedText:
-    """Prefill must hand the editor the document, never the base64 of it (#131).
-
-    The prefill path read `configMap.configMap[*].body` straight off the report, so a
-    proposal made from a prefilled box stored and delivered the base64 line as the
-    agent's config. The decoded text is what an operator edits, and it is what the
-    API stores — base64 exists only at the protobuf boundary.
-    """
-
-    def _report(self, **entries):
-        return json.dumps(_doc(**entries))
-
-    def _json_object(self, document):
-        """A config object the agent declared as JSON, as the report renders it."""
-        return {"body": _b64(document), "content_type": "application/json"}
-
-    def test_the_body_is_the_document_not_the_base64(self):
-        from ui.config_view import editable_config
-
-        body = json.dumps(BATTERY_SCHEDULE)
-        editable = editable_config(self._report(**{"": self._json_object(body)}))
-
-        assert editable is not None
-        assert editable.body == body
-        assert "percent_remaining" in editable.body
-        # The whole point: nothing that only decodes as base64 survives into the box.
-        assert editable.body.strip().startswith("{")
-
-    def test_the_declared_content_type_is_carried_into_the_editor(self):
-        """A JSON body prefilled under `text/yaml` stores the wrong type (#118)."""
-        from ui.config_view import EDITOR_CONTENT_TYPES, editable_config
-
-        editable = editable_config(
-            self._report(**{"": self._json_object(json.dumps(BATTERY_SCHEDULE))})
-        )
-
-        assert editable.content_type == "application/json"
-        assert editable.content_type in EDITOR_CONTENT_TYPES
-
-    def test_a_collector_body_still_prefills_as_yaml(self):
-        from ui.config_view import editable_config
-
-        editable = editable_config(self._report(collector=CONFIG))
-
-        assert editable.content_type == "text/yaml"
-        assert "opamp" in yaml.safe_load(editable.body)["extensions"]
-
-    def test_the_object_shown_is_the_object_edited(self):
-        """The panel and the editor agree, or an operator edits a config they cannot see."""
-        from ui.config_view import editable_config
-
-        editable = editable_config(self._report(**{"": CONFIG, "raw": RAW}))
-
-        assert editable.key == ""
-        assert yaml.safe_load(editable.body)["service"]["extensions"] == ["opamp"]
-        # The other object is named, not silently dropped.
-        assert [key for key, _ in editable.others] == ["raw"]
-
-    def test_nothing_parseable_means_nothing_to_prefill(self):
-        from ui.config_view import editable_config
-
-        assert editable_config(self._report(**{"": "nope: [["})) is None
-        assert editable_config("") is None
-        assert editable_config("not json") is None
-        assert editable_config(None) is None
-
-    def test_a_dict_report_is_accepted(self):
-        """`GET /agent/{id}` hands back a string, but the fake and JSON paths a dict."""
-        from ui.config_view import editable_config
-
-        editable = editable_config(
-            _doc(**{"": self._json_object(json.dumps(BATTERY_SCHEDULE))})
-        )
-        assert editable is not None and "percent_remaining" in editable.body
-
-
-class TestWhenTheConfigBoxIsAnEditor:
-    """#131: the box is editable only when a change made in it can actually be proposed.
-
-    Two independent facts decide it — the server pushes config at all, and the *agent*
-    advertises `AcceptsRemoteConfig` — and a redacted report is refused whatever the two
-    say, because pushing one back wipes the fleet's credentials (#98). The decision is
-    streamlit-free so it can be asserted here instead of through a page render.
-    """
-
-    PUSH = {"enabled": True, "insecure": False}
-    AGENT = {"capabilities": 0x2 | 0x1}
-
-    def test_a_pushing_server_and_a_willing_agent_means_an_editor(self):
-        from ui.config_view import edit_blocker
-
-        assert edit_blocker(self.PUSH, self.AGENT) is None
-
-    def test_push_off_keeps_the_read_only_view_and_says_which_flag(self):
-        from ui.config_view import edit_blocker
-
-        reason = edit_blocker({"enabled": False}, self.AGENT)
-
-        assert "OPAMP_CONFIG_PUSH_ENABLED" in reason
-        # An editor whose every submit is refused by a 404 is a form that lies.
-        assert "read-only" in reason
-
-    def test_an_agent_that_cannot_accept_config_has_nothing_to_propose_to(self):
-        from ui.config_view import edit_blocker
-
-        reason = edit_blocker(self.PUSH, {"capabilities": 0x1})
-
-        assert "AcceptsRemoteConfig" in reason
-        # Not an error state: reporting a config is a legitimate agent behaviour.
-        assert "cannot accept a replacement" in reason
-
-    def test_a_missing_or_junk_capability_reads_as_cannot_accept(self):
-        from ui.config_view import accepts_remote_config, edit_blocker
-
-        assert accepts_remote_config(0x2)
-        for value in (None, "", "junk", 0x1, 0):
-            assert not accepts_remote_config(value)
-            assert edit_blocker(self.PUSH, {"capabilities": value}) is not None
-
-    def test_a_redacted_report_is_never_handed_to_an_editor(self):
-        from ui.config_view import edit_blocker
-
-        reason = edit_blocker(self.PUSH, {**self.AGENT, "effective_config_redacted": True})
-
-        assert "redacted" in reason and "#98" in reason
-        assert "credentials" in reason
-
-    def test_an_unknown_posture_reads_as_push_off(self):
-        """A server we cannot ask must not conjure an editor that its submit refuses."""
-        from ui.config_view import edit_blocker
-
-        assert edit_blocker({}, self.AGENT) is not None
-        assert edit_blocker(None, self.AGENT) is not None
-
-
-class TestTheProposalShape:
-    """One `config_map` implementation, because the key is the agent-side object name."""
-
-    def test_the_key_is_the_name_the_agent_reported(self):
-        from ui.config_view import config_map
-
-        assert config_map('{"schedule": {}}', "application/json", name="osquery.json") == {
-            "osquery.json": {"body": '{"schedule": {}}', "content_type": "application/json"}
-        }
-
-    def test_role_is_omitted_unless_the_agent_declared_one(self):
-        from ui.config_view import config_map
-
-        assert "role" not in config_map("a: b")[""]
-        assert config_map("a: b", role="raw")[""]["role"] == "raw"
-
-    def test_an_unnamed_object_keeps_the_empty_key_a_collector_uses(self):
-        from ui.config_view import config_map
-
-        assert list(config_map("a: b", name="   ")) == [""]
-
-    def test_a_missing_content_type_falls_back_to_yaml(self):
-        from ui.config_view import config_map
-
-        assert config_map("a: b", "")[""]["content_type"] == "text/yaml"
-
-
-class TestTheRedactionGuardIsTheServersOwn:
-    """A local `<redacted>` substring test misses two of the three shapes (#98).
-
-    The UI is not the boundary — `config_validation` refuses these bodies — but a page
-    that says "fine" while the server says 422 teaches operators to distrust the panel,
-    and the cheapest way to avoid a third opinion is to use the server's check.
-    """
-
-    def test_the_sentinel_the_document_marker_and_base64_of_either_are_all_caught(self):
-        import base64
-
-        from server import redaction
-        from ui.config_view import is_redacted
-
-        sentinel = "exporters:\n  otlp:\n    headers:\n      api-key: <redacted>\n"
-        marker = f"exporters: {{}}\n# {redaction.MARKER}\n"
-        encoded = base64.b64encode(sentinel.encode()).decode()
-
-        assert is_redacted(sentinel)
-        # The #98 document marker: a local `"<redacted>" in body` test misses this one.
-        assert is_redacted(marker)
-        # And the shape an operator copies out of a raw report: base64 *of* a redacted doc.
-        assert is_redacted(encoded)
-
-    def test_a_real_config_is_not_flagged(self):
-        from ui.config_view import is_redacted
-
-        assert not is_redacted("receivers:\n  otlp: {}\n")
-        assert not is_redacted("")
-        assert not is_redacted(None)
-
-
-class TestTheEditorSaysWhoseFormatItIsEditing:
-    """#121 deliverable 4: the page must not promise checks it cannot run.
-
-    The server stores, relays and displays a body it does not interpret, and the UI half
-    of that fact is this paragraph. It is `None` for a profile the server *does* interpret
-    — an otelcol fleet must gain no prose, or the golden capture moves for no reason.
-    """
-
-    def _profiles(self):
-        from server import profiles
-
-        return profiles
-
-    def test_an_interpreted_profile_gets_no_note(self):
-        from ui.config_view import editor_note, target_profiles
-
-        rows = [{"agent_type": "otelcol", "id": "a"}, {"agent_type": "otelcol", "id": "b"}]
-
-        assert [profile.name for profile in target_profiles(rows)] == ["otelcol"]
-        assert editor_note(target_profiles(rows)) is None
-
-    def test_a_profile_the_server_does_not_interpret_says_so(self):
-        from ui.config_view import editor_note, target_profiles
-
-        note = editor_note(target_profiles([{"agent_type": "generic"}]))
-
-        assert "`generic`" in note
-        assert "opaque" in note
-        # The distinction the whole deliverable exists for: well-formed is not valid.
-        assert "not that it is valid for this agent" in note
-
-    def test_a_mixed_selection_names_both_sides(self):
-        from ui.config_view import editor_note, target_profiles
-
-        note = editor_note(
-            target_profiles([{"agent_type": "otelcol"}, {"agent_type": "generic"}])
-        )
-
-        assert "mixes profiles" in note
-        assert "`otelcol`" in note and "`generic`" in note
-        assert "may be noise" in note
-
-    def test_no_selection_and_unknown_names_add_nothing(self):
-        from ui.config_view import editor_note, target_profiles
-
-        assert target_profiles([]) == []
-        assert target_profiles([{"agent_type": "no-such-profile"}]) == []
-        assert target_profiles([{}]) == []
-        assert editor_note([]) is None
-        assert editor_note(None) is None
-
-    def test_the_declaration_is_the_profiles_own(self):
-        """A label the profile declares, never a MIME type the page invented."""
-        from ui.config_view import declared_content_types, editor_note, target_profiles
-
-        otelcol = self._profiles().get("otelcol")
-        # `""` is "undeclared" in a report and useless as a selectbox label.
-        assert "" not in declared_content_types(otelcol)
-        assert "text/yaml" in declared_content_types(otelcol)
-
-        generic = self._profiles().get("generic")
-        assert declared_content_types(generic) == ()
-        assert "declares no content type" in editor_note([generic])

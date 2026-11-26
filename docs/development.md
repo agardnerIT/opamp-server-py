@@ -2,7 +2,6 @@
 
 ```bash
 pip install -r requirements.txt
-pip install -r requirements-ui.txt
 pip install -e ".[dev]"
 pytest tests/ -v                                   # logging defaults to JSON in CI
 LOG_FORMAT=text pytest tests/ -v                   # readable local output
@@ -11,7 +10,7 @@ pip install -e ".[dev,observability]" && OPAMP_TRACING_ENABLED=true pytest tests
 
 ## Manual setup
 
-Server and UI by hand, without containers:
+Server and console by hand, without containers:
 
 ```bash
 # Server
@@ -19,14 +18,17 @@ python -m venv ./venv && source venv/bin/activate
 pip install -r requirements.txt
 uvicorn server.main:app --port 4320
 
-# UI
-pip install -r requirements-ui.txt
-streamlit run ui/app.py
+# Console (web/) — its own toolchain, its own lockfile
+cd web && npm ci && npm run dev      # 8501, proxies /api -> 127.0.0.1:4320
 
 # CLI + MCP entry points
 pip install -e .            # installs opampctl + opamp-mcp
 pip install -e ".[mcp]"     # adds the mcp dependency
 ```
+
+The console needs Node 22+ (`web/package.json`); it has no Python dependency and no
+`pip` extra — `ui/`, `.streamlit/` and `requirements-ui.txt` were retired at the
+stage-10 cutover (see `new-ui-plans.md`).
 
 ## Developing with Docker (local source, hot reload)
 
@@ -54,22 +56,26 @@ The overlay tags the local builds `opamp-server-py-server:dev` and
 `opamp-server-py-ui:dev`, so it does not overwrite the pinned release images. It
 also:
 
-- bind-mounts `server/`, `proto/`, `policies/`, `collector/`, `ui/` and `.streamlit/`
-  into the containers, so **editing an existing file hot-reloads** (uvicorn
-  `--reload` for the server, Streamlit `runOnSave` + polling for the UI);
+- bind-mounts `server/`, `proto/`, `policies/` and `collector/` into the server
+  container, so **editing an existing Python file hot-reloads** (uvicorn `--reload`);
+- builds the console from `web/` into a static bundle behind nginx. There is no hot
+  reload for it and there cannot be: `Dockerfile.ui` runs `npm run build`, so an edit
+  needs `docker compose build ui`. For an edit/refresh loop use vite instead — on the
+  host (`cd web && npm run dev`), or `docker compose --profile console up console`
+  (vite in a container, port 8502);
 - keeps the `opamp-data` named volume at `/app/data`, so the database is not reset by
   a rebuild.
 
-Things that still need a container restart rather than a hot reload:
+Things that still need a rebuild:
 
-- **A new Streamlit page file** (e.g. `ui/pages/3_Groups.py`): Streamlit reloads
-  changed modules, but it does not notice a page that no running script has imported
-  yet. Run `docker compose -f docker-compose.yml -f docker-compose.dev.yml restart ui`
-  once after adding one.
-- **Dependency or Dockerfile changes** (`requirements*.txt`, `Dockerfile.*`): rebuild
-  with `--build` (no need for `--no-cache` unless the base image itself changed).
-- **New Python packages** must be added to `requirements.txt` / `requirements-ui.txt`
-  and rebuilt; the bind mount only shadows source files.
+- **Anything under `web/`** — the container ships a compiled bundle. `docker compose
+  build ui && docker compose up -d ui`, or use vite.
+- **A new Python module** is hot-reloaded like an edited one, but a **new Python
+  package** must be added to `requirements.txt` and rebuilt; the bind mount only
+  shadows source files.
+- **Dependency or Dockerfile changes** (`requirements.txt`, `web/package*.json`,
+  `Dockerfile.*`): rebuild with `--build` (no need for `--no-cache` unless the base
+  image itself changed).
 
 Verify the new surface is live:
 
@@ -154,13 +160,31 @@ opamp-server-py/
 ├── client/          # opamp_client — shared HTTP client library
 ├── cli/             # opampctl CLI (typer, JSON output)
 ├── mcp_server/      # FastMCP server (stdio/SSE) for AI agents
-├── ui/              # Streamlit dashboard
+├── web/             # the console (React + Vite + Tailwind; built into the ui image)
+├── docker/          # TLS terminator examples (#96) + ui.nginx.conf for the console
 ├── proto/           # Protobuf definitions
 ├── tests/           # Tests (fake_agent.py = scriptable OpAMP Supervisor, #107)
 ├── collector/       # Sample configs
-├── docker/          # TLS terminator examples (nginx, Caddy) for #96
 └── data/            # SQLite DB (+ generated admin_password)
 ```
+
+## Console gates
+
+The console is a product artifact now, so its gates are not optional:
+
+```bash
+cd web
+npm run build     # tsc -b (strict) + vite build
+npm run test      # vitest (mock transport, no server needed)
+npm run lint      # oxlint
+npm run e2e       # Playwright against the mock dev server
+npm run e2e:live  # Playwright live smoke against a throwaway server on :4330
+```
+
+CI runs `build`, `test` and `lint` on every push; `npm ci` is the install, so
+`web/package-lock.json` must be committed with any dependency change. Screenshots for
+docs live in `docs/screenshots/` and are regenerated with `web/tools/screenshot-*.mjs`
+(commands in `web/README.md`).
 
 ## Release
 

@@ -29,13 +29,13 @@ This file provides instructions and context for AI coding agents working on this
 ## Build & Test
 
 ```bash
-pip install -e ".[dev,ui]"     # install with test + UI deps (or: pip install -r requirements.txt)
+pip install -e ".[dev]"        # install with test deps (or: pip install -r requirements.txt)
 pytest tests/ -v               # run the test suite
 opampctl health                # smoke-check against a running server (default :4320)
 ```
 
 - Server (dev): `uvicorn server.main:app --port 4320`
-- UI (dev): `pip install -r requirements-ui.txt && streamlit run ui/app.py`
+- Console (dev): `cd web && npm ci && npm run dev` (8501, proxies /api to :4320)
 - MCP server (dev): `pip install -e ".[mcp]" && python -m mcp_server`
 
 ## AI Accessibility (driving this project programmatically)
@@ -63,7 +63,8 @@ happens there, not per route.
 - `client/` — `opamp_client`: shared httpx client used by CLI + MCP (single HTTP implementation)
 - `cli/` — `opampctl` (typer): JSON output, `--raw`, `--db` offline mode
 - `mcp_server/` — FastMCP server (stdio default, optional SSE)
-- `ui/` — Streamlit dashboard (imports shared logic from `server/`)
+- `web/` — the console (React 19 + Vite + Tailwind, TanStack Query/Router);
+  ships as a static bundle in nginx (`Dockerfile.ui` + `docker/ui.nginx.conf`)
 - `proto/` — generated OpAMP protobuf code
 - `data/` — SQLite DB (`opamp.db`): agent state, metrics, alert config
 
@@ -71,5 +72,5 @@ happens there, not per route.
 
 - **JSON everywhere** in the agent-facing layers; errors are structured (`{"error", "status_code", "detail"}`) with non-zero exit codes
 - Admin auth = HTTP Basic (any username, `ADMIN_PASSWORD` as password) on admin endpoints only; never add a new auth system
-- Shared logic (manifests, reports, state) lives in `server/` — the UI and agent layers import it, never duplicate it
-- UI changes: screenshot and add to the relevant docs page (see memory.md); ignore the collector's initial OpAMP connection errors (expected retry noise)
+- Shared logic (manifests, reports, state) lives in `server/` — the CLI, MCP server and client import it; the console can only reach it over the API (never duplicate a rule in `web/`)
+- Console changes: run `cd web && npm run build && npm run test && npm run lint` (and `npm run e2e` when a flow changed), then screenshot into `docs/screenshots/` and add to the relevant docs page (see memory.md); ignore the collector's initial OpAMP connection errors (expected retry noise)

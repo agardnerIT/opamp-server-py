@@ -1,8 +1,9 @@
 /**
- * Which reports the Reports page offers (new-ui stage 7), mirroring
- * `ui/pages/2_Reports.py::_offered_reports`: the union of what the fleet's
- * profiles declare, in a stable readable order — never the order agents
- * happened to arrive in, and never a report whose concept no agent has.
+ * Which reports the Reports page offers (new-ui stage 7): the union of what the
+ * fleet's profiles declare, in a stable readable order — never the order agents
+ * happened to arrive in, and never a report whose concept no agent has. The rule
+ * itself is the server's (`server/reports.py`); this module mirrors it so the
+ * page cannot offer a report the server would refuse.
  *
  * `fleet` is always offered: it describes the server's own view, which exists
  * for every profile.

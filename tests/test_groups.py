@@ -68,7 +68,13 @@ def describe(uid: bytes, env: str = "prod", region: str = "emea") -> None:
     """Register an agent with the two attributes the fixtures filter on."""
     msg = opamp_pb2.AgentToServer()
     msg.instance_uid = uid
-    msg.capabilities = opamp_pb2.AgentCapabilities.AgentCapabilities_ReportsStatus
+    # Since 36247bd a rollout whose every target would refuse the push is refused up
+    # front (409 agent_does_not_accept) instead of opening a health gate that can never
+    # close, so the fixture advertises the capability the rollout tests depend on.
+    msg.capabilities = (
+        opamp_pb2.AgentCapabilities.AgentCapabilities_ReportsStatus
+        | opamp_pb2.AgentCapabilities.AgentCapabilities_AcceptsRemoteConfig
+    )
     # A health-defined group matches on this, so the fixture has to be healthy.
     msg.health.healthy = True
     msg.agent_description.identifying_attributes.add(

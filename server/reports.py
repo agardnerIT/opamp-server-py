@@ -1,8 +1,8 @@
 """Fleet report generators (moved from ui/shared.py so the API can serve them).
 
 Pure functions over the `{"agents": [agent.to_dict(), ...]}` shape returned by
-`GET /agents` — identical input to what the Streamlit UI passes, so endpoint
-payloads match what the UI shows.
+`GET /agents`, so a report and the agent list are always generated from the same
+payload a console or CLI shows.
 """
 
 from datetime import datetime

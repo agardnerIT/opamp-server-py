@@ -1,7 +1,7 @@
 """opamp_client — shared HTTP client for the OpAMP server REST API.
 
-One client used by the CLI (opampctl), the MCP server, and (optionally) the
-Streamlit UI, so HTTP/auth/error handling is implemented exactly once.
+One client used by the CLI (opampctl) and the MCP server, so HTTP/auth/error
+handling is implemented exactly once for Python callers.
 
 Design rules (from the AI-accessibility epic, issue #54):
 - httpx-based, JSON everywhere (send JSON, parse JSON, raise structured errors)

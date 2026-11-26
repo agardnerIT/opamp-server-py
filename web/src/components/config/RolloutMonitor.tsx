@@ -17,7 +17,7 @@ import { useSession } from "../../api/session";
 
 /**
  * Why a rollout paused — the operator's next action differs per reason, so
- * "paused" alone is not an answer (Streamlit parity, `5_Remote_Config.py`).
+ * "paused" alone is not an answer: it names the one cause and the action.
  * `config_conflict` is the one fixable-on-the-agent pause: resume re-runs the
  * gate; `failed`/`auto_reverted`/`superseded` are terminal (reactivate or a
  * rollback proposal instead).

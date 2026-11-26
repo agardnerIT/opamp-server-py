@@ -378,8 +378,8 @@ def _override_banner(missing: List[str]) -> str:
 def posture_warning(push: Dict[str, object] | None = None) -> str | None:
     """Markdown warning for the UI when push runs insecure; None when it is fine.
 
-    Lives here, not in the Streamlit page, so the wording is testable without a
-    browser and every future surface (CLI, MCP, reports) can reuse it.
+    Lives here, not in a page, so the wording is testable without a browser and
+    every surface (API, console, CLI, MCP, reports) can reuse it.
     """
     push = posture() if push is None else push
     if not push.get("insecure"):

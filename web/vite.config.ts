@@ -10,10 +10,11 @@ import tailwindcss from '@tailwindcss/vite'
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
-    // Stage B: the owner wants the console on Streamlit's old port 8501 (the
-    // product port). strictPort stays false so the dev server still starts
-    // (on 8502+) when the compose stack's Streamlit ui currently owns 8501 —
-    // the port hand-over happens at cutover (stage 10 there).
+    // 8501 is the product port (Streamlit's old one); stage 10 handed it over,
+    // so this is the console's port, not a fallback target. strictPort stays
+    // false so `npm run dev` still starts (on 8502+) while the compose stack's
+    // built `ui` container owns 8501 — the alternative is a dev server that
+    // refuses to run until something else is stopped.
     port: 8501,
     strictPort: false,
     proxy: {

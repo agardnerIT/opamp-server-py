@@ -1,8 +1,10 @@
 /**
  * Error normalization — the ONE place 401/403/429/503 semantics are decided.
  *
- * Mirrors `ui/session.py::classify_response` so the browser UI and the
- * Streamlit UI speak the same contract:
+ * This is the client half of the contract the server implements (`401` vs
+ * `403` vs `429` vs `503` are four different sentences, and conflating any two
+ * of them either logs an operator out for a role denial or leaves a dead
+ * session on screen):
  *
  * - 401 ⇒ the session is gone; the caller must drop state and show login
  *   (`relogin` is true). Never treated as a permissions problem.

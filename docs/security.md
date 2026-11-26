@@ -164,34 +164,40 @@ opampctl auth verify                      # exit 0 if the credential works
 `auth_mode` is `principals` (named identities exist), `password` (legacy shared
 secret only) or `disabled` (read-only mode).
 
-### The Streamlit UI (admin console)
+### The console (admin UI)
 
-The UI signs in the same way the CLI does — `POST /auth/session` — and then holds an
-**opaque session token**, not your password (#105):
+The console signs in the same way the CLI does — `POST /auth/session` — and then holds
+an **opaque session token in an httpOnly cookie**, not your password (#105):
 
-- The password is sent once and discarded. There is no `admin_password` in browser
-  session state, and no HTTP Basic on every request. A tab that survived an upgrade
-  deletes the old key on its next render, so it cannot keep re-sending Basic.
+- The password is sent once and discarded. The token is never in JavaScript state or
+  `localStorage`; the page reads identity, role and expiry from `GET /auth/me`.
+- The console is a static bundle (`web/dist`) served by nginx, and it reaches the API
+  through `/api` **on its own origin** — that is what keeps the cookie same-site, and
+  it is why the shipped deployment needs no CORS at all. `CORS_ORIGINS` is only for
+  clients that call the API from somewhere else.
 - The sidebar shows **who you are, your role and when the session expires**. *Extend*
   is an **audited re-auth** (`admin.login.ok`): it issues a new token and revokes the
   superseded one, so a stolen copy dies at the same moment. It is not a silent sliding
   TTL.
-- **Sign out** revokes the token (`DELETE /auth/session`); **Sign out everywhere**
-  additionally revokes every other session of *your* principal
-  (`GET /auth/sessions` → `DELETE /auth/sessions/{id}`, `admin` only). Revoking another
-  *person* is a principal revocation, not a sign-out button.
+- **Sign out** revokes the token (`DELETE /auth/session`); revoking another *person* is
+  a principal revocation, not a sign-out button. `GET /auth/sessions` may be listed,
+  and only `admin` may revoke a session other than their own.
 - An expired or revoked token returns you to the login form with a sentence, not a
-  stack trace; a `429` shows the retry delay from `Retry-After`; a `403` explains the
-  role you need instead of logging you out (a role denial is not a dead session).
+  stack trace (`401` ⇒ sign in again); a `429` shows the retry delay from
+  `Retry-After`; a `403` explains the role you need instead of logging you out (a role
+  denial is not a dead session). That classification lives in exactly one place,
+  `web/src/api/errors.ts`.
 - **Roles hide controls, the server enforces them.** Approve/rollback, policy reload and
-  the Sessions tab are hidden below `admin`, but the API refuses them anyway — hiding a
+  the Sessions page are hidden below `admin`, but the API refuses them anyway — hiding a
   button is ergonomics, never the boundary.
-- **No secrets in URLs.** Only non-secret identifiers (agent ids, grouping) go into query
-  parameters, because query strings end up in proxy logs.
-- **Posture:** `.streamlit/config.toml` pins `enableXsrfProtection = true` and
-  `enableCORS = false`, and `docker-compose.yml` binds the UI to `127.0.0.1:8501`. The UI
-  is a server-side session with no TLS of its own — do not publish port 8501; terminate
-  TLS in the proxy and keep the UI on loopback.
+- **No secrets in URLs.** Only non-secret identifiers (agent ids, the SQL selection) go
+  into query parameters, because query strings end up in proxy logs.
+- **Posture:** `docker-compose.yml` binds the console to `127.0.0.1:8501`, and the
+  container holds no configuration and no database volume — it is a static bundle plus
+  an nginx `/api` proxy. It has no TLS of its own: do not publish port 8501, terminate
+  TLS in the proxy (`docker/nginx.conf` or `docker/Caddyfile`) and keep the UI on
+  loopback. The API hop inside the compose network is plain HTTP by design; that is the
+  same trust boundary the server already sits behind.
 
 ## Audit log
 

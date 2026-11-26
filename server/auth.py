@@ -1084,8 +1084,8 @@ def require_role(required: str):
 def require_admin(request: Request) -> bool:
     """Backwards-compatible alias for `require_role("admin")` (#95).
 
-    Kept because it predates roles and is called directly by the routes and the
-    Streamlit pages; new code should use `require_role(...)`.
+    Kept because it predates roles and is called directly by routes; new code
+    should use `require_role(...)`.
     """
     require_roles(request, ROLE_ADMIN)
     return True

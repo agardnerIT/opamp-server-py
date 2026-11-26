@@ -1,7 +1,7 @@
 import type { QuerySchemaColumn } from "../api/endpoints";
 
 /**
- * Suggestions for the one-box SQL search (#132 parity, `ui/sql_search.py`).
+ * Suggestions for the one-box SQL search (#132).
  * The rule that makes a suggestion honest: a value is offered only because a
  * live agent reported it — the schema endpoint already samples the fleet.
  */

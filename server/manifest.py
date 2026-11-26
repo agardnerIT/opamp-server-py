@@ -1,8 +1,8 @@
 """
 OpenTelemetry Collector Builder (OCB) manifest generation.
 
-Pure module (no Streamlit / server dependencies) shared by the FastAPI server
-and the Streamlit UI so both can never drift.
+Pure module (no FastAPI, no state) shared by every surface that needs a
+manifest — the endpoint, the CLI and the reports — so they cannot drift.
 
 Generates a minimal `manifest.yaml` for a slim collector build containing ONLY
 the components an agent actually uses. See:

@@ -238,7 +238,7 @@ describe("mockFetch — role denial (stage 9)", () => {
     });
     expect(put.status).toBe(403);
     const detail = (await put.json()) as { detail: string };
-    // Exact server wording — ui/session.py and web/src/api/errors.ts key off it.
+    // Exact server wording — web/src/api/errors.ts keys off it.
     expect(detail.detail).toBe(
       "role 'viewer' cannot perform this action (requires 'operator')",
     );

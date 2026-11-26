@@ -298,11 +298,11 @@ export async function logout(): Promise<{ logged_out: boolean }> {
 
 /**
  * Audited re-auth ("Extend"): revoke the current session, then mint a new one
- * from freshly entered credentials. NOTE: this is the reverse of the Streamlit
- * UI's POST-then-DELETE order — in the cookie flow a second POST would move the
- * cookie to the NEW session, so the subsequent DELETE (which follows the cookie)
- * would revoke the wrong one. DELETE first (cookie still points at the old
- * session), then POST. If the POST fails the caller is simply logged out.
+ * from freshly entered credentials. NOTE: DELETE must come first — a second POST
+ * would move the cookie to the NEW session, so the subsequent DELETE (which
+ * follows the cookie) would revoke the wrong one. DELETE first (cookie still
+ * points at the old session), then POST. If the POST fails the caller is simply
+ * logged out; that is the honest outcome, not a silent extension.
  */
 export async function extendSession(name: string, password: string): Promise<LoginResult> {
   await logout();

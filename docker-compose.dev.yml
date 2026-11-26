@@ -12,9 +12,10 @@
 # adds one, tags the result locally (`:dev`), and bind-mounts the source so edits
 # reload without a rebuild.
 #
-# Adding a **new** Streamlit page file needs `docker compose ... restart ui` once:
-# Streamlit hot-reloads changed modules, but it does not notice a page that no
-# running script has imported yet. Editing an existing page hot-reloads normally.
+# The console is the exception: `web/` is compiled to static files, so a bind mount
+# would change nothing a browser can see. Frontend hot reload is vite on the host
+# (`cd web && npm run dev` -> 8501, or 8502 when this stack owns 8501), or the
+# `console` profile below when the whole loop has to stay in containers.
 
 services:
   server:
@@ -56,37 +57,17 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.ui
-    volumes:
-      - ./ui:/app/ui:ro
-      - ./server:/app/server:ro
-      - ./proto:/app/proto:ro
-      - ./policies:/app/policies:ro
-      - ./collector:/app/collector:ro
-      - ./.streamlit:/app/.streamlit:ro
-    environment:
-      - PYTHONDONTWRITEBYTECODE=1
-      # Streamlit's default is to keep the old script on disk changes. For a
-      # development stack that is exactly wrong.
-      - STREAMLIT_SERVER_RUN_ON_SAVE=true
-      # Docker Desktop bind mounts do not always emit inotify events. Polling is
-      # slower but reliable; the UI is small.
-      - STREAMLIT_SERVER_FILE_WATCHER_TYPE=poll
-    command:
-      - streamlit
-      - run
-      - ui/app.py
-      - --server.port=8501
-      - --server.address=0.0.0.0
-      - --server.headless=true
-      - --server.runOnSave=true
+    # No source mount: the image IS the build (`npm run build` inside it). Editing
+    # `web/` therefore needs `--build`, which is the honest behaviour for a static
+    # bundle — for an edit/refresh loop use vite, on the host or via `console`
+    # below, not this service.
 
-  # The 2027 web console (web/), on the product port 8501 (2027-ui Stage B1).
-  # Opt-in via profile so it never fights the Streamlit `ui` above for the host
-  # port: run `docker compose stop ui` first, then
+  # vite's dev server for frontend work that must stay containerised. It is
+  # opt-in and lands on 8502, never 8501: the built `ui` above owns the product
+  # port, and two services publishing one port is a race, not a feature.
   #   docker compose --profile console up console
-  # Vite's dev server proxies /api to the FastAPI service (OPAMP_API_TARGET),
-  # so the browser talks to one origin. `npm ci` runs on first boot only — the
-  # named volume keeps node_modules across restarts.
+  # `npm ci` runs on first boot only — the named volume keeps node_modules across
+  # restarts. OPAMP_API_TARGET points the /api proxy at the compose server.
   console:
     image: node:22-alpine
     container_name: opamp-console
@@ -94,7 +75,7 @@ services:
     environment:
       - OPAMP_API_TARGET=http://server:4320
     ports:
-      - "127.0.0.1:8501:8501"
+      - "127.0.0.1:8502:8501"
     volumes:
       - ./web:/app/web
       - console-node-modules:/app/web/node_modules

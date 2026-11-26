@@ -61,7 +61,7 @@ export function useLogout() {
 /**
  * Audited re-auth ("Extend"): fresh credentials, old session revoked, new one
  * minted (DELETE-then-POST — see `extendSession` for why the cookie flow
- * inverts the Streamlit ordering).
+ * requires that order).
  */
 export function useExtendSession() {
   const queryClient = useQueryClient();

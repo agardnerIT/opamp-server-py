@@ -9,8 +9,8 @@ raw config under `"raw"` — and other agents use `"collector"`, `"config"`, …
 Reading only `configMap[""]` therefore reported **zero components** for any agent
 that does not happen to use the empty key, which silently disabled the OCB manifest
 builder and the heavy/outdated reports. This module is the one place that reads the
-map; `server/state.py` and the Streamlit UI both go through it, so they cannot drift
-again (the UI used to reimplement the lookup inline, twice).
+map; `server/state.py` and the reports go through it, so they cannot drift again
+(display code used to reimplement the lookup inline, twice).
 
 Rules:
 

@@ -67,7 +67,7 @@ describe("visibleNav", () => {
     ]);
   });
 
-  it("admin nav matches ui/app.py's Admin tree in order", () => {
+  it("admin nav keeps the Admin tree the Streamlit pages had, in order", () => {
     expect(visibleNav(ADMIN_NAV, "admin").map((i) => i.to)).toEqual([
       "/alerts",
       "/compliance",

@@ -13,6 +13,7 @@ import pytest
 from typer.testing import CliRunner
 
 from cli.main import app
+from proto import opamp_pb2
 from server.main import app as server_app
 from server.state import AGENT_REGISTRY, AgentState, SQLiteAgentStore, SQLiteMetricsStore
 from tests.asgi_transport import InProcessASGITransport
@@ -866,6 +867,12 @@ class TestRolloutCommands:
             )["proposal_id"]
 
     def test_rollout_plan_create_show_and_abort(self, live):
+        # The target must exist and advertise AcceptsRemoteConfig: since 36247bd a
+        # rollout whose every target would refuse the push is refused up front (409
+        # agent_does_not_accept) instead of opening a health gate that cannot close.
+        register_agent("ab" * 16).capabilities = (
+            opamp_pb2.AgentCapabilities.AgentCapabilities_AcceptsRemoteConfig
+        )
         proposal_id = self._propose(live)
         auth = ("--password", ADMIN_PW)
 

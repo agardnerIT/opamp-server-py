@@ -1,5 +1,10 @@
 # New UI — Plan for Staged Implementation
 
+> **Status: complete.** Stages 1–9 built the console; **stage 10 (below) deleted
+> Streamlit** and handed port 8501 over (2026-11-27). This document is the
+> history of that migration plus the stage-11 backlog — the shipped UI is
+> `web/` and its living documentation is `web/README.md`.
+
 This document lets **independent agent sessions** implement the new OpAMP
 human-facing UI one stage at a time, without seeing the conversations that
 produced the plan. Each stage is self-contained: read stage 0, your stage,
@@ -27,7 +32,8 @@ model forces awkward designs for exactly the pages humans use most:
 
 Decision (made with the project owner, 2026-12): full redesign as a separate
 frontend, **not** a 1:1 port. Pages migrate by pain order, not by category.
-Streamlit stays running and untouched until the new UI reaches full parity.
+Streamlit stayed running and untouched until the new UI reached full parity
+(it has since been deleted — see stage 10).
 
 ### Decided constraints (do not relitigate)
 
@@ -576,7 +582,7 @@ privileged write (PUT /alerts) → logout → revoked cookie rejected.
 
 ---
 
-## Stage 10 — Cut over, retire Streamlit (status: **todo**)
+## Stage 10 — Cut over, retire Streamlit (status: **done**, 2026-11-27)
 
 Depends on: stage 9 sign-off by the owner. **Do not start without it.**
 
@@ -587,6 +593,32 @@ Depends on: stage 9 sign-off by the owner. **Do not start without it.**
 3. Delete `ui/`, `requirements-ui.txt`, Streamlit tests, `.streamlit/`;
    update `tests/` and CI; remove Streamlit mentions from README/docs.
 4. Keep `opampctl` / MCP / client layers untouched (they do not use the UI).
+
+**Done (2026-11-27).** Notes, in the order they mattered:
+
+- `docker/ui.nginx.conf` (new) + `Dockerfile.ui` (rewritten as node-build → nginx).
+  The proxy is `location /api/ { proxy_pass http://server:4320/; }` — the trailing
+  slash is the prefix strip, the same rule the vite dev proxy needed. `index.html` is
+  `no-store`, `/assets/` immutable, every other path falls back to the shell.
+- `docker-compose.yml`: `ui` publishes `127.0.0.1:8501:80` and has **no `env_file:`
+  and no volume** any more — the console is static files plus a proxy, so it holds no
+  configuration and never touches the data volume (#132's trap in another service).
+- `docker-compose.dev.yml`: the `ui` build is the image (a static bundle cannot
+  hot-reload), and the vite `console` profile moved to **8502** so it can never fight
+  the built UI for 8501. Host `npm run dev` still prefers 8501.
+- Deleted `ui/`, `.streamlit/`, `requirements-ui.txt`, the six Streamlit test modules,
+  the agent-detail golden fixture and the JS SQL harness; `[ui]` extra removed.
+- `web/package.json` dropped `openapi-typescript` (codegen lives in
+  `tools/api-codegen` with its own TS 5 pin). It made `npm ci` fail `ERESOLVE`
+  against typescript 7, which would have broken both the image build and CI.
+- CI: new `console` job (`npm ci`, build, vitest, oxlint); `requirements-ui.txt`
+  gone from the Python job.
+- `tests/test_compose_ui.py` fences the hand-over: port pair, no config/volume in the
+  container, prefix strip, SPA fallback, and "nothing still ships Streamlit".
+- Docs: README (screenshots were Streamlit captures — replaced with
+  `docs/screenshots/console-*.png` and the stale `assets/*.png` deleted),
+  development/security/remote-config/release-emails, `CLAUDE.md`, `web/README.md`.
+  Stage 11's backlog is untouched and still open.
 
 ---
 

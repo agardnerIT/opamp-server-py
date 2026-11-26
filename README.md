@@ -7,9 +7,9 @@
 
 ![Warning: Entirely vibecoded](https://img.shields.io/badge/Warning-Entirely%20vibecoded-orange?style=for-the-badge)
 
-![overview image](assets/overview-image.png)
+![The OpAMP Console: the fleet Overview](docs/screenshots/console-overview.png)
 
-OpenTelemetry OpAMP server in Python (FastAPI + Streamlit UI), with optional
+OpenTelemetry OpAMP server in Python (FastAPI + a React console), with optional
 [Open Policy Agent](https://www.openpolicyagent.org) compliance. It manages any OpAMP
 agent — OpenTelemetry Collectors, Fluent Bit, Grafana Alloy (its OTel Engine), or
 anything else that speaks the protocol — and can be driven by humans, scripts or AI
@@ -47,15 +47,15 @@ cannot — we do not build vendor-protocol shims.
 ## Architecture
 
 ```
-┌─────────────────────────┐        ┌─────────────────┐        ┌──────────────┐
-│  OTel Collector         │───────▶│  OpAMP Server   │────────│  UI (:8501)  │
-│  (OpAMP Extension)      │        │  (:4320)        │        └──────────────┘
-└─────────────────────────┘        └─────────────────┘        ┌──────────────┐
-                                           │                  │ opampctl CLI │
-                                  ┌────────┴──────────────┐   │ MCP server   │
-                                  │   Open Policy Agent   │   └──────────────┘
-                                  │  (:8181)              │
-                                  └───────────────────────┘
+┌─────────────────────────┐        ┌─────────────────┐      ┌────────────────────┐
+│  OTel Collector         │───────▶│  OpAMP Server   │◀─/api│ Console (:8501)    │
+│  (OpAMP Extension)      │        │  (:4320)        │      │ nginx + web/dist,  │
+└─────────────────────────┘        └─────────────────┘      │ proxied same-origin│
+                                           │                 └────────────────────┘
+                                  ┌────────┴──────────────┐  ┌────────────────────┐
+                                  │   Open Policy Agent   │  │ opampctl CLI       │
+                                  │  (:8181)              │  │ MCP server         │
+                                  └───────────────────────┘  └────────────────────┘
 ```
 
 ## Quick start
@@ -63,12 +63,12 @@ cannot — we do not build vendor-protocol shims.
 ### Docker Compose (recommended)
 
 ```bash
-docker-compose up -d                          # server + UI
+docker-compose up -d                          # server + console
 docker-compose --profile opa up -d            # + OPA for compliance checking
 docker-compose logs -f
 ```
 
-- UI: http://localhost:8501
+- Console: http://localhost:8501
 - Server: http://localhost:4320
 - OPA (if enabled): http://localhost:8181
 
@@ -77,9 +77,12 @@ Pre-built multi-arch images are on GHCR (`ghcr.io/agardnerit/opamp-server-py-ser
 source with hot reload, and `release.py` for how tags become images.
 
 Configuration lives in `.env` — that is the only place you edit. Copy `.env.sample` for a
-file with every setting commented. Both services load the whole file, so a variable you
+file with every setting commented. The server loads the whole file, so a variable you
 add there reaches the app whether or not `docker-compose.yml` mentions it; every setting
-is documented in [configuration.md](docs/configuration.md).
+is documented in [configuration.md](docs/configuration.md). The console container holds
+no configuration at all: it is a static bundle behind nginx, and it reaches the server
+through `/api` on its own origin — no second address to keep in sync, no CORS, and the
+session cookie stays same-site.
 
 There is no default admin password. On first start the server generates a random one,
 prints it once in the logs, and stores it at `$DATA_DIR/admin_password` (mode 0600)
@@ -118,19 +121,19 @@ Within a couple of seconds (the config polls every 2 s):
 curl -s localhost:4320/agents | jq '.count, .agents[].id'   # → 1, then the id
 ```
 
-…and the UI at http://localhost:8501 lists `e2e-collector` with its component list.
+…and the console at http://localhost:8501 shows `e2e-collector` in the fleet.
 Ctrl-C stops the collector (`--rm` removes the container); run it again and it
 reconnects as the same agent, because `agent.name` identifies it, not the container.
 
 Clicking an agent opens its detail view, which keeps a way back in sight — at the top
 of the page, not only in the sidebar (#146):
 
-![Agent detail view with the ← All agents button at the top](assets/agent-detail-navigation.png)
+![Agent detail view with the ← All agents button at the top](docs/screenshots/console-agent-detail.png)
 
-Going back restores the list exactly as you left it — the SQL search lives in the URL,
-so the filter and the search box survive the round trip (#146):
+Going back restores the list exactly as you left it — the SQL selection is part of the
+URL, so the filter and the search box survive the round trip (#146):
 
-![Agent list restored with its SQL filter after going back](assets/agents-list-restored.png)
+![Agent list with its SQL selection in the URL](docs/screenshots/console-agents-list.png)
 
 Two things to adjust if your setup differs:
 
@@ -214,7 +217,8 @@ tokens **required**. Before exposing the port:
 1. TLS in front (`docker/nginx.conf` or `docker/Caddyfile`), keep 4320 on loopback.
 2. A principal per person with a role — `viewer` < `operator` < `approver` < `admin`.
 3. A fleet token in every agent's config.
-4. `CORS_ORIGINS` set to the UI's origin, not `*`.
+4. `CORS_ORIGINS` set to the console's origin, not `*` (only needed if a client calls the
+   API cross-origin; the shipped console proxies `/api` and is same-origin by design).
 5. `CONFIG_AT_REST_KEY` set before enabling push.
 
 Config push refuses to start unless all of that is in place. The checklist, the auth

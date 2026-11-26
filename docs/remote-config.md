@@ -5,7 +5,7 @@ is secure and `OPAMP_CONFIG_PUSH_ENABLED=true`, the server stores a *desired* co
 per agent and delivers it — it is desired state, not a command, so it survives
 restarts and is idempotent.
 
-- [The Remote Config page (UI)](#the-remote-config-page-ui)
+- [The Remote Config page (console)](#the-remote-config-page-console)
 - [Push a config](#push-a-config)
 - [Validate → push (one action)](#validate--push-one-action)
 - [Propose → approve → roll back (two-phase)](#propose--approve--roll-back-99)
@@ -16,35 +16,31 @@ restarts and is idempotent.
 - [Custom capabilities and messages](#custom-capabilities-and-messages-85)
 - [Groups as targets](groups.md)
 
-## The Remote Config page (UI)
+## The Remote Config page (console)
 
-Streamlit page **Remote Config** (`ui/pages/5_Remote_Config.py`) implements the whole
-flow, in the epic's order and with review between every step: **Target** (filters, live
-count, blast-radius breakdown) → **Edit** (with prefill from an agent's effective config,
-and a hard refusal of redacted bodies) → **Validate** (YAML paths, warnings, policy gate)
-→ **Propose** (a draft that delivers nothing) → **Plan** (the rollout's real batches and
-caps, from the dry run) → **Approve & roll out** (approver: canary released, the rest
-held) → **live progress** (per-batch and per-agent state, pause reason, gate countdown)
-→ **Stop** (abort vs rollback, visibly different) → **History** (rollouts and revisions,
-with who approved what).
+The **Remote Config** page (`web/src/routes/RemoteConfig.tsx`, stepper in
+`web/src/components/config/ComposeStepper.tsx`) implements the whole flow, in the epic's
+order and with review between every step: **Target** (ad-hoc ids or a saved group, live
+count, blast-radius breakdown) → **Edit** (prefilled from an agent's effective config, and
+a hard refusal of redacted bodies) → **Review** (the validation verdict and a line diff
+against the agent's current config) → **Propose** (a revision that delivers nothing) →
+**Plan** (the rollout's real batches and caps, from the dry run) → **Approve & roll out**
+(approver: the canary is released, the rest held) → **live progress** (per-batch and
+per-agent state, pause reason, gate countdown) → **Stop** (abort vs rollback, visibly
+different) → **Revisions/History** (rollouts and revisions, with who approved what).
 
-It is a session-token client (#105): buttons are role-gated in the page *and* the server
-re-authorises every call, so the UI is ergonomics and never the boundary. Config bodies
-are never listed; the per-agent reveal stays on the Agents page where it is audited.
+It is a cookie-session client (#105): buttons are role-gated in the page *and* the server
+re-authorises every call, so the page is ergonomics and never the boundary. Config bodies
+are never listed; the per-agent reveal stays on the agent's detail page where it is
+audited. The editor also refuses a body containing the `<redacted>` sentinel before the
+server sees it — a redacted push wipes fleet credentials (#98) — and a terminal
+`FAILED`/auto-reverted revision is poisoned: it offers Reactivate with a reason, never a
+silent retry.
 
-![Remote Config step 1: the target selector with a live count and the blast radius](screenshots/remote-config-target.png)
+![Remote Config: the stepper with its plan and rollout monitor](screenshots/console-remote-config.png)
 
-*Step 1 — the fleet is counted and broken down by environment before anything is edited.*
-
-![Remote Config: the rollout plan from the dry run](screenshots/remote-config-plan.png)
-
-*The plan is the review screen: real batches, canary size, caps and the health gate. The
-button below it is the only way a rollout starts.*
-
-![Remote Config: a paused rollout with its reason and the batch table](screenshots/remote-config-paused.png)
-
-*A paused rollout names its one reason and shows which batch failed; abort and rollback are
-separate, differently-gated actions below.*
+*The stepper: target, edit, review, then the plan and rollout monitor. Creating the
+rollout IS the approval; the canary goes out alone.*
 
 ## Push a config
 

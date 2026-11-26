@@ -953,8 +953,8 @@ host *was* fixed: `osquery.config_plugin=opamp`, exactly one `battery_stats` in
   and passes every role gate.
 - Layers: `opamp_client.push_config`, `opampctl config push` (propose's scope flags +
   rollout knobs + `--dry-run`); no MCP tool (D9 — a push is an approval). The console
-  stepper is now Target → Edit → Validate → Push → Roll out; the Streamlit page is
-  untouched (stage-10 cut-over) and still shows propose/approve.
+  stepper is now Target → Edit → Validate → Push → Roll out. (The Streamlit page that
+  still showed propose/approve was deleted at the stage-10 cut-over — see below.)
 - `rollout.preview_plan()` is the pure batch planner shared by `preview_rollout()` and
   the push route's plan (the console shows the caps as fields; there is no preview).
 - **Percentage caps work** (`plan_batches`: ceil rounding; canary clamped to the step;
@@ -970,3 +970,40 @@ host *was* fixed: `osquery.config_plugin=opamp`, exactly one `battery_stats` in
   `targetIds()` runs during render → `Cannot access 'selectedGroup' before
   initialization` on switching to Saved group. Hoisted; e2e regression asserts no
   `pageerror`.
+
+## Stage 10: the console is the UI, Streamlit is gone (2026-11-27)
+
+- **Deleted**: `ui/`, `.streamlit/`, `requirements-ui.txt`, `tests/test_ui_{pages,smoke,
+  session,golden}.py`, `tests/ui_golden.py`, `tests/test_sql_search_component.py`,
+  `tests/js/sql_search_harness.js`, the agent-detail golden fixture, and the `[ui]`
+  extra in `pyproject.toml`. `tests/test_effective_config.py` lost its
+  `ui.config_view` half (the server half is untouched).
+- **`Dockerfile.ui` is now two stages**: `node:22-alpine` runs `npm ci` + `npm run
+  build`, then `nginx:alpine` serves `web/dist` with `docker/ui.nginx.conf`. Nothing
+  from the Python tree is copied in — the console reaches the fleet over the API.
+- **`docker/ui.nginx.conf`** proxies `/api/` → `http://server:4320/` (the trailing
+  slash strips the prefix — same rule the vite dev proxy follows), serves the SPA
+  fallback with `try_files … /index.html`, marks `index.html` `no-store` and
+  `/assets/` immutable. Same-origin `/api` is what keeps the session cookie same-site
+  and the deployment CORS-free.
+- **Compose**: `ui` publishes `127.0.0.1:8501:80`, and deliberately has **no
+  `env_file:` and no volume** — it holds no configuration, no credentials, no
+  database. `tests/test_compose_ui.py` fences all of that plus the prefix strip.
+- **Dev**: with the stack down, `cd web && npm run dev` owns 8501 (the product port).
+  With the stack up, `ui` owns it and vite falls to 8502; the compose `console`
+  profile moved to 8502 so the two can never race for one port. A `web/` edit needs
+  `docker compose build ui` — a static bundle cannot hot-reload.
+- **`npm ci` was broken before this change** and would have broken the image build and
+  CI: `web/package.json` pinned `typescript ~7.0.2` while listing `openapi-typescript
+  ^7.13.0`, whose peer wants TS 5.x → `ERESOLVE`. The codegen already lives in
+  `tools/api-codegen/` with its own TS 5 pin, so `openapi-typescript` was removed from
+  `web/` and the lockfile refreshed.
+- **CI gained a `console` job** (npm ci → build → vitest → oxlint) and lost
+  `requirements-ui.txt`. The console is a released artifact now, so this is the gate
+  that makes a tag mean something.
+- **Three pre-existing red tests fixed** (they were red on `main` before this change,
+  from 36247bd's rollout gate): `test_cli.TestRolloutCommands` and two in
+  `test_groups` created targets that did not advertise `AcceptsRemoteConfig`, so the
+  new 409 `agent_does_not_accept` refused them. The fixtures now advertise it — the
+  gate is right, the fixtures were stale.
+- Version 0.5.0 (`server/version.py`, `pyproject.toml`, compose image pins).

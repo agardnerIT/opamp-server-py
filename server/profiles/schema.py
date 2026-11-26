@@ -86,7 +86,7 @@ METRIC_FORMATS = ("number", "decimal", "mebibytes")
 #: ("failed > 0 is an error") rather than inventing a comparison language.
 ALERT_WHENS = ("above_zero",)
 
-#: Severity of an `alert` panel, mapped to a Streamlit call by the renderer.
+#: Severity of an `alert` panel; the renderer maps it to a token colour.
 ALERT_SEVERITIES = ("info", "warning", "error")
 
 #: Placeholders a snippet template may use. `scheme` is the transport block name the

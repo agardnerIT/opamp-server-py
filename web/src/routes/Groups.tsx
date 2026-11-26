@@ -27,7 +27,7 @@ import { getAgentTypes } from "../api/endpoints";
 
 /**
  * Groups (new-ui stage 7): saved SQL selections, not member lists. The page is
- * deliberately read-mostly and follows `ui/pages/3_Groups.py`: search first,
+ * deliberately read-mostly (the flow the Streamlit Groups page had): search first,
  * name the query second. Membership is resolved on read server-side, so every
  * count here is from the last fetch, never cached truth.
  *
